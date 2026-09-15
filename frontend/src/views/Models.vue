@@ -1,0 +1,333 @@
+<template>
+  <div class="page">
+    <el-alert v-if="err" :title="err" type="error" show-icon :closable="false" class="mb" />
+
+    <div class="kpis">
+      <div v-for="c in cards" :key="c.k" class="kpi">
+        <div class="k">{{ c.k }}</div>
+        <div class="v">{{ c.v }}</div>
+        <div class="f"><span class="muted-2">{{ c.note }}</span></div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <!-- 路由链：只读展示（排序策略在后端，页面不写盘） -->
+      <!-- 路由别名 + 全部文本模型延迟（一键测速填充） -->
+      <div class="card">
+        <div class="card-h">
+          <b>{{ t('models.routeAliasTitle') }}</b>
+        </div>
+
+        <div v-for="r in routeRows" :key="r.name" class="route-block">
+          <div class="route-head">
+            <span class="code route-name">{{ r.name }}</span>
+            <span style="flex:1"></span>
+            <el-button size="small" :loading="latTesting" @click="runSpeedtest()">
+              {{ latTesting ? t('models.testingShort') : t('models.speedtest') }}
+            </el-button>
+          </div>
+        </div>
+        <div v-if="!routeRows.length" class="hint">{{ t('models.noRoute') }}</div>
+
+        <div class="lat-head">
+          <span class="muted-2 hint">{{ t('models.allTextModels') }}</span>
+          <span style="flex:1"></span>
+          <span class="muted-2 hint">{{ t('models.latency') }}</span>
+        </div>
+        <div v-for="m in textModelRows" :key="m.id" class="st-item">
+          <div class="st-row">
+            <Icon v-if="m.vision" name="eye" :size="12" class="vision" />
+            <span class="code">{{ m.id }}</span>
+            <span class="muted-2 st-prov">{{ m.provider }}</span>
+            <span style="flex:1"></span>
+            <span class="pill st-lat" :class="latCls(m.id)">
+              <span v-if="m.id === latCurrentId" class="st-spin" aria-hidden="true"></span>
+              <span v-else>{{ latText(m.id) }}</span>
+            </span>
+            <button class="st-one" :disabled="latTesting || !!latCurrentId"
+                    :title="t('models.testOne')" :aria-label="t('models.testOne')" @click="retestOne(m.id)">
+              <Icon name="bolt" :size="13" />
+            </button>
+          </div>
+          <div v-if="latErr(m.id)" class="st-err">
+            <Icon name="ban" :size="13" class="st-err-ico" />
+            <span class="st-err-txt">{{ latErr(m.id) }}</span>
+          </div>
+        </div>
+        <div v-if="!textModelRows.length" class="hint">{{ t('common.empty') }}</div>
+      </div>
+
+      <!-- 供应商：状态取 /health 的熔断器，Key 是否配置取同一份数据 -->
+      <div class="card">
+        <div class="card-h">
+          <b>{{ t('models.providerCard') }}</b>
+          <span class="sub">{{ t('models.providerCount2', { n: providerRows.length }) }}</span>
+        </div>
+        <div v-for="p in providerRows" :key="p.name" class="prov">
+          <div class="prov-top">
+            <b>{{ p.name }}</b>
+            <span class="pill" :class="p.cls">{{ p.text }}</span>
+          </div>
+          <div class="prov-meta">
+            <span class="muted-2">{{ p.models }} {{ t('models.model') }}</span>
+            <span class="pill" :class="p.keySet ? 'ok' : 'err'">
+              {{ p.keySet ? t('models.keyOk') : t('models.keyMissing') }}
+            </span>
+          </div>
+        </div>
+        <div v-if="!providerRows.length" class="hint">{{ t('common.empty') }}</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: var(--gap)">
+      <div class="card-h">
+        <b>{{ t('models.modelListTitle') }}</b>
+        <span class="sub">{{ t('models.capability') }}</span>
+        <div class="pager">
+          <span class="pill mute">{{ t('models.routeCount', { n: routeRows.length }) }}</span>
+        </div>
+      </div>
+      <el-table :data="modelRows" size="small" v-loading="loading">
+        <el-table-column :label="t('models.id')" min-width="200">
+          <template #default="{ row }"><span class="code">{{ row.id }}</span></template>
+        </el-table-column>
+        <el-table-column :label="t('models.type')" width="100">
+          <template #default="{ row }"><span class="pill" :class="typeCls(row.type)">{{ t(typeKey(row.type)) }}</span></template>
+        </el-table-column>
+        <el-table-column :label="t('models.provider')" min-width="150">
+          <template #default="{ row }">{{ row.provider_name || '—' }}</template>
+        </el-table-column>
+        <el-table-column :label="t('models.capability')" width="120">
+          <template #default="{ row }">
+            <span v-if="row.vision" class="pill ok cap">
+              <Icon name="eye" :size="12" />{{ t('models.visionTag') }}
+            </span>
+            <span v-else class="muted-2">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column :label="t('models.keySet')" width="120">
+          <template #default="{ row }">
+            <span class="pill" :class="row.key_set ? 'ok' : 'err'">
+              {{ row.key_set ? t('common.yes') : t('common.no') }}
+            </span>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
+import { api } from '../api'
+import Icon from '../components/Icon.vue'
+
+const router = useRouter()
+const { t } = useI18n()
+const items = ref<any[]>([])
+const health = ref<any>({})
+const loading = ref(false)
+const err = ref('')
+
+const typeKeyMap: Record<string, string> = { text: 'models.text', image: 'models.image', video: 'models.video', route: 'models.route' }
+const typeClsMap: Record<string, string> = { text: 'mute', image: 'warn', video: 'warn', route: 'ok' }
+function typeKey(ty: string) { return typeKeyMap[ty] || ty }
+function typeCls(ty: string) { return typeClsMap[ty] || 'mute' }
+
+const latTesting = ref(false)
+const latCurrentId = ref('')   // 当前正在测的模型 id：该行延迟位显示加载图标
+const latByModel = ref<Record<string, { ok: boolean; latency_ms: number | null; error: string }>>({})
+async function runSpeedtest() {
+  if (latTesting.value) return
+  // 逐个测速：按列表顺序，测一个立刻显示那一行、再测下一个；当前测的行显示加载图标。
+  //   串行天然不会把免费额度瞬间打满（并发时免费档供应商容易 429）。
+  const ids = textModelRows.value.map((m) => m.id)
+  latByModel.value = {}
+  latTesting.value = true
+  for (const id of ids) {
+    latCurrentId.value = id
+    let row: { ok: boolean; latency_ms: number | null; error: string }
+    try {
+      const j = await api('/v1/models/speedtest', { method: 'POST', body: JSON.stringify({ model: id }) })
+      const r: any[] = (j && j.results) || []
+      const hit = r[0]
+      row = hit
+        ? { ok: !!hit.ok, latency_ms: hit.latency_ms ?? null, error: hit.error || '' }
+        : { ok: false, latency_ms: null, error: t('models.speedtestFail') }
+    } catch (e: any) {
+      // 单个模型出错不中断整轮，标记失败后继续下一个
+      row = { ok: false, latency_ms: null, error: (e && e.message) || String(e) }
+    }
+    latByModel.value = { ...latByModel.value, [id]: row }   // 响应式替换 → 该行即时更新
+  }
+  latCurrentId.value = ''
+  latTesting.value = false
+  ElMessage.success(t('models.speedtestDone', { n: ids.length }))
+}
+// 单个模型重新测速（失败行旁的「重新测速」按钮）：只重测这一个，复用当前行加载图标
+async function retestOne(id: string) {
+  if (latTesting.value || latCurrentId.value) return   // 整轮测速中 / 已有单测在跑 → 忽略，避免打架
+  latCurrentId.value = id
+  try {
+    const j = await api('/v1/models/speedtest', { method: 'POST', body: JSON.stringify({ model: id }) })
+    const r: any[] = (j && j.results) || []
+    const hit = r[0]
+    const row = hit
+      ? { ok: !!hit.ok, latency_ms: hit.latency_ms ?? null, error: hit.error || '' }
+      : { ok: false, latency_ms: null, error: t('models.speedtestFail') }
+    latByModel.value = { ...latByModel.value, [id]: row }
+  } catch (e: any) {
+    latByModel.value = { ...latByModel.value, [id]: { ok: false, latency_ms: null, error: (e && e.message) || String(e) } }
+  } finally {
+    latCurrentId.value = ''
+  }
+}
+function latText(id: string): string {
+  const row = latByModel.value[id]
+  if (row) {
+    if (row.ok) return row.latency_ms != null ? row.latency_ms + ' ms' : t('models.failed')
+    return t('models.failed')   // 完整错误在下方 st-err 整行展示，这里只留短标记
+  }
+  return '—'   // 未轮到 / 空闲（当前正在测的行由模板的加载图标分支显示，不走这里）
+}
+function latErr(id: string): string {
+  const row = latByModel.value[id]
+  return row && !row.ok ? (row.error || '') : ''
+}
+function latCls(id: string): string {
+  const row = latByModel.value[id]
+  return row ? (row.ok ? 'ok' : 'err') : 'mute'
+}
+
+const routes = computed(() => items.value.filter((x) => x.type === 'route'))
+const models = computed(() => items.value.filter((x) => x.type !== 'route'))
+
+const providerOf = computed(() => {
+  const m: Record<string, string> = {}
+  for (const x of models.value) m[x.id] = x.provider_name || '—'
+  return m
+})
+const visionOf = computed(() => {
+  const m: Record<string, boolean> = {}
+  for (const x of models.value) m[x.id] = !!x.vision
+  return m
+})
+
+const routeRows = computed(() =>
+  routes.value.map((r) => {
+    const chain: string[] = r.models || []
+    return {
+      name: r.id,
+      models: chain.map((id) => ({ id, provider: providerOf.value[id] || '—', vision: visionOf.value[id] })),
+      providerCount: new Set(chain.map((id) => providerOf.value[id] || '—')).size,
+    }
+  }),
+)
+const textModelRows = computed(() =>
+  models.value.filter((x) => x.type === 'text').map((m) => ({
+    id: m.id,
+    provider: m.provider_name || '—',
+    vision: !!m.vision,
+  })),
+)
+
+const keySet = computed(() => {
+  const ks: Record<string, boolean> = {}
+  for (const p of Object.values(health.value.providers || {}) as any) ks[p.name] = !!p.api_key_set
+  return ks
+})
+const modelRows = computed(() => models.value.map((m) => ({ ...m, key_set: keySet.value[m.provider_name] })))
+
+const providerRows = computed(() => {
+  const p = health.value.providers || {}
+  return Object.keys(p).map((k) => {
+    const c = String(p[k].circuit || '').toUpperCase()
+    return {
+      name: p[k].name,
+      models: p[k].models,
+      keySet: !!p[k].api_key_set,
+      cls: c === 'CLOSED' ? 'ok' : c === 'HALF_OPEN' ? 'warn' : c === 'OPEN' ? 'err' : 'mute',
+      text: t(`dashboard.circ_${String(p[k].circuit || '').toLowerCase() || ''}`),
+    }
+  })
+})
+
+const cards = computed(() => [
+  { k: t('models.model'), v: models.value.length, note: t('models.providerCount2', { n: providerRows.value.length }) },
+  { k: t('models.textModels'), v: models.value.filter((m) => m.type === 'text').length, note: t('models.visionTag') + ' · ' + models.value.filter((m) => m.vision).length },
+  { k: t('models.imageModels'), v: models.value.filter((m) => m.type === 'image').length, note: t('images.title') },
+  { k: t('models.routes'), v: routes.value.length, note: t('models.routeAliasTitle') },
+])
+
+onMounted(async () => {
+  loading.value = true
+  try {
+    const j = await api('/v1/models')
+    items.value = j.data || []
+    try { health.value = await api('/health') } catch { /* 可选 */ }
+  } catch (e: any) {
+    if (e && e.status === 401) { router.push('/login'); return }
+    err.value = t('models.loadErr') + ': ' + ((e && e.message) || String(e))
+  } finally {
+    loading.value = false
+  }
+})
+</script>
+
+<style scoped>
+.route-block { padding: 10px 0; border-bottom: 1px solid var(--line-2); }
+.route-block:last-child { border-bottom: 0; }
+.route-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.route-name { font-weight: 700; color: var(--text); font-size: 13px; }
+.chain { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.chain-item { display: inline-flex; align-items: center; gap: 6px; }
+.arrow { color: var(--muted-2); }
+.vision { color: var(--primary); }
+.prov { padding: 10px 0; border-bottom: 1px solid var(--line-2); }
+.prov:last-child { border-bottom: 0; }
+.prov-top { display: flex; align-items: center; gap: 8px; }
+.prov-top b { font-size: 13px; }
+.prov-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 11.5px; }
+.cap { display: inline-flex; align-items: center; gap: 4px; }
+.st { margin-top: 8px; border-top: 1px dashed var(--line-2); padding-top: 6px; }
+.st-item { padding: 4px 0; }
+.st-item + .st-item { border-top: 1px dashed var(--line); }
+.st-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.st-err {
+  display: flex; align-items: flex-start; gap: 6px;
+  margin: 4px 2px 2px; padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--err-soft);
+  color: var(--err);
+  font-size: 11.5px; line-height: 1.55;
+  overflow-wrap: anywhere;   /* 长错误（JSON / 无空格串）也能自动换行不溢出 */
+  word-break: break-word;
+}
+.st-err-ico { flex: none; margin-top: 1px; color: var(--err); }
+.st-err-txt { flex: 1; min-width: 0; }
+/* 每个模型行右侧的「单独测速」图标按钮 */
+.st-one {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; margin-left: 2px;
+  border: 1px solid var(--line); background: transparent; color: var(--muted);
+  border-radius: 8px; cursor: pointer; transition: color .15s, border-color .15s, background .15s;
+}
+.st-one:hover:not(:disabled) { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+.st-one:disabled { opacity: 0.45; cursor: not-allowed; }
+/* 当前正在测的模型行：延迟位显示一个旋转加载图标 */
+.st-spin {
+  display: inline-block; width: 12px; height: 12px; vertical-align: middle;
+  border: 2px solid var(--line); border-top-color: var(--primary);
+  border-radius: 50%; animation: st-spin 0.7s linear infinite;
+}
+@keyframes st-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .st-spin { animation-duration: 1.6s; } }
+.st-title { font-weight: 600; color: var(--text); }
+.st-prov { flex: 1; }
+.st-lat { min-width: 88px; text-align: center; }
+.st-loading { font-style: italic; }
+.lat-head { display: flex; align-items: center; gap: 8px; padding: 2px 0 6px; }
+</style>

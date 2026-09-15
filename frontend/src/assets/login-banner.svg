@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 420" width="1600" height="420" preserveAspectRatio="xMidYMid slice">
+  <!--
+    登录页背景图（图形层）：科技抽象风。只画白色的低透明度形状，底色由 CSS 用主题 token 铺渐变
+    （主题主色 → 页面底色，外加主题图表色的光晕），所以 A/B/C 三套主题自动对色，本文件不用改。
+    不引任何外链资源。
+
+    注意：本文件里不能出现连续两个连字符（注释里写 CSS 变量名时最容易犯）—— XML 注释
+    不允许这个序列，写了整个 SVG 会直接解析失败、图层静默不画（踩过一次：改完看起来「什么都没变」）。
+
+    构图要同时过两种裁切，所以「哪里能画」要按两种场景算：
+      · 桌面端：图铺在顶部通栏，登录卡水平居中、压在图中部 —— 卡片上沿大约对应图里 y≈300~360，
+        也就是「y < 300 全宽可见，y > 330 只剩两侧窄条」；x 150~1450 的中部下方会被卡片盖住。
+      · 窄屏：色块只有 ~390×270，cover 之后左右各裁掉一大截 —— 只剩下图里 x 494~1105 的中间一列，
+        但纵向 0~420 全可见。
+    两条取交集：主要图形放在 **y 40~300 的中间带**，两侧（x<150 / x>1450）只用低密度的散射节点点缀。
+
+    透明度口径：这套形状是叠在「主色底 + 压深层」之上的，实测太淡会整张图只剩渐变、
+    完全看不出科技感（第一版就是这样），所以形状的不透明度按「肉眼能在深底和浅底上都看清」来定。
+  -->
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity=".26"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="core" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity=".34"/>
+      <stop offset="65%" stop-color="#FFFFFF" stop-opacity=".1"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="beam" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity=".22"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="grid" width="46" height="46" patternUnits="userSpaceOnUse">
+      <path d="M46 0 H0 V46" fill="none" stroke="#FFFFFF" stroke-width="1" opacity=".8"/>
+    </pattern>
+    <pattern id="dots" width="46" height="46" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.6" fill="#FFFFFF" opacity=".5"/>
+    </pattern>
+  </defs>
+
+  <!-- ① 底纹：方格网 + 交错点阵（均匀铺满，任何裁切下都是一层「技术感」肌理） -->
+  <rect width="1600" height="420" fill="url(#grid)" opacity=".22"/>
+  <rect width="1600" height="420" fill="url(#dots)" opacity=".7"/>
+
+  <!-- ② 光带：两道自左上斜下的柔光，给画面一点方向感和纵深 -->
+  <g>
+    <polygon points="300,0 442,0 148,420 6,420" fill="url(#beam)"/>
+    <polygon points="1078,0 1196,0 918,420 800,420" fill="url(#beam)"/>
+  </g>
+
+  <!-- ③ 柔光团：把纯色底压出体积感 -->
+  <circle cx="196" cy="40" r="300" fill="url(#glow)"/>
+  <circle cx="1404" cy="96" r="280" fill="url(#glow)"/>
+
+  <!-- ④ 中心「核心」母题：同心环 + 六边形 + 六向辐射。放图中部安全带，
+       桌面端在卡片上沿之上、窄屏正好落在色块正中，两种裁切都有主视觉。 -->
+  <g transform="translate(800 232)">
+    <circle r="150" fill="url(#core)"/>
+    <g fill="none" stroke="#FFFFFF">
+      <circle r="124" opacity=".18" stroke-width="1"/>
+      <circle r="86" opacity=".26" stroke-width="1" stroke-dasharray="7 9"/>
+      <circle r="48" opacity=".36" stroke-width="1.3"/>
+      <circle r="16" opacity=".44" stroke-width="1.5"/>
+      <polygon points="0,-25 21.7,-12.5 21.7,12.5 0,25 -21.7,12.5 -21.7,-12.5" opacity=".42" stroke-width="1.3"/>
+    </g>
+    <circle r="6" fill="#FFFFFF" opacity=".75"/>
+    <!-- 六向辐射短线 + 端点 -->
+    <g stroke="#FFFFFF" stroke-width="1.3" opacity=".4">
+      <path d="M0,-48 V-66"/><path d="M41.6,24 L56.5,32.6"/><path d="M-41.6,24 L-56.5,32.6"/>
+      <path d="M0,48 V66"/><path d="M41.6,-24 L56.5,-32.6"/><path d="M-41.6,-24 L-56.5,-32.6"/>
+    </g>
+    <g fill="#FFFFFF" opacity=".6">
+      <circle cx="0" cy="-70" r="3.2"/><circle cx="60.6" cy="35" r="3.2"/><circle cx="-60.6" cy="35" r="3.2"/>
+      <circle cx="0" cy="70" r="3.2"/><circle cx="60.6" cy="-35" r="3.2"/><circle cx="-60.6" cy="-35" r="3.2"/>
+    </g>
+  </g>
+
+  <!-- ⑤ 星座网络：节点 + 连线，铺在 y 40~200 的横带里（桌面端在卡片之上，窄屏在色块上部） -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="1.3" opacity=".4">
+    <path d="M112 118 L232 58 L372 158 L512 92 L648 42"/>
+    <path d="M512 92 L648 42 L800 74 L958 44 L1092 126"/>
+    <path d="M1092 126 L1228 62 L1382 146 L1512 84"/>
+    <path d="M112 118 L64 286 M372 158 L232 58 M1228 62 L1400 296 M1382 146 L1540 226"/>
+  </g>
+  <g fill="#FFFFFF">
+    <circle cx="112" cy="118" r="4.4" opacity=".72"/>
+    <circle cx="232" cy="58" r="3.6" opacity=".62"/>
+    <circle cx="372" cy="158" r="4.4" opacity=".72"/>
+    <circle cx="512" cy="92" r="3.6" opacity=".62"/>
+    <circle cx="648" cy="42" r="4.4" opacity=".72"/>
+    <circle cx="958" cy="44" r="3.6" opacity=".62"/>
+    <circle cx="1092" cy="126" r="4.4" opacity=".72"/>
+    <circle cx="1228" cy="62" r="3.6" opacity=".62"/>
+    <circle cx="1382" cy="146" r="4.4" opacity=".72"/>
+    <circle cx="1512" cy="84" r="3.6" opacity=".62"/>
+    <circle cx="64" cy="286" r="3.6" opacity=".5"/>
+    <circle cx="1400" cy="296" r="3.6" opacity=".5"/>
+    <circle cx="1540" cy="226" r="3.2" opacity=".46"/>
+  </g>
+  <!-- 三个「发光节点」：给网络一点层次（外圈淡、内点实） -->
+  <g fill="none" stroke="#FFFFFF" opacity=".32">
+    <circle cx="232" cy="58" r="15"/><circle cx="1092" cy="126" r="15"/><circle cx="1382" cy="146" r="13"/>
+  </g>
+
+  <!-- ⑥ 右上角轨道环（多半在画外，只露弧线，收边用） -->
+  <g fill="none" stroke="#FFFFFF">
+    <circle cx="1330" cy="24" r="264" opacity=".14" stroke-width="1"/>
+    <circle cx="1330" cy="24" r="190" opacity=".2" stroke-width="1" stroke-dasharray="4 10"/>
+    <circle cx="1330" cy="24" r="122" opacity=".28" stroke-width="1.3"/>
+  </g>
+  <g fill="#FFFFFF" opacity=".55">
+    <circle cx="1330" cy="-98" r="4"/><circle cx="1152" cy="112" r="3.2"/><circle cx="1450" cy="140" r="3.2"/>
+  </g>
+
+  <!-- ⑦ 左下角弧线 + 十字标记：收另一侧的边，别让画面只有上方有东西 -->
+  <g fill="none" stroke="#FFFFFF">
+    <circle cx="28" cy="452" r="238" opacity=".16" stroke-width="1"/>
+    <circle cx="28" cy="452" r="176" opacity=".22" stroke-width="1" stroke-dasharray="6 9"/>
+  </g>
+  <g stroke="#FFFFFF" stroke-width="1.5" opacity=".42">
+    <path d="M292,318 h18 M301,309 v18"/>
+    <path d="M1332,330 h16 M1340,322 v16"/>
+    <path d="M668,352 h16 M676,344 v16"/>
+  </g>
+</svg>

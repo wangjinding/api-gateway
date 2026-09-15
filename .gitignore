@@ -1,0 +1,36 @@
+# ── 缓存 / 构建产物 ──
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+*.log
+
+# ── 本地敏感文件 ──
+.env
+.env.*
+!.env.example
+# 账号体系数据：密码哈希 + API Key 哈希，属凭证材料，不入库
+data/users.json
+# 前端历史（提示词/回答正文属隐私）
+data/history.json
+# 意见反馈（正文 + 图片，属隐私）
+data/feedback.json
+data/feedback_media/
+# 单测运行时会往项目根写这几个临时数据文件（test_gateway.py 用），别入库
+.test_users.json
+.test_history.json
+.test_feedback.json
+.test_feedback_media/
+
+# 说明：data/gateway.yaml 不含明文 Key —— 三家供应商密钥统一在 .env（已被上面忽略），
+# 由 yaml 各供应商的 token_env 引用。只要 .env 不提交，密钥就不会进版本库。
+
+# ── 依赖与构建产物（不入库，均可重新生成：npm ci && npm run build）──
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+*.egg-info/
+.DS_Store

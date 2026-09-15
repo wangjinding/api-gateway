@@ -1,0 +1,148 @@
+# AI 网关配置文件（data/ 目录）
+# 供应商：Agnes / b.ai / 火山方舟 Coding
+# 密钥统一走 token_env 指向的环境变量（本机见 .env），不再在 yaml 存明文
+# 端口默认 8808
+#
+# 说明：本文件是项目的**唯一配置文件**（run.py 默认读取；GATEWAY_CONFIG 可覆盖）。
+
+providers:
+  agnes:
+    name: "Agnes AI"
+    base_url: "https://api.agnes-ai.cn/v1"
+    auth:
+      token_env: "AGNES_API_KEY"
+    extra_headers: {}
+    # 图像 / 视频端点（Agnes 非标准，走自有路径）
+    media:
+      image_endpoint: "/images/generations"
+      image_default_size: "1K"           # 图像默认档位（Agnes: 1K/2K/3K/4K）
+      video_create_endpoint: "/videos"
+      video_poll_base: "https://api.agnes-ai.cn"
+      video_poll_path: "/agnesapi"
+      video_model_name: "agnes-video-2.5-flash"
+    models:
+      - id: "agnes-3.0-flash"
+        display_name: "Agnes 3.0 Flash"
+        type: "text"
+        # 第十三轮: Agnes 3.0 Flash 文档「输入模态：文本、图像 URL」→ 支持视觉（对话带图）。
+        #   实测 data:image/png;base64,... 也能识别。带图请求走路由别名时会被排到链首。
+        vision: true
+      - id: "agnes-image-2.5-flash"
+        display_name: "Agnes Image 2.5 Flash"
+        type: "image"
+      - id: "agnes-video-2.5-flash"
+        display_name: "Agnes Video 2.5 Flash"
+        type: "video"
+
+  b_ai:
+    name: "b.ai"
+    base_url: "https://api.b.ai/v1"
+    auth:
+      token_env: "B_AI_API_KEY"
+    extra_headers: {}
+    # b.ai 仅 OpenAI 兼容文本；图像/视频留空 = 不支持
+    media: {}
+    models:
+      - id: "qwen3.8-flash"
+        display_name: "b.ai qwen3.8-flash"
+        type: "text"
+        vision: true   # 实测支持视觉（2026-09-15 红图探针→答"红色"）
+      - id: "mimo-v2.5"
+        display_name: "b.ai mimo-v2.5"
+        type: "text"
+      - id: "hy3"
+        display_name: "b.ai hy3"
+        type: "text"
+
+  volc_engine:
+    name: "火山方舟 Coding Plan"
+    base_url: "https://ark.cn-beijing.volces.com/api/coding/v3"
+    auth:
+      token_env: "VOLC_API_KEY"
+    extra_headers: {}
+    media: {}
+    models:
+      - id: "ark-code-latest"
+        display_name: "火山方舟 ark-code-latest"
+        type: "text"
+
+server:
+  host: "127.0.0.1"
+  port: 8808
+  timeout: 120
+  retry: 3               # 直接用模型 id（不走路由）时重试 3 次（含首次）；路由别名用各自 route.retry（默认1）
+  # ── 运维开关 ──
+  health_auth: false      # /health/* 是否也需鉴权（默认否，留给探活）
+  hot_reload: true        # 监听 gateway.yaml mtime 自动重载（改配置免重启）
+  hot_reload_interval: 15 # 重载检查间隔（秒）
+  metrics_enabled: true   # 记录调用指标（/metrics）
+  rate_limit_rps: null    # 全局单 user QPS 上限（null=不限；供应商级用 provider.rate_limit_rps）
+  max_body_size: 2000000  # 请求体字节上限（防 DDoS，约 2MB）
+  cors_origins: ["*"]     # CORS 允许来源（生产收紧为具体域名）
+  graceful_shutdown: 30   # 优雅关闭等待在途请求的秒数
+  # ── 防滥用 / 安全 ──
+  batch_max_concurrency: 16   # /batch 并发上限（客户端 max_concurrency 会被钳到此值）
+  batch_max_items: 64         # /batch 单次最大条目数（超出返回 400）
+  webhook_allow_private: false        # 视频 callback_url 是否允许指向内网/回环（SSRF 防护，默认禁）
+  docs_enabled: false                 # FastAPI 文档（/docs、/openapi.json）是否开放（安全默认关）
+  auth_fail_limit_per_min: 20         # 同一来源 IP 每分钟鉴权失败上限，超过 → 429（防暴力枚举）
+
+# ── 供应商熔断（Circuit Breaker） ──────────────────────
+# 某供应商连续/滑动窗口失败达到 failure_threshold 就熔断 cooldown 秒，
+# 期间直接跳过（不再白等），让 fallback 快速切到健康供应商。
+circuit:
+  enabled: true
+  failure_threshold: 3   # 连续失败 3 次即熔断
+  cooldown: 30           # 熔断持续 30 秒
+  window: 10            # 滑动窗口
+
+# ── 可观测性 ───────────────────────────────────────────
+observability:
+  log_level: "INFO"
+  log_json: false          # true = 结构化 JSON 行日志（接 ELK/CloudWatch）
+  access_log_maxlen: 500  # 访问日志环形缓冲长度
+
+# ── 定价（用于 /v1 响应里估算成本，人民币/百万 token） ─
+# 不配则该模型 estimated_cost_cny 不返回（不影响调用）。
+pricing:
+  per_model:
+    agnes-3.0-flash:      { input: 0.35, output: 1.00 }
+    ark-code-latest:      { input: 0.50, output: 2.00 }
+    qwen3.8-flash:        { input: 0.30, output: 0.60 }
+    mimo-v2.5:           { input: 0.30, output: 0.60 }
+    hy3:                 { input: 0.30, output: 0.60 }
+
+# ── 媒体下载代理白名单（第十七轮）────────────────────────
+# 生成的图片/视频挂在第三方 CDN 上且不带 CORS 头，浏览器里既 fetch 不到 blob、
+# 跨域 <a download> 也不生效（只会打开新标签页）。所以由网关代拉一次并加上
+# Content-Disposition: attachment，前端「下载」按钮才真的能存文件。
+# 安全：这是网关唯一一个服务端主动出网的接口 —— 只有这里列出的域名（含其子域）
+#   允许被代下载，且解析出来的 IP 必须是公网地址；列表为空 = 该功能整体关闭。
+#   换了供应商/换了 CDN 域名时，往这里加一条即可（如 volc 的 tos-*.volces.com）。
+download:
+  allowed_hosts:
+    - "cos-platform-outputs.agnes-ai.cn"   # Agnes 图像/视频产物 CDN
+  max_bytes: 67108864                      # 单文件上限 64MB
+
+# ── 网关入口鉴权 ─────────────────────────────────────
+# 账号与 API Key 全部由页面管理，存在 data/users.json（见 app/users.py）：
+#   管理员在「用户管理」页建账号，各账号在「设置 → 我的 API Key」自助铸 Key。
+# 本文件里**不再有任何用户/密钥**，只有一个运维开关：
+#   auth.session_ttl_minutes —— 网页登录签发的会话有效期（分钟，默认 1440 = 24h）
+# 第十八轮: 删掉了这里残留的旧 `auth.enabled/users/key` 死配置（含一把明文 wjd- Key）。
+#   那些键早已不再被 config.py 读取（只读 session_ttl_minutes），
+#   那把 Key 在 users.json 里也不存在 → 认不了任何入口，但会让"yaml 里没有明文凭证"的说法失真。
+auth:
+  session_ttl_minutes: 1440
+
+# ── 路由别名 + 按优先级 fallback ──────────────────────
+# model 填别名（如 wjd），按数组顺序逐个尝试：
+#   第 1 个失败/超时/重试耗尽 → 第 2 个 … 全失败才 502。
+# 每个路由可设 timeout（单模型超时秒）、retry（切下一个前该模型重试次数）。
+# 优先级从左到右（第一个最高）。已把全部 5 个文本模型配上。
+routes:
+  wjd:
+    timeout: 60         # 单模型 60s 没出结果就切下一个（避免 6×120s 挂死）
+    retry: 1            # 每个模型只试 1 次，失败立即切下一个
+    models:
+      - "ark-code-latest"     # 1) 火山方舟（最高优先级）
