@@ -193,3 +193,12 @@
 - **`tests/test_gateway.py`**：`test_load_config_routes` 断言 `wjd.models` 数量由历史遗留的 `== 6` 修正为实际 `== 4`（该用例此前一直 FAIL，本次顺带修好）。
 
 **验证**：`yaml.safe_load` 后 b_ai models=[qwen3.8-flash,hy3]、wjd 链 4 项、pricing 无 mimo-v2.5；源码/配置/README/测试 grep `mimo-v2.5` 清零（CHANGELOG 历史保留）；全量单测 **154 passed / 1 failed**（routes 用例转绿，仅剩 feedback 无关遗留）。**纯配置改动，hot_reload 自动生效、未重启**——线上 `/v1/models` 由 8 → 7、`mimo-v2.5` 已消失。
+
+---
+
+## 2026-09-15 · 初始化 Git 仓库并推送到 CNB（cnb.cool）
+
+- 项目此前**不是 git 仓库**：`git init` 建库、设提交身份、首次提交（**91 个源码文件**）。
+- **`.gitignore` 补充**忽略 `node_modules/`、`frontend/node_modules/`、`frontend/dist/`、`dist/`、`*.egg-info/`、`.DS_Store` —— 否则 `git add -A` 会把 **15342 个 node_modules 文件**塞进仓库。
+- **推送前安全审计**：确认 `.env`、`data/users.json`、`data/history.json`、`data/feedback.json`、`data/feedback_media/` 全部被忽略、无任何密钥/隐私入库（仅无密钥的 `.env.example` 模板随库）。
+- **远程**：CNB `https://cnb.cool/Jidekin/api-gateway`，分支 `master`，首推成功（远端 `HEAD=6cc65ff` 与本地一致）。`origin` 配为不含 token 的干净地址，**令牌不写入 `.git/config`**；后续推送用 `git push https://cnb:<token>@cnb.cool/Jidekin/api-gateway.git master`。
