@@ -30,6 +30,7 @@
 - 单测：新增/修正 bigmodel 媒体契约断言、视频轮询必经 `?model=`（现两家视频供应商）、配置往返含新 media 键 → **155 passed / 0 failed**；前端 `npm run build` 过（typecheck + i18n 对称），新入口 `index-CxdHy_Sw.js`。
 - 真机隔离（uvicorn:8899 临时 users/history，连真实智谱）：`/v1/models` 列出 8 个智谱模型；图像 → 200 `data[].url`；视频创建 → `video_id`+`task_status:PROCESSING`；轮询 → `status:processing`；非法参数（`mode=keyframe`）→ 400 干净拒绝。
 - 上线：`supervisorctl restart api-gateway:api-gateway_00`（代码改动需重启），前端 dist 已 build 覆盖。
+- **补「下载白名单」**：上线后老板实测智谱图/视频下载报「不在白名单：maas-watermark-prod-new.cn-wlcb.ufileos.com」。已确认智谱图+视频产物**同一 CDN 域名**（实测视频 `SUCCESS` 结果 url 同域），在 `download.allowed_hosts` 补 `maas-watermark-prod-new.cn-wlcb.ufileos.com`（精确项 + 子域匹配，不泛放整个 `ufileos.com`；`evilufileos.com`、后缀撞车域名仍拒绝）。纯配置改动，`hot_reload` ≤15s 自动生效免重启。已用隔离服务器实测：智谱图经 `/v1/media/download` 拉回 200 + 有效 JPEG 97KB。
 
 ---
 

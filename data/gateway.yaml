@@ -170,6 +170,7 @@ pricing:
 download:
   allowed_hosts:
     - "cos-platform-outputs.agnes-ai.cn"   # Agnes 图像/视频产物 CDN
+    - "maas-watermark-prod-new.cn-wlcb.ufileos.com"   # 智谱 CogView 图像 / CogVideoX 视频产物 CDN（UCloud）
   max_bytes: 67108864                      # 单文件上限 64MB
 
 # ── 网关入口鉴权 ─────────────────────────────────────
