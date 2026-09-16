@@ -1,6 +1,6 @@
 # API Gateway
 
-统一多供应商 LLM 接入网关，纯后端 FastAPI，配置驱动。支持 **Agnes AI**、**b.ai**、**火山方舟 Coding Plan** 三个供应商，全部走 OpenAI 兼容协议。v2.4 已集成熔断、限流、图像/视频、指标、成本估算、热加载、测试等完整能力。
+统一多供应商 LLM 接入网关，纯后端 FastAPI，配置驱动。支持 **Agnes AI**、**b.ai**、**火山方舟 Coding Plan**、**智谱 GLM** 四个供应商，全部走 OpenAI 兼容协议。v2.4 已集成熔断、限流、图像/视频、指标、成本估算、热加载、测试等完整能力。
 
 ## 特性
 
@@ -32,7 +32,7 @@ api-gateway/
 │   └── adapters/
 │       ├── __init__.py     # 适配器工厂
 │       ├── base.py         # 抽象基类（chat / chat_stream / image / video）
-│       └── openai_compat.py # OpenAI 兼容适配器（三家通用 + 媒体端点）
+│       └── openai_compat.py # OpenAI 兼容适配器（四家通用 + 媒体端点）
 ├── tests/test_gateway.py   # 单元测试（mock 供应商，不依赖真实网络）
 ├── Makefile                # 快捷命令（install/run/test/lint/clean）
 ├── run.py                  # 启动入口
@@ -46,6 +46,7 @@ api-gateway/
 | Agnes AI | `https://api.agnes-ai.cn/v1` | Bearer | `agnes-3.0-flash`(text)、`agnes-image-2.5-flash`(image)、`agnes-video-2.5-flash`(video) |
 | b.ai | `https://api.b.ai/v1` | Bearer | `qwen3.8-flash`、`hy3`（text） |
 | 火山方舟 Coding | `https://ark.cn-beijing.volces.com/api/coding/v3` | Bearer | `ark-code-latest`（text） |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | Bearer | `GLM-4.7-Flash`、`GLM-4-Flash-250414`、`GLM-Z1-Flash`、`GLM-4.6V-Flash`、`GLM-4V-Flash`、`GLM-4.1V-Thinking-Flash`（text；其中 `GLM-4.6V-Flash`/`GLM-4V-Flash`/`GLM-4.1V-Thinking-Flash` 支持图像输入） |
 
 > Agnes 的图像/视频走自有端点，通过供应商配置里的 `media` 段指定。
 

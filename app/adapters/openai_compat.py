@@ -1,6 +1,6 @@
 """OpenAI 兼容协议适配器。
 
-Agnes / b.ai / 火山方舟 coding plan 三家均使用 OpenAI 兼容 API
+Agnes / b.ai / 火山方舟 / 智谱 GLM 四家均使用 OpenAI 兼容 API
 （POST {base_url}/chat/completions），本适配器统一处理。
 
 图像/视频端点可通过 media 配置覆盖：

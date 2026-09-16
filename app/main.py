@@ -1197,7 +1197,7 @@ async def models_speedtest(request: Request, _auth=Depends(require_auth)):
                 await adapter.chat(model=m["id"], messages=[{"role": "user", "content": "hi"}],
                                    temperature=0, max_tokens=16, stop=None)
                 # max_tokens 固定 >2：b.ai(qwen3.8-flash/hy3) 上游对 max_tokens<=2 回 400
-                #   ("max_tokens must be greater than 2")，故探针用 16 而不是 1，保证三家供应商都认。
+                #   ("max_tokens must be greater than 2")，故探针用 16 而不是 1，保证各供应商上游都认。
                 ok = True
                 break
             except Exception as e:

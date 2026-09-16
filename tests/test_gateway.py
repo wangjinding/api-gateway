@@ -89,8 +89,19 @@ def _login_admin_session(client=None):
 # ── 配置加载 ──
 def test_load_config_providers():
     cfg = load_config(CONFIG)
-    assert set(cfg.providers.keys()) == {"agnes", "b_ai", "volc_engine"}
+    assert set(cfg.providers.keys()) == {"agnes", "b_ai", "volc_engine", "bigmodel"}
     assert cfg.providers["agnes"].models[0].id == "agnes-3.0-flash"
+    # 智谱：base_url + token_env + 6 个模型 + V 型号视觉标记
+    assert cfg.providers["bigmodel"].base_url == "https://open.bigmodel.cn/api/paas/v4"
+    assert cfg.providers["bigmodel"].auth.token_env == "ZHIPU_API_KEY"
+    bm_ids = [m.id for m in cfg.providers["bigmodel"].models]
+    assert bm_ids == ["GLM-4.7-Flash", "GLM-4-Flash-250414", "GLM-Z1-Flash",
+                      "GLM-4.6V-Flash", "GLM-4V-Flash", "GLM-4.1V-Thinking-Flash"]
+    for m in cfg.providers["bigmodel"].models:
+        if m.id in ("GLM-4.6V-Flash", "GLM-4V-Flash", "GLM-4.1V-Thinking-Flash"):
+            assert m.vision is True
+        else:
+            assert m.vision is False
 
 
 def test_load_config_routes():

@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-09-16 · 新增智谱 GLM（open.bigmodel.cn）供应商
+
+**一句话**：接入智谱开放平台作为新的 OpenAI 兼容供应商，收录 6 个 Flash 模型（3 文本 + 3 视觉），密钥走 `data/.env` 的 `ZHIPU_API_KEY`，真图实测确认 3 个 V 型号支持图像输入。
+
+### 供应商接入
+- `data/gateway.yaml` 新增 `providers.bigmodel`：
+  - `base_url: https://open.bigmodel.cn/api/paas/v4`（适配器自动拼 `/chat/completions`）
+  - `auth.token_env: ZHIPU_API_KEY`（明文 key 不进 yaml，统一放 `data/.env`，chmod 600）
+  - 媒体端点 `media: {}`（智谱无图像/视频生成端点）
+  - 模型 6 个：`GLM-4.7-Flash`、`GLM-4-Flash-250414`、`GLM-Z1-Flash`、`GLM-4.6V-Flash`、`GLM-4V-Flash`、`GLM-4.1V-Thinking-Flash`，其中 3 个 V 型号标 `vision: true`
+- `data/.env` 追加 `ZHIPU_API_KEY=<智谱 Key>`（49 位，未入版本库）。
+- 前端 `Settings.vue` 的「对话默认模型」静态清单 `TEXT_MODELS` 追加这 6 个模型；Models 页 / `/v1/models` 本身是动态的，重启后自动出现。
+
+### 排查与实测（重点）
+- 首把 Key `cdfb6b5e...` 直接裸调 6 模型一度全 **401「令牌已过期」** → 误判 Key 无效。后用官方示例格式 + `glm-5.3` 重打是 **429「余额不足」**（说明 Key 认证是通的）→ 回到 6 模型官方格式再打：5 个 200，`GLM-4.7-Flash` 偶发 **429「访问量过大」(1305，瞬时过载，模型存在)**。**结论：Key 有效，之前 401 是上游瞬时过载造成的误报。**
+- 视觉探针（1×1 红图）被智谱拒 **400 code 1210「图片输入格式/解析错误」** —— 是**图太小**的问题，非格式问题。换 200×200 标准红图后 data-URI 与外链 URL 均识别：`GLM-4V-Flash`、`GLM-4.1V-Thinking-Flash` 认「红色」✅；`GLM-4.6V-Flash` 全程遇上游过载(1305)未取到视觉结果，型号带 V 故仍标 `vision: true`（如后续实测不一致可再改）。
+- 端到端：用生产同一适配器 `OpenAICompatAdapter`（真实 `base_url` + `Bearer` 解析 token）直连智谱——文本 `GLM-4-Flash-250414` ✅、推理 `GLM-Z1-Flash` ✅（返回含 thinking）、视觉 `GLM-4V-Flash`（data-URI 图）✅ 全部 HTTP 200。
+
+### 上线
+- 配置层 `hot_reload` 会自动热更 gateway.yaml；但 **ZHIPU_API_KEY 是新增环境变量，需重启进程才加载** → 待老板批准后重启，`/v1/models` 由 6 → 12 个文本模型、Models 页自动多出智谱 6 个。
+- 单测：修正 `test_load_config_providers`（供应商集合加入 `bigmodel` + 智谱 6 模型/V 标记断言），**154 passed / 1 failed**（仅剩 feedback 无关遗留）。
+
+---
+
 ## 2026-09-15 · 新增 OpenCode Zen（免费档）供应商
 
 **一句话**：把 OpenCode Zen 作为第 4 个供应商接入，只收录文档定价页列出的**免费模型**。打通后发现免费档比较刁钻：既被 Cloudflare 拦默认 UA，又强制要求每个请求带独立会话头——两条都已在适配器层解决，实测全部 200。
