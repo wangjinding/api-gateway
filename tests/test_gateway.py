@@ -3247,21 +3247,27 @@ def test_feedback_withdraw_only_when_pending():
         # 撤过的再撤 → 404
         assert client.delete(f"/feedback/{fid}", headers=hw).status_code == 404
 
-        # ② 别人的单子不能撤（哪怕也是待处理）
-        fid2 = client.post("/feedback", headers=hw, json={"content": "别人的单子"}).json()["item"]["id"]
+        # ② 别人的单子，普通用户不能撤（哪怕也是待处理）；管理员可真删（admin_delete 含图片）
+        fid2 = client.post("/feedback", headers=hw, json={
+            "content": "别人的单子", "images": [{"uri": _img_uri()}],
+        }).json()["item"]["id"]
         r = client.delete(f"/feedback/{fid2}", headers=hw2)
         assert r.status_code == 403 and "自己" in r.text, r.text
-        # 管理员也不能替谁撤（撤回是提交人动作；收件箱本就没有删除入口）
-        assert client.delete(f"/feedback/{fid2}", headers=ah).status_code == 403
+        # 管理员收件箱可真删：200 + 条目与图片文件一起消失
+        r = client.delete(f"/feedback/{fid2}", headers=ah)
+        assert r.status_code == 200 and r.json().get("deleted") is True, r.text
+        assert client.get("/feedback/mine", headers=hw).json()["items"] == []
+        assert list(media.glob(f"{fid2}-*")) == [], "管理员真删没清图片文件"
 
         # ③ 管理员推进到「处理中」后不能撤；「已处理」同样不能
-        assert client.patch(f"/feedback/{fid2}", headers=ah, json={"status": "doing"}).status_code == 200
-        r = client.delete(f"/feedback/{fid2}", headers=hw)
+        fid2b = client.post("/feedback", headers=hw, json={"content": "别人进度单"}).json()["item"]["id"]
+        assert client.patch(f"/feedback/{fid2b}", headers=ah, json={"status": "doing"}).status_code == 200
+        r = client.delete(f"/feedback/{fid2b}", headers=hw)
         assert r.status_code == 400 and "开始处理" in r.text, r.text
-        assert client.patch(f"/feedback/{fid2}", headers=ah, json={"status": "done"}).status_code == 200
-        assert client.delete(f"/feedback/{fid2}", headers=hw).status_code == 400
+        assert client.patch(f"/feedback/{fid2b}", headers=ah, json={"status": "done"}).status_code == 200
+        assert client.delete(f"/feedback/{fid2b}", headers=hw).status_code == 400
         # 撤不动，但单子还在（不会被误删）
-        assert [x["id"] for x in client.get("/feedback/mine", headers=hw).json()["items"]] == [fid2]
+        assert [x["id"] for x in client.get("/feedback/mine", headers=hw).json()["items"]] == [fid2b]
 
         # ④ API Key 不能撤（写操作只认网页会话）
         key = client.post("/auth/apikeys", json={"label": "fbw"}, headers=hw).json()["key"]

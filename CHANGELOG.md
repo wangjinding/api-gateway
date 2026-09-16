@@ -24,7 +24,7 @@
 
 ### 上线
 - 配置层 `hot_reload` 会自动热更 gateway.yaml；但 **ZHIPU_API_KEY 是新增环境变量，需重启进程才加载** → 待老板批准后重启，`/v1/models` 由 6 → 12 个文本模型、Models 页自动多出智谱 6 个。
-- 单测：修正 `test_load_config_providers`（供应商集合加入 `bigmodel` + 智谱 6 模型/V 标记断言），**154 passed / 1 failed**（仅剩 feedback 无关遗留）。
+- 单测：修正 `test_load_config_providers`（供应商集合加入 `bigmodel` + 智谱 6 模型/V 标记断言）；**一并修掉此前遗留的 `test_feedback_withdraw_only_when_pending`**（其旧断言「管理员 DELETE 反馈→403」没跟上「admin 收件箱可真删 admin_delete」的功能演进，已改为：普通用户撤别人→403、管理员真删→200 且图片文件一并清；并同步修正 DELETE 端点过时的 docstring）。最终 **155 passed / 0 failed**。
 
 ---
 

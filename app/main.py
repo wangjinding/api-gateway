@@ -2839,10 +2839,9 @@ async def feedback_update(request: Request, fid: str, _auth=Depends(require_auth
 
 @app.delete("/feedback/{fid}")
 async def feedback_withdraw(request: Request, fid: str, _auth=Depends(require_auth)):
-    """提交人撤回自己的反馈（会连图片文件一起删掉）。
+    """反馈删除：管理员真删任意一条（admin_delete，含图片）；非管理员只撤自己待处理的单子。
 
-    只允许撤**待处理**的单子：管理员一动它（处理中/已处理）就不能撤了。
-    管理员也不能替谁撤 —— 收件箱里没有删除入口，撤回是提交人自己的动作。
+    非管理员只允许撤**待处理**的单子：管理员一动它（处理中/已处理）就不能撤了。
     """
     me = _require_session(request)
     # 管理员可永久删除任意一条（含图片）；非管理员仍是「本人撤回待处理的单子」。
