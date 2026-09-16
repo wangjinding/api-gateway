@@ -94,14 +94,26 @@ def test_load_config_providers():
     # 智谱：base_url + token_env + 6 个模型 + V 型号视觉标记
     assert cfg.providers["bigmodel"].base_url == "https://open.bigmodel.cn/api/paas/v4"
     assert cfg.providers["bigmodel"].auth.token_env == "ZHIPU_API_KEY"
-    bm_ids = [m.id for m in cfg.providers["bigmodel"].models]
-    assert bm_ids == ["GLM-4.7-Flash", "GLM-4-Flash-250414", "GLM-Z1-Flash",
-                      "GLM-4.6V-Flash", "GLM-4V-Flash", "GLM-4.1V-Thinking-Flash"]
-    for m in cfg.providers["bigmodel"].models:
-        if m.id in ("GLM-4.6V-Flash", "GLM-4V-Flash", "GLM-4.1V-Thinking-Flash"):
-            assert m.vision is True
-        else:
-            assert m.vision is False
+    bm = cfg.providers["bigmodel"]
+    text_ids = [m.id for m in bm.models if m.type == "text"]
+    assert text_ids == ["GLM-4.7-Flash", "GLM-4-Flash-250414", "GLM-Z1-Flash",
+                        "GLM-4.6V-Flash", "GLM-4V-Flash", "GLM-4.1V-Thinking-Flash"]
+    # 智谱媒体模型：cogview-3-flash(图像)、cogvideox-flash(视频)
+    assert [m.id for m in bm.models if m.type == "image"] == ["cogview-3-flash"]
+    assert [m.id for m in bm.models if m.type == "video"] == ["cogvideox-flash"]
+    for m in bm.models:
+        if m.type != "text":
+            continue
+        want = m.id in ("GLM-4.6V-Flash", "GLM-4V-Flash", "GLM-4.1V-Thinking-Flash")
+        assert m.vision is want, f"{m.id} vision 应为 {want}"
+    # 智谱媒体契约（图像像素档 + 视频 zhipu 异步风格）
+    md = bm.media
+    assert md.supports_image and md.supports_video
+    assert md.image_default_size == "1024x1024"
+    assert md.video_style == "zhipu"
+    assert md.video_default_size == "1920x1080"
+    assert md.video_create_endpoint == "/videos/generations"
+    assert md.video_poll_path == "/async-result"
 
 
 def test_load_config_routes():
@@ -2244,8 +2256,9 @@ def test_video_polls_merged_into_one_log_row_with_response():
                                         "prompt": "x", "aspect_ratio": "16:9"}, headers=ah)
     assert r.status_code == 200, r.text
     vid = r.json()["video_id"]
-    client.get(f"/v1/videos/{vid}", headers=ah)    # 第 1 次轮询 processing
-    client.get(f"/v1/videos/{vid}", headers=ah)    # 第 2 次轮询 completed
+    poll_q = f"/v1/videos/{vid}?model=agnes-video-2.5-flash"   # 多视频供应商（agnes+智谱）时必须显式指定 model
+    client.get(poll_q, headers=ah)    # 第 1 次轮询 processing
+    client.get(poll_q, headers=ah)    # 第 2 次轮询 completed
     logs = client.get("/logs?n=200", headers=ah).json()["entries"]
     rows = [e for e in logs if e.get("video_id") == vid]
     assert len(rows) == 1, f"轮询应合成到创建那条里(实际 {len(rows)} 行): {[r['path'] for r in logs]}"

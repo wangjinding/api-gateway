@@ -74,7 +74,19 @@ providers:
     auth:
       token_env: "ZHIPU_API_KEY"
     extra_headers: {}
-    media: {}
+    # 智谱媒体生成（openai 兼容 + 异步查询）：
+    #   - 图像 cogview-3-flash：POST /images/generations，size 为像素档，返回 data[].url
+    #   - 视频 cogvideox-flash：POST /videos/generations（异步），GET /async-result/{id} 轮询；
+    #     完成时 task_status=SUCCESS、video_result[].url。
+    #   video_style: zhipu 让适配器按智谱契约构造视频 payload 与轮询路径（不走 agnes 那套 seconds/mode/aspect）。
+    media:
+      image_endpoint: "/images/generations"
+      image_default_size: "1024x1024"
+      video_create_endpoint: "/videos/generations"
+      video_poll_base: "https://open.bigmodel.cn/api/paas/v4"
+      video_poll_path: "/async-result"
+      video_style: "zhipu"
+      video_default_size: "1920x1080"
     models:
       - id: "GLM-4.7-Flash"
         display_name: "GLM-4.7-Flash"
@@ -97,7 +109,12 @@ providers:
         display_name: "GLM-4.1V-Thinking-Flash"
         type: "text"
         vision: true
-
+      - id: "cogview-3-flash"
+        display_name: "CogView-3-Flash"
+        type: "image"
+      - id: "cogvideox-flash"
+        display_name: "CogVideoX-Flash"
+        type: "video"
 server:
   host: "127.0.0.1"
   port: 8808

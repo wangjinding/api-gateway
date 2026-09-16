@@ -14,10 +14,10 @@
           <div class="field">
             <label>{{ t('images.size') }}</label>
             <el-select v-model="size" class="fill">
-              <el-option v-for="s in sizes" :key="s" :value="s" :label="s" />
+              <el-option v-for="s in displaySizes" :key="s" :value="s" :label="s" />
             </el-select>
           </div>
-          <div class="field">
+          <div v-if="!isZhipu" class="field">
             <label>{{ t('images.ratio') }}</label>
             <el-select v-model="ratio" class="fill">
               <el-option v-for="r in ratios" :key="r" :value="r" :label="r" />
@@ -44,7 +44,7 @@
           />
         </div>
 
-        <div class="field mb-field">
+        <div v-if="!isZhipu" class="field mb-field">
           <label>{{ t('images.refsLabel') }}</label>
           <!-- 第十三轮：图生图 / 多图合成 —— 支持直接上传（浏览器内压成 data URI），也支持粘 URL -->
           <div class="ref-btns">
@@ -166,8 +166,22 @@ const models = ref<any[]>([])
 const model = ref('')
 const sizes = ['1K', '2K', '3K', '4K']
 const ratios = ['1:1', '3:4', '4:3', '16:9', '9:16', '2:3', '3:2', '21:9']
+// 智谱 CogView-3-Flash：文生图，size 用像素档、天然无 ratio、不支持参考图（图生图）
+const zhipuSizes = ['1024x1024', '768x1344', '864x1152', '1344x768', '1152x864', '1440x720', '720x1440']
+const isZhipu = computed(() => models.value.find((m: any) => m.id === model.value)?.provider === 'bigmodel')
+const displaySizes = computed(() => (isZhipu.value ? zhipuSizes : sizes))
 const size = ref('1K')
 const ratio = ref('1:1')
+watch(model, (m) => {
+  const mo = models.value.find((x: any) => x.id === m)
+  const z = mo?.provider === 'bigmodel'
+  if (z) {
+    if (!zhipuSizes.includes(size.value)) size.value = '1024x1024'
+    ratio.value = ''                                    // cogview 的宽高由 size 像素档决定，无 ratio
+  } else if (ratio.value === '') {
+    ratio.value = '1:1'
+  }
+})
 const count = ref(1)              // 逐张生成：每张一次请求（上游 n 必须为 1）
 const prompt = ref('')
 // 参考图（图生图 / 多图合成）：上传的走 data URI，URL 的直接透传，两类可混用
@@ -274,8 +288,8 @@ async function generate() {
       progress.value = i
       const t0 = performance.now()
       // 上游图像接口的 n 必须为 1：多张就在这里逐张调用，每张出来就上屏（进度可见）
-      const body: any = { model: model.value, prompt: prompt.value, size: size.value, ratio: ratio.value, n: 1 }
-      if (list.length) body.image = list        // 图生图 / 多图合成（网关转成上游的 extra_body.image）
+      const body: any = { model: model.value, prompt: prompt.value, size: size.value, ratio: isZhipu.value ? '' : ratio.value, n: 1 }
+      if (list.length && !isZhipu.value) body.image = list        // 图生图 / 多图合成（网关转成上游的 extra_body.image）
       const j = await api('/v1/images/generations', { method: 'POST', body: JSON.stringify(body) })
       const ms = (performance.now() - t0) | 0
       providerName.value = j.provider_name || j.provider || ''

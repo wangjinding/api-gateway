@@ -46,7 +46,7 @@ api-gateway/
 | Agnes AI | `https://api.agnes-ai.cn/v1` | Bearer | `agnes-3.0-flash`(text)、`agnes-image-2.5-flash`(image)、`agnes-video-2.5-flash`(video) |
 | b.ai | `https://api.b.ai/v1` | Bearer | `qwen3.8-flash`、`hy3`（text） |
 | 火山方舟 Coding | `https://ark.cn-beijing.volces.com/api/coding/v3` | Bearer | `ark-code-latest`（text） |
-| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | Bearer | `GLM-4.7-Flash`、`GLM-4-Flash-250414`、`GLM-Z1-Flash`、`GLM-4.6V-Flash`、`GLM-4V-Flash`、`GLM-4.1V-Thinking-Flash`（text；其中 `GLM-4.6V-Flash`/`GLM-4V-Flash`/`GLM-4.1V-Thinking-Flash` 支持图像输入） |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | Bearer | 文本：`GLM-4.7-Flash`、`GLM-4-Flash-250414`、`GLM-Z1-Flash`、`GLM-4.6V-Flash`、`GLM-4V-Flash`、`GLM-4.1V-Thinking-Flash`（其中 3 个 V 型号支持图像输入）；图像：`cogview-3-flash`；视频：`cogvideox-flash`（文生视频，异步 `/videos/generations` + `/async-result/{id}` 轮询） |
 
 > Agnes 的图像/视频走自有端点，通过供应商配置里的 `media` 段指定。
 

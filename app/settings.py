@@ -61,6 +61,8 @@ MEDIA_KEYS = (
     "video_poll_base",
     "video_poll_path",
     "video_model_name",
+    "video_style",
+    "video_default_size",
 )
 
 MODEL_TYPES = ("text", "image", "video")

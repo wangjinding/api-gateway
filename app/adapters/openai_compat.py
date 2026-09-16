@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, AsyncIterator
+from urllib.parse import quote
 
 
 from app.adapters.base import BaseAdapter, json_or_raise
@@ -184,6 +185,26 @@ class OpenAICompatAdapter(BaseAdapter):
         size: str = "720P",
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        # 智谱视频契约：POST /videos/generations（异步）——参数为 quality/with_audio/fps/像素 size，
+        # 不需要 agnes 的 seconds/mode/aspect_ratio/n。
+        if self.media.video_style == "zhipu":
+            endpoint = self.media.video_create_endpoint or "/videos/generations"
+            x = extra or {}
+            payload: dict[str, Any] = {
+                "model": model,
+                "prompt": prompt,
+                "size": size or self.media.video_default_size or "1920x1080",
+                "quality": x.get("quality") or "speed",
+                "fps": int(x.get("fps") or 30),
+                "with_audio": bool(x.get("with_audio") or False),
+            }
+            async with self._lease() as client:
+                resp = await client.post(endpoint, json=payload, headers=self._headers)
+                resp.raise_for_status()
+                data = json_or_raise(resp)
+            return {"video_id": data.get("id") or data.get("request_id") or data.get("task_id"),
+                    "raw": data}
+        # ── Agnes 风格（默认）：POST {base}/videos，seconds/mode/size/aspect_ratio/n ──
         endpoint = self.media.video_create_endpoint or "/videos"
         payload: dict[str, Any] = {
             "model": model,
@@ -211,6 +232,17 @@ class OpenAICompatAdapter(BaseAdapter):
 
     # ── 视频轮询 ────────────────────────────────────
     async def poll_video(self, video_id: str, model: str = "", extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        # 智谱视频异步查询：GET {poll_base}/async-result/{video_id}（路径参数，无 query）
+        if self.media.video_style == "zhipu":
+            pb = (self.media.video_poll_base or self.base_url).rstrip("/")
+            pp = (self.media.video_poll_path or "/async-result").rstrip("/")
+            url = f"{pb}{pp}/{quote(str(video_id), safe='')}"
+            async with self._lease() as client:
+                resp = await client.get(url, headers=self._headers)
+                resp.raise_for_status()
+                data = json_or_raise(resp)
+            return {"raw": data}
+
         mname = self.media.video_model_name or model or ""
         poll_base = self.media.video_poll_base or self.base_url
         poll_path = self.media.video_poll_path or "/agnesapi"

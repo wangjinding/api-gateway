@@ -303,6 +303,13 @@ export default {
   videos: {
     taskTitle: 'Tasks',
     fixed: 'Fixed',
+      zSize: 'Resolution',
+      zQuality: 'Quality',
+      zSpeed: 'Speed first',
+      zQualityHigh: 'Quality first',
+      zFps: 'FPS',
+      zAudio: 'Audio',
+      zTip: 'Zhipu CogVideoX supports text-to-video only (text mode); generation takes a while, please wait.',
     title: 'Video generation',
     model: 'Video model',
     mode: 'Scenario',

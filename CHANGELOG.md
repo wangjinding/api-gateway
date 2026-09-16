@@ -4,6 +4,35 @@
 
 ---
 
+## 2026-09-16 · 集成智谱 CogView-3-Flash（文生图）+ CogVideoX-Flash（文生视频）
+
+**一句话**：给上一轮的智谱供应商补上媒体生成——图像页用 `cogview-3-flash`、视频页用 `cogvideox-flash`，前后端按「选到的供应商」自动切到智谱契约（不动 Agnes）。
+
+### 契约（官网 + 真 Key 实测确认）
+- **图像 cogview-3-flash**：`POST {base}/images/generations`，`{model, prompt, size}`（size 为像素档：1024x1024/768x1344/864x1152/1344x768/1152x864/1440x720/720x1440）→ 返回 `data[].url`；**无 ratio、不支持图生图**。
+- **视频 cogvideox-flash**：`POST {base}/videos/generations`（**异步**）`{model, prompt, quality, with_audio, size, fps:30/60}` → 返回 `task_status:PROCESSING`；再 `GET /async-result/{id}` 轮询到 `SUCCESS` 取 `video_result[].url`。仅文生视频。
+
+### 后端
+- `data/gateway.yaml` bigmodel 加 `media`（图像端点+像素档、视频 `/videos/generations`+`/async-result/{id}`，新增 `video_style:"zhipu"`），并注册 `cogview-3-flash`(image)、`cogvideox-flash`(video)（顺带修复本轮早前编辑误吞的 `server:` 顶层键）。
+- `config.py`：`MediaConfig` 新增 `video_style` / `video_default_size`。
+- 适配器 `create_video` / `poll_video`：按 `video_style=="zhipu"` 走智谱异步契约（fps/quality/with_audio + 路径参数轮询）；Agnes 分支不变（`__init__.py` docstring 改四家）。
+- `main.py`：新增 `_video_status`（兼容 `task_status`，智谱才识得 `SUCCESS/FAIL` 终态）与 `_video_terminal`，替换 3 处视频状态判定；`_validate_video_request` 按供应商分流（智谱仅 text 文生视频，size/quality/fps 合规校验，非法回干净 400 不进熔断）；`videos_create` 改为先 `_resolve_media_model` 再按供应商校验。
+- `settings.py`：面板 `MEDIA_KEYS` 补 `video_style`/`video_default_size`（否则「网关配置」面板往返会丢这两个字段）。
+- 顺带修正 `DELETE /feedback` 过时 docstring（admin 可真删 admin_delete）。
+
+### 前端（按所选模型 `provider==='bigmodel'` 自动切）
+- `Videos.vue`：选智谱视频模型显示专用表单（分辨率/质量 speed·quality/帧率 30·60/配音 switch，固定文生视频），body 用 `extra:{quality,fps,with_audio}`；选 Agnes 原表单不变；切智谱模型时强制 `mode='text'`。
+- `Images.vue`：选 cogview 时 size 换成像素档、隐藏 ratio 与参考图（cogview 无图生图）。
+- `media.ts`：`findVideoUrl` 优先键补 `video_result`。
+- i18n：新增 `videos.zSize/zQuality/zSpeed/zQualityHigh/zFps/zAudio/zTip` 7 键，中英对称。
+
+### 验证
+- 单测：新增/修正 bigmodel 媒体契约断言、视频轮询必经 `?model=`（现两家视频供应商）、配置往返含新 media 键 → **155 passed / 0 failed**；前端 `npm run build` 过（typecheck + i18n 对称），新入口 `index-CxdHy_Sw.js`。
+- 真机隔离（uvicorn:8899 临时 users/history，连真实智谱）：`/v1/models` 列出 8 个智谱模型；图像 → 200 `data[].url`；视频创建 → `video_id`+`task_status:PROCESSING`；轮询 → `status:processing`；非法参数（`mode=keyframe`）→ 400 干净拒绝。
+- 上线：`supervisorctl restart api-gateway:api-gateway_00`（代码改动需重启），前端 dist 已 build 覆盖。
+
+---
+
 ## 2026-09-16 · 新增智谱 GLM（open.bigmodel.cn）供应商
 
 **一句话**：接入智谱开放平台作为新的 OpenAI 兼容供应商，收录 6 个 Flash 模型（3 文本 + 3 视觉），密钥走 `data/.env` 的 `ZHIPU_API_KEY`，真图实测确认 3 个 V 型号支持图像输入。

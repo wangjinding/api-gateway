@@ -26,7 +26,7 @@ export function findVideoUrl(obj: any): string {
     return ''
   }
   if (typeof obj === 'object') {
-    for (const k of ['video_url', 'play_url', 'url', 'html_url', 'video', 'media_url', 'result', 'data', 'mp4']) {
+    for (const k of ['video_result', 'video_url', 'play_url', 'url', 'html_url', 'video', 'media_url', 'result', 'data', 'mp4']) {
       if (k in obj) { const u = findVideoUrl(obj[k]); if (u) return u }
     }
     for (const v of Object.values(obj)) { const u = findVideoUrl(v); if (u) return u }
