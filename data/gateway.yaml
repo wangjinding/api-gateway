@@ -1,5 +1,5 @@
 # AI 网关配置文件（data/ 目录）
-# 供应商：Agnes / b.ai / 火山方舟 Coding / 智谱 GLM（bigmodel）
+# 供应商：Agnes / 火山方舟 Coding / 智谱 GLM（bigmodel）
 # 密钥统一走 token_env 指向的环境变量（本机见 data/.env），不再在 yaml 存明文
 # 端口默认 8808
 #
@@ -33,23 +33,6 @@ providers:
       - id: "agnes-video-2.5-flash"
         display_name: "Agnes Video 2.5 Flash"
         type: "video"
-
-  b_ai:
-    name: "b.ai"
-    base_url: "https://api.b.ai/v1"
-    auth:
-      token_env: "B_AI_API_KEY"
-    extra_headers: {}
-    # b.ai 仅 OpenAI 兼容文本；图像/视频留空 = 不支持
-    media: {}
-    models:
-      - id: "qwen3.8-flash"
-        display_name: "b.ai qwen3.8-flash"
-        type: "text"
-        vision: true   # 实测支持视觉（2026-09-15 红图探针→答"红色"）
-      - id: "hy3"
-        display_name: "b.ai hy3"
-        type: "text"
 
   volc_engine:
     name: "火山方舟 Coding Plan"
@@ -157,8 +140,6 @@ pricing:
   per_model:
     agnes-3.0-flash:      { input: 0.35, output: 1.00 }
     ark-code-latest:      { input: 0.50, output: 2.00 }
-    qwen3.8-flash:        { input: 0.30, output: 0.60 }
-    hy3:                 { input: 0.30, output: 0.60 }
 
 # ── 媒体下载代理白名单（第十七轮）────────────────────────
 # 生成的图片/视频挂在第三方 CDN 上且不带 CORS 头，浏览器里既 fetch 不到 blob、
@@ -191,10 +172,8 @@ auth:
 # 优先级从左到右（第一个最高）。已把全部 5 个文本模型配上。
 routes:
   wjd:
-    timeout: 60         # 单模型 60s 没出结果就切下一个（避免 6×120s 挂死）
+    timeout: 60         # 单模型 60s 没出结果就切下一个（避免 3×120s 挂死）
     retry: 1            # 每个模型只试 1 次，失败立即切下一个
     models:
       - "ark-code-latest"     # 1) 火山方舟（最高优先级）
       - "agnes-3.0-flash"     # 2) Agnes 兜底
-      - "qwen3.8-flash"       # 3) b.ai qwen 兜底
-      - "hy3"                 # 4) b.ai hy3 兜底

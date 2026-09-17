@@ -1,6 +1,6 @@
 # API Gateway
 
-统一多供应商 LLM 接入网关，纯后端 FastAPI，配置驱动。支持 **Agnes AI**、**b.ai**、**火山方舟 Coding Plan**、**智谱 GLM** 四个供应商，全部走 OpenAI 兼容协议。v2.4 已集成熔断、限流、图像/视频、指标、成本估算、热加载、测试等完整能力。
+统一多供应商 LLM 接入网关，纯后端 FastAPI，配置驱动。支持 **Agnes AI**、**火山方舟 Coding Plan**、**智谱 GLM** 三个供应商，全部走 OpenAI 兼容协议。v2.4 已集成熔断、限流、图像/视频、指标、成本估算、热加载、测试等完整能力。
 
 ## 特性
 
@@ -44,7 +44,6 @@ api-gateway/
 | 供应商 | Base URL | 认证 | 模型 |
 |---|---|---|---|
 | Agnes AI | `https://api.agnes-ai.cn/v1` | Bearer | `agnes-3.0-flash`(text)、`agnes-image-2.5-flash`(image)、`agnes-video-2.5-flash`(video) |
-| b.ai | `https://api.b.ai/v1` | Bearer | `qwen3.8-flash`、`hy3`（text） |
 | 火山方舟 Coding | `https://ark.cn-beijing.volces.com/api/coding/v3` | Bearer | `ark-code-latest`（text） |
 | 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | Bearer | 文本：`GLM-4.7-Flash`、`GLM-4-Flash-250414`、`GLM-Z1-Flash`、`GLM-4.6V-Flash`、`GLM-4V-Flash`、`GLM-4.1V-Thinking-Flash`（其中 3 个 V 型号支持图像输入）；图像：`cogview-3-flash`；视频：`cogvideox-flash`（文生视频，异步 `/videos/generations` + `/async-result/{id}` 轮询） |
 
@@ -86,8 +85,6 @@ routes:
     models:
       - "ark-code-latest"     # 1) 火山方舟（最高优先级）
       - "agnes-3.0-flash"     # 2) Agnes 兜底
-      - "qwen3.8-flash"       # 3) b.ai qwen 兜底
-      - "hy3"                 # 4) b.ai hy3 兜底
 
 circuit:                 # 供应商熔断
   enabled: true
@@ -281,7 +278,6 @@ pricing:                     # 人民币/百万 token，用于估算成本
   per_model:
     agnes-3.0-flash:  { input: 0.35, output: 1.00 }
     ark-code-latest:  { input: 0.50, output: 2.00 }
-    qwen3.8-flash:    { input: 0.30, output: 0.60 }
     # 未配置的模型不返回 estimated_cost_cny
 ```
 
@@ -301,7 +297,7 @@ python run.py            # 默认读 data/gateway.yaml，端口 8808
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入 AGNES_API_KEY / B_AI_API_KEY / VOLC_API_KEY
+# 编辑 .env 填入 AGNES_API_KEY / VOLC_API_KEY / ZHIPU_API_KEY
 python run.py           # 启动时自动读取 .env
 ```
 

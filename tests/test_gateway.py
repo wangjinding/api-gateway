@@ -89,7 +89,7 @@ def _login_admin_session(client=None):
 # ── 配置加载 ──
 def test_load_config_providers():
     cfg = load_config(CONFIG)
-    assert set(cfg.providers.keys()) == {"agnes", "b_ai", "volc_engine", "bigmodel"}
+    assert set(cfg.providers.keys()) == {"agnes", "volc_engine", "bigmodel"}
     assert cfg.providers["agnes"].models[0].id == "agnes-3.0-flash"
     # 智谱：base_url + token_env + 6 个模型 + V 型号视觉标记
     assert cfg.providers["bigmodel"].base_url == "https://open.bigmodel.cn/api/paas/v4"
@@ -119,7 +119,7 @@ def test_load_config_providers():
 def test_load_config_routes():
     cfg = load_config(CONFIG)
     assert "wjd" in cfg.routes
-    assert len(cfg.routes["wjd"].models) == 4
+    assert len(cfg.routes["wjd"].models) == 2
     assert cfg.routes["wjd"].timeout == 60
     assert cfg.routes["wjd"].retry == 1
 
@@ -333,7 +333,7 @@ def test_resolve_media_model_via_route_alias():
     # wjd 路由链里第 2 个是 agnes-3.0-flash(text)，但 image 模型不在这条链 → 走别名找不到 image
     # 单独构造一条指向 image 的路由来验证别名解析逻辑
     from app.config import RouteInfo
-    cfg.routes["img"] = RouteInfo(name="img", models=["qwen3.8-flash", "agnes-image-2.5-flash"])
+    cfg.routes["img"] = RouteInfo(name="img", models=["GLM-4.1V-Thinking-Flash", "agnes-image-2.5-flash"])
     res = m._resolve_media_model(cfg, "img", "image")
     assert res is not None and res[4] == "agnes-image-2.5-flash"
 
@@ -2318,7 +2318,7 @@ def test_wjd_route_orders_by_availability_and_speed():
     from app.config import RouteInfo
     from app.circuit import CircuitBreakerRegistry
     import app.main as m
-    saved = {k: os.environ.get(k) for k in ("AGNES_API_KEY", "B_AI_API_KEY", "VOLC_API_KEY")}
+    saved = {k: os.environ.get(k) for k in ("AGNES_API_KEY", "VOLC_API_KEY", "ZHIPU_API_KEY")}
     for k in saved:
         os.environ[k] = "test-token"
     orig_m, orig_c = m._metrics, m._circuits
@@ -2328,22 +2328,22 @@ def test_wjd_route_orders_by_availability_and_speed():
     cfg = m._cfg()
     cfg.routes["wjd_speedtest"] = RouteInfo(
         name="wjd_speedtest",
-        models=["ark-code-latest", "agnes-3.0-flash", "qwen3.8-flash"],  # 配置优先级 volc>agnes>b_ai
+        models=["ark-code-latest", "agnes-3.0-flash", "GLM-4.7-Flash"],  # 配置优先级 volc>agnes>bigmodel
         retry=1)
     try:
         # 冷启动：没有任何延迟样本 → 保持配置顺序
         assert m._route_chain(cfg, "wjd_speedtest")[0] == [
-            "ark-code-latest", "agnes-3.0-flash", "qwen3.8-flash"]
-        # 喂速度：agnes 最快、b_ai 次之、volc 最慢 → 完全重排
+            "ark-code-latest", "agnes-3.0-flash", "GLM-4.7-Flash"]
+        # 喂速度：agnes 最快、bigmodel 次之、volc 最慢 → 完全重排
         m._metrics.record_latency("agnes-3.0-flash", 0.5)
-        m._metrics.record_latency("qwen3.8-flash", 1.5)
+        m._metrics.record_latency("GLM-4.7-Flash", 1.5)
         m._metrics.record_latency("ark-code-latest", 4.0)
         assert m._route_chain(cfg, "wjd_speedtest")[0] == [
-            "agnes-3.0-flash", "qwen3.8-flash", "ark-code-latest"]
+            "agnes-3.0-flash", "GLM-4.7-Flash", "ark-code-latest"]
         # 最快那个供应商熔断开 → 排到最后，次快上位（未测速的可用模型才用探测位兜底）
         m._circuits.get("agnes")._state = "open"
         chain2 = m._route_chain(cfg, "wjd_speedtest")[0]
-        assert chain2[0] == "qwen3.8-flash", chain2
+        assert chain2[0] == "GLM-4.7-Flash", chain2
         assert chain2[-1] == "agnes-3.0-flash", chain2
     finally:
         m._metrics, m._circuits = orig_m, orig_c
@@ -2556,9 +2556,9 @@ def test_vision_first_reorders_only_when_vision_exists():
     """带图请求：链上有视觉模型才重排（提到最前），一个都没有就别动（不掩盖能力缺失）。"""
     import app.main as m
     cfg = load_config(CONFIG)
-    assert m._vision_first(cfg, ["ark-code-latest", "agnes-3.0-flash", "hy3"]) == \
-        ["agnes-3.0-flash", "ark-code-latest", "hy3"], "视觉模型提到最前，其余保持相对顺序"
-    assert m._vision_first(cfg, ["ark-code-latest", "hy3"]) == ["ark-code-latest", "hy3"]
+    assert m._vision_first(cfg, ["ark-code-latest", "agnes-3.0-flash", "GLM-Z1-Flash"]) == \
+        ["agnes-3.0-flash", "ark-code-latest", "GLM-Z1-Flash"], "视觉模型提到最前，其余保持相对顺序"
+    assert m._vision_first(cfg, ["ark-code-latest", "GLM-Z1-Flash"]) == ["ark-code-latest", "GLM-Z1-Flash"]
 
 
 def test_messages_have_images_detects_vision_blocks():
@@ -3564,7 +3564,7 @@ def test_config_save_applies_without_restart():
         view["server"]["timeout"] = 95
         view["server"]["retry"] = 2
         view["observability"]["access_log_maxlen"] = 777
-        view["routes"]["wjd"]["models"] = ["hy3", "ark-code-latest"]
+        view["routes"]["wjd"]["models"] = ["GLM-4.1V-Thinking-Flash", "ark-code-latest"]
         view["providers"]["volc_engine"]["models"].append(
             {"id": "ark-code-mini", "display_name": "迷你", "type": "text", "vision": False})
         view["pricing"]["per_model"]["ark-code-mini"] = {"input": 0.1, "output": 0.2}
@@ -3578,17 +3578,17 @@ def test_config_save_applies_without_restart():
         assert m.config.server.timeout == 95
         assert m.config.server.retry == 2
         assert m.config.observability.access_log_maxlen == 777
-        assert m.config.routes["wjd"].models == ["hy3", "ark-code-latest"]
+        assert m.config.routes["wjd"].models == ["GLM-4.1V-Thinking-Flash", "ark-code-latest"]
         assert m.config.find_provider_for_model("ark-code-mini")[0] == "volc_engine"
         assert m._access._max == 777, "访问日志容量应就地调整"
         # 盘上也变了，且旧文件有备份
         on_disk = _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
         assert on_disk["server"]["timeout"] == 95
-        assert on_disk["routes"]["wjd"]["models"] == ["hy3", "ark-code-latest"]
+        assert on_disk["routes"]["wjd"]["models"] == ["GLM-4.1V-Thinking-Flash", "ark-code-latest"]
         assert (P(tmp.name) / "gateway.yaml.bak").exists(), "保存前应备份原文件"
         # 路由链顺序变更后，/v1/models 立刻跟着变（页面/调用方看到的就是新顺序）
         lm = client.get("/v1/models", headers=ah).json()
-        assert [x for x in lm["data"] if x["type"] == "route"][0]["models"][:2] == ["hy3", "ark-code-latest"]
+        assert [x for x in lm["data"] if x["type"] == "route"][0]["models"][:2] == ["GLM-4.1V-Thinking-Flash", "ark-code-latest"]
 
         # ② 改"需重启"的键：能保存，但要明确回提示（不能假装已生效）
         assert _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["server"]["port"] == 8808

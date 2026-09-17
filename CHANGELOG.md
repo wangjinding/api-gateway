@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-09-17 · 移除 b.ai 供应商
+
+**一句话**：老板要求删除 b.ai 供应商及其两个模型（`qwen3.8-flash`、`hy3`），代码、配置、文档、测试全清。
+
+### 改动清单
+- **`data/gateway.yaml`**：删 `providers.b_ai` 整块（含 `qwen3.8-flash`、`hy3` 两个模型）；`routes.wjd` 兜底链由 4 项（ark-code/agnes/qwen3.8/hy3）精简为 2 项（`ark-code-latest` → `agnes-3.0-flash`）；`pricing.per_model` 删 `qwen3.8-flash`/`hy3` 两条；头部供应商注释 `Agnes / b.ai / 火山方舟 / 智谱 GLM` → `Agnes / 火山方舟 / 智谱 GLM`。
+- **`data/.env`**：删 `B_AI_API_KEY=sk-nf...`（纯删除，密钥不再使用）。
+- **`app/main.py`**：`description` 字符串去 b.ai；测速探针注释去掉 `b.ai(qwen3.8-flash/hy3)` 引用。
+- **`app/config.py`**：`ModelInfo.vision` 注释去掉 `b.ai 系`。
+- **`app/adapters/{__init__,openai_compat}.py`**：docstring「四家」→「三家」，供应商列表去 b.ai。
+- **`README.md`**：头部「四个供应商」→「三个」；供应商表删 b.ai 行；路由示例去 `qwen3.8-flash`/`hy3` 并去其重编号；pricing 示例去 b.ai 两条；`# 编辑 .env 填入` 行去 `B_AI_API_KEY`。
+- **`frontend/src/views/Settings.vue`**：`TEXT_MODELS` 去 `qwen3.8-flash`。
+- **`docs/frontend-design.md`**：供应商列表去 b.ai。
+- **`tests/test_gateway.py`**：`test_load_config_providers` 集合去 `b_ai`；`test_load_config_routes` wjd 长度 4→2；`test_wjd_route_orders_by_availability_and_speed` 用 `GLM-4.7-Flash` 替代 `qwen3.8-flash` 做速度排序演示，env var 清单改 `ZHIPU_API_KEY`；`test_vision_first_reorders_only_when_vision_exists` 改用非视觉模型 `GLM-Z1-Flash`（原 `hy3`）；`test_config_endpoints_permission_matrix` 及路由写回测试中的 `hy3` 改 `GLM-4.1V-Thinking-Flash`；媒体路由测试的 `qwen3.8-flash` 改 `GLM-4.1V-Thinking-Flash`。
+
+### 验证
+- 单测 **155 passed / 0 failed**（修正 6 处断言后全绿）。
+- 全项目 grep `b_ai|api.b.ai|B_AI_API_KEY|qwen3.8-flash|hy3` 命中仅为 CHANGELOG 历史条目（保留）—— 其余全部清零。
+- 纯配置+文档改动，`hot_reload` 自动生效；若重启，`/v1/models` 由 14 → 12（`agnes` 3 + `volc_engine` 1 + `bigmodel` 8），`routes.wjd` 由 4 → 2。
+
+---
+
 ## 2026-09-16 · 集成智谱 CogView-3-Flash（文生图）+ CogVideoX-Flash（文生视频）
 
 **一句话**：给上一轮的智谱供应商补上媒体生成——图像页用 `cogview-3-flash`、视频页用 `cogvideox-flash`，前后端按「选到的供应商」自动切到智谱契约（不动 Agnes）。

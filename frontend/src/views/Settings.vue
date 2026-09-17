@@ -228,7 +228,7 @@ const err = ref('')
 const { t, locale } = useI18n()
 const { theme, followSystem, setTheme, setFollowSystem } = useTheme()
 
-const TEXT_MODELS = ['wjd', 'agnes-3.0-flash', 'ark-code-latest', 'qwen3.8-flash', 'GLM-4.7-Flash', 'GLM-4-Flash-250414', 'GLM-Z1-Flash', 'GLM-4.6V-Flash', 'GLM-4V-Flash', 'GLM-4.1V-Thinking-Flash']
+const TEXT_MODELS = ['wjd', 'agnes-3.0-flash', 'ark-code-latest', 'GLM-4.7-Flash', 'GLM-4-Flash-250414', 'GLM-Z1-Flash', 'GLM-4.6V-Flash', 'GLM-4V-Flash', 'GLM-4.1V-Thinking-Flash']
 const textModels = ref<string[]>(TEXT_MODELS)
 
 function pickTheme(id: ThemeId) {

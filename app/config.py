@@ -22,7 +22,7 @@ class ModelInfo:
     type: str = "text"  # text | image | video
     # 第十三轮: 是否支持「图像输入」（多模态 / 视觉）。
     #   Agnes 3.0 Flash 文档明确「输入模态：文本、图像 URL」，实测 data:image/png;base64 也能识别；
-    #   其余文本模型（ark-code / b.ai 系）文档未声明图像输入 → 默认 False。
+    # 其余文本模型（ark-code 等）文档未声明图像输入 → 默认 False。
     #   用途：① /v1/models 暴露给前端标注/告警；② 带图请求走路由别名时把有视觉能力的模型排到前面。
     vision: bool = False
 
