@@ -1,5 +1,5 @@
 # AI 网关配置文件（data/ 目录）
-# 供应商：Agnes / 火山方舟 Coding
+# 供应商：Agnes / 火山方舟 Coding / OpenCode Go（订阅编程模型）
 # 密钥统一走 token_env 指向的环境变量（本机见 data/.env），不再在 yaml 存明文
 # 端口默认 8808
 #
@@ -50,6 +50,75 @@ providers:
     models:
       - id: "ark-code-latest"
         display_name: "火山方舟 ark-code-latest"
+        type: "text"
+
+  opencode:
+    name: "OpenCode Go"
+    base_url: "https://opencode.ai/zen/go/v1"
+    auth:
+      token_env: "OPENCODE_API_KEY"
+    # OpenCode Go 是每月订阅编程模型入口。官方硬性要求每个 /chat/completions
+    # 带 x-opencode-session（缺失直接 400 MissingSessionID），并建议用专属 UA
+    # 而非通用库名（实测 UA 不敏感，会话头才是必需）。适配器据此开关在
+    # 每次请求动态注入 UUID 会话头（不能放静态 extra_headers——会被 _get_adapter 缓存冻结）。
+    requires_session_header: true
+    extra_headers:
+      User-Agent: "api-gateway/2.4.0 (jakon opencode-go)"
+    # 无媒体能力（纯文本编程模型；图像/视频不走本供应商）
+    media: {}
+    models:
+      # ── OpenAI 兼容 /v1/chat/completions 线（全部经真实 key 实测 200）──
+      - id: "glm-5.3-flash"
+        display_name: "GLM-5.3-Flash"
+        type: "text"
+      - id: "glm-5.3"
+        display_name: "GLM-5.3"
+        type: "text"
+      - id: "glm-5.2"
+        display_name: "GLM-5.2"
+        type: "text"
+      - id: "glm-5.1"
+        display_name: "GLM-5.1"
+        type: "text"
+      - id: "kimi-k3"
+        display_name: "Kimi K3"
+        type: "text"
+      - id: "kimi-k2.7-code"
+        display_name: "Kimi K2.7 Code"
+        type: "text"
+      - id: "kimi-k2.6"
+        display_name: "Kimi K2.6"
+        type: "text"
+      - id: "longcat-2.0"
+        display_name: "LongCat 2.0"
+        type: "text"
+      - id: "deepseek-v4-pro"
+        display_name: "DeepSeek V4 Pro"
+        type: "text"
+      - id: "deepseek-v4-flash"
+        display_name: "DeepSeek V4 Flash"
+        type: "text"
+      - id: "deepseek-flash"
+        display_name: "DeepSeek Flash"
+        type: "text"
+      - id: "deepseek-v4.1-flash"
+        display_name: "DeepSeek V4.1 Flash"
+        type: "text"
+      - id: "deepseek-v4-flash-vision-exp"
+        display_name: "DeepSeek V4 Flash Vision Exp"
+        type: "text"
+        vision: true   # 官方标 Vision，支持图像转 token 输入（带图请求可走路由链首）
+      - id: "mimo-v2.5"
+        display_name: "MiMo V2.5"
+        type: "text"
+      - id: "mimo-v2.5-pro"
+        display_name: "MiMo V2.5 Pro"
+        type: "text"
+      - id: "hy4-preview"
+        display_name: "Hy4 Preview"
+        type: "text"
+      - id: "hy3"
+        display_name: "Hy3"
         type: "text"
 server:
   host: "127.0.0.1"
@@ -122,13 +191,32 @@ auth:
 # model 填别名（如 wjd），按数组顺序逐个尝试：
 #   第 1 个失败/超时/重试耗尽 → 第 2 个 … 全失败才 502。
 # 每个路由可设 timeout（单模型超时秒）、retry（切下一个前该模型重试次数）。
-# 优先级从左到右（第一个最高）。已把全部 5 个文本模型配上。
+# 优先级从左到右（第一个最高）。老板决策：wjd 链路 = 全部文本模型（已含 OpenCode Go 17 个）。
 routes:
   wjd:
-    timeout: 60         # 单模型 60s 没出结果就切下一个（避免 6×120s 挂死）
+    timeout: 60         # 单模型 60s 没出结果就切下一个（避免 20×120s 挂死）
     retry: 1            # 每个模型只试 1 次，失败立即切下一个
     # 注意（老板决策）：wjd 链路 = 全部文本模型；新增/现有文本模型都必须加进这里。
     models:
-      - "ark-code-latest"     # 1) 火山方舟（最高优先级）
+      # 供应商按「默认主力」在前，其余按供应商分组；运行时仍按可用性+速度实时重排。
+      - "ark-code-latest"     # 1) 火山方舟
       - "agnes-3.0-flash"     # 2) Agnes 3.0
       - "agnes-2.5-flash"     # 3) Agnes 2.5
+      # ── 4) OpenCode Go（17 个文本模型，全进 wjd）──
+      - "glm-5.3-flash"       # 4.1) GLM-5.3-Flash
+      - "glm-5.3"             # 4.2) GLM-5.3
+      - "glm-5.2"             # 4.3) GLM-5.2
+      - "glm-5.1"             # 4.4) GLM-5.1
+      - "kimi-k3"             # 4.5) Kimi K3
+      - "kimi-k2.7-code"      # 4.6) Kimi K2.7 Code
+      - "kimi-k2.6"           # 4.7) Kimi K2.6
+      - "longcat-2.0"         # 4.8) LongCat 2.0
+      - "deepseek-v4-pro"     # 4.9) DeepSeek V4 Pro
+      - "deepseek-v4-flash"   # 4.10) DeepSeek V4 Flash
+      - "deepseek-flash"      # 4.11) DeepSeek Flash
+      - "deepseek-v4.1-flash" # 4.12) DeepSeek V4.1 Flash
+      - "deepseek-v4-flash-vision-exp"  # 4.13) DeepSeek V4 Flash Vision Exp
+      - "mimo-v2.5"           # 4.14) MiMo V2.5
+      - "mimo-v2.5-pro"       # 4.15) MiMo V2.5 Pro
+      - "hy4-preview"         # 4.16) Hy4 Preview
+      - "hy3"                 # 4.17) Hy3

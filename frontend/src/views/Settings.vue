@@ -228,7 +228,15 @@ const err = ref('')
 const { t, locale } = useI18n()
 const { theme, followSystem, setTheme, setFollowSystem } = useTheme()
 
-const TEXT_MODELS = ['wjd', 'agnes-3.0-flash', 'agnes-2.5-flash', 'ark-code-latest']
+// 对话默认模型下拉（老板决策：wjd 链路 = 全部文本模型；这里同样覆盖全部文本模型）
+const TEXT_MODELS = ['wjd',
+  'agnes-3.0-flash', 'agnes-2.5-flash', 'ark-code-latest',
+  // OpenCode Go（订阅编程模型，17 个文本模型）
+  'glm-5.3-flash', 'glm-5.3', 'glm-5.2', 'glm-5.1',
+  'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6', 'longcat-2.0',
+  'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-flash', 'deepseek-v4.1-flash', 'deepseek-v4-flash-vision-exp',
+  'mimo-v2.5', 'mimo-v2.5-pro', 'hy4-preview', 'hy3',
+]
 const textModels = ref<string[]>(TEXT_MODELS)
 
 function pickTheme(id: ThemeId) {

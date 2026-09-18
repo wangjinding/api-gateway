@@ -75,6 +75,7 @@ class ProviderConfig:
     models: list[ModelInfo] = field(default_factory=list)
     media: MediaConfig = field(default_factory=MediaConfig)
     rate_limit_rps: float | None = None  # 该供应商全局 QPS 上限（可选）
+    requires_session_header: bool = False  # OpenCode Go 等要求每请求动态会话头（x-opencode-session）
 
 
 # ── 网关入口鉴权 ──
@@ -434,6 +435,8 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
             models=models,
             media=_parse_media(pval),
             rate_limit_rps=_opt_float(pval.get("rate_limit_rps")),
+            requires_session_header=_opt_bool(
+                pval.get("requires_session_header"), "providers.*.requires_session_header", False),
         )
 
     srv_raw = raw.get("server", {}) or {}

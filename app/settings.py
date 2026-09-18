@@ -86,6 +86,7 @@ def config_to_view(cfg: GatewayConfig) -> dict[str, Any]:
             },
             "extra_headers": dict(p.extra_headers or {}),
             "rate_limit_rps": p.rate_limit_rps,
+            "requires_session_header": bool(p.requires_session_header),
             "media": {k: getattr(p.media, k) for k in MEDIA_KEYS},
             "models": [
                 {"id": m.id, "display_name": m.display_name, "type": m.type, "vision": bool(m.vision)}
@@ -236,6 +237,7 @@ def view_to_raw(cfg: GatewayConfig, raw: dict[str, Any], view: dict[str, Any]) -
                 },
                 "extra_headers": _str_map(pv.get("extra_headers"), f"providers.{key}.extra_headers"),
                 "rate_limit_rps": pv.get("rate_limit_rps"),
+                "requires_session_header": bool(pv.get("requires_session_header", False)),
                 # media 留空 = 该供应商不支持对应媒体（写回时保留原文里的空 {} 语义）
                 "media": {
                     k: (media_in.get(k) if k in media_in else base_media.get(k))

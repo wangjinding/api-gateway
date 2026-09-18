@@ -1,6 +1,6 @@
 # API Gateway
 
-统一多供应商 LLM 接入网关，纯后端 FastAPI，配置驱动。支持 **Agnes AI**、**火山方舟 Coding Plan** 两个供应商，全部走 OpenAI 兼容协议。v2.4 已集成熔断、限流、图像/视频、指标、成本估算、热加载、测试等完整能力。
+统一多供应商 LLM 接入网关，纯后端 FastAPI，配置驱动。支持 **Agnes AI**、**火山方舟 Coding Plan**、**OpenCode Go** 三个供应商，全部走 OpenAI 兼容协议。v2.4 已集成熔断、限流、图像/视频、指标、成本估算、热加载、测试等完整能力。
 
 ## 特性
 
@@ -45,6 +45,19 @@ api-gateway/
 |---|---|---|---|
 | Agnes AI | `https://api.agnes-ai.cn/v1` | Bearer | `agnes-3.0-flash`、`agnes-2.5-flash`(text，支持图像输入)、`agnes-image-2.5-flash`(image)、`agnes-video-2.5-flash`(video) |
 | 火山方舟 Coding | `https://ark.cn-beijing.volces.com/api/coding/v3` | Bearer | `ark-code-latest`（text） |
+| OpenCode Go | `https://opencode.ai/zen/go/v1` | Bearer + `x-opencode-session` | 17 个文本模型（见下方小节） |
+
+> OpenCode Go 是每月订阅的编程模型入口（不在订阅内按 token 额外计费）。官方硬性要求每个
+> `/chat/completions` 带 **`x-opencode-session`**（缺失直接 400），并建议专属 `User-Agent`。
+> 网关通过供应商 `requires_session_header: true` 在每次请求动态注入一个 UUID 会话头；
+> 该头不能放静态 `extra_headers`（适配器缓存会冻结它）。
+>
+> 收录的 17 个文本模型（OpenAI 兼容 `/chat/completions` 线，真实 key 实测 200）：
+> `glm-5.3-flash`、`glm-5.3`、`glm-5.2`、`glm-5.1`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、
+> `longcat-2.0`、`deepseek-v4-pro`、`deepseek-v4-flash`、`deepseek-flash`、`deepseek-v4.1-flash`、
+> `deepseek-v4-flash-vision-exp`（视觉）、`mimo-v2.5`、`mimo-v2.5-pro`、`hy4-preview`、`hy3`。
+> OpenCode Go 其余模型走 Anthropic `messages` 或 OpenAI `responses` 契约（本网关为 OpenAI 兼容
+> 转发，暂未接入）；`glm-5`、`kimi-k2.5`、`hy3-preview` 实测上游返回「Model is unavailable」未收录。
 
 > Agnes 的图像/视频走自有端点，通过供应商配置里的 `media` 段指定。
 
@@ -79,13 +92,15 @@ providers:
 ```yaml
 routes:
   wjd:
-    timeout: 60         # 单模型 60s 没出结果就切下一个（避免 6×120s 挂死）
+    timeout: 60         # 单模型 60s 没出结果就切下一个（避免 20×120s 挂死）
     retry: 1           # 每个模型试 1 次，失败立即切下一个
     # wjd 链路 = 全部文本模型（新增/现有文本模型都必须加入）
     models:
       - "ark-code-latest"     # 1) 火山方舟（最高优先级）
       - "agnes-3.0-flash"     # 2) Agnes 3.0
       - "agnes-2.5-flash"     # 3) Agnes 2.5
+      # ── 4-20) OpenCode Go 17 个文本模型（glm-5.3-flash…hy3，
+      #          完整列表见 data/gateway.yaml routes 段）──
 
 circuit:                 # 供应商熔断
   enabled: true

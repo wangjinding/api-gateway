@@ -11,6 +11,7 @@ Agnes / 火山方舟 两家均使用 OpenAI 兼容 API
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any, AsyncIterator
 
 
@@ -28,9 +29,22 @@ class OpenAICompatAdapter(BaseAdapter):
         headers: dict[str, str] | None = None,
         timeout: int = 120,
         media=None,
+        requires_session_header: bool = False,
     ):
         super().__init__(name=name, base_url=base_url, timeout=timeout, media=media)
         self._headers: dict[str, str] = headers or {}
+        # OpenCode Go 要求每个 /chat/completions 带稳定 x-opencode-session。
+        # 不能放静态 headers（_get_adapter 会缓存适配器、冻结 header），
+        # 所以在每次请求时动态生成一个 UUID 会话头。
+        self._requires_session = requires_session_header
+
+    def _req_headers(self) -> dict[str, str]:
+        """每次请求的 headers。需要会话头的供应商动态注入 x-opencode-session。"""
+        if not self._requires_session:
+            return self._headers
+        headers = dict(self._headers)
+        headers["x-opencode-session"] = uuid.uuid4().hex
+        return headers
 
     def _build_payload(
         self,
@@ -87,7 +101,7 @@ class OpenAICompatAdapter(BaseAdapter):
         )
         # Bug 4 修复: 用 lease 占用 client，热重载 close 会等本次请求结束才真正关连接
         async with self._lease() as client:
-            resp = await client.post("/chat/completions", json=payload, headers=self._headers)
+            resp = await client.post("/chat/completions", json=payload, headers=self._req_headers())
             resp.raise_for_status()
             data = json_or_raise(resp)
 
@@ -120,7 +134,7 @@ class OpenAICompatAdapter(BaseAdapter):
         # Bug 4 修复: lease 在整个流式期间持有占用，热重载/关闭不会掐断在途流
         async with self._lease() as client:
             async with client.stream(
-                "POST", "/chat/completions", json=payload, headers=self._headers
+                "POST", "/chat/completions", json=payload, headers=self._req_headers()
             ) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():

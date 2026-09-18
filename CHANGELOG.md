@@ -4,7 +4,39 @@
 
 ---
 
-## 2026-09-18 · wjd 链路 = 全部文本模型（老板决策）
+## 2026-09-18 · 添加 OpenCode Go 供应商（订阅编程模型）
+
+**一句话**：给网关接入 OpenCode Go（`https://opencode.ai/zen/go/v1`）的 OpenAI 兼容 `/chat/completions` 线 17 个文本模型；按老板「wjd = 全部文本模型」规则全部并入 `routes.wjd`。
+
+### 背景（文档要点）
+- OpenCode Go 是每月订阅制编程模型入口；**每个请求必须带 `x-opencode-session` 头**（实测缺它接口 400 `MissingSessionID`），建议专属 `User-Agent`（实测 UA 不敏感，session 头才是硬性要求）。
+- 模型分三条契约线：`/chat/completions`（OpenAI，本网关可直连）、`/messages`（Anthropic MiniMax/Qwen 等）、`/responses`（Grok/GPT/Muse）。仅接入 OpenAI 兼容线；其余两条不在本次范围。
+
+### 改动
+- **`data/.env`**：新增 `OPENCODE_API_KEY`（600、gitignored）。
+- **`data/gateway.yaml`**：
+  - 新增 `providers.opencode`：`base_url https://opencode.ai/zen/go/v1`、`token_env OPENCODE_API_KEY`、`requires_session_header: true`、`extra_headers.User-Agent: api-gateway/2.4.0 (jakon opencode-go)`，收录 **17 个**文本模型（`glm-5.3-flash/5.3/5.2/5.1`、`kimi-k3/k2.7-code/k2.6`、`longcat-2.0`、`deepseek-v4-pro/v4-flash/flash/v4.1-flash/v4-flash-vision-exp(视觉)`、`mimo-v2.5/v2.5-pro`、`hy4-preview/hy3`）。
+  - `routes.wjd` 追加这 17 个（wjd 链 = 20 个文本模型）。
+  - 未收录：`glm-5`、`kimi-k2.5`、`hy3-preview`（上游实测 400 Model is unavailable）；`/messages`、`/responses` 线模型未接入（适配器不含该契约）。
+- **`app/config.py`**：`ProviderConfig` 加 `requires_session_header` 字段并解析。
+- **`app/adapters/openai_compat.py`**：`OpenAICompatAdapter` 加 `requires_session_header`，在**每次请求**动态注入 `x-opencode-session: <uuid>`（不能放静态 headers——`_get_adapter` 缓存会冻结）。
+- **`app/adapters/__init__.py`**：`create_adapter` 透传开关。
+- **`app/settings.py`**：面板视图与写回均增补 `requires_session_header`（否则 roundtrip 后该字段被重置为 False）。
+- **`frontend/src/views/Settings.vue`**：默认模型下拉 `TEXT_MODELS` 追加 17 个 go 模型（老板「全部文本模型」）、保留 `wjd` 在最前。
+- **`tests/test_gateway.py`**：
+  - `test_load_config_providers` 断言 `{"agnes","volc_engine","opencode"}`；`test_load_config_routes` wjd 长度 3→20。
+  - **修复既有污染**：`test_effective_rps_priority` 直接用共享 `m._cfg()` 把 `agnes.rate_limit_rps` 改成 9 且未还原，新增 go 模型后触发限流桶被填满、令 `chat_unknown / batch / streaming fallback` 三个测试在全套运行时假红——已加 `finally` 还原（这本质是测试手尾泄漏，非业务 bug）。
+
+### 验证
+- 文档端点实测：`GET /zen/go/v1/models` 通，返回 38 个模型（原生 id、无前缀）。
+- 契约实测：17 个 chat/completions 模型真实 key 全部 200；`glm-5` / `kimi-k2.5` / `hy3-preview` 400 未收录。
+- 头敏感性实测：带 `x-opencode-session` 必 200，缺它必 400（UA 无关）。
+- 适配器端到端（真实 key）：非流式 `glm-5.3-flash` 与流式 `deepseek-v4-flash` 均正常返回（证明会话头注入生效）。
+- 单测：**155 passed / 0 failed**；前端 `vue-tsc --noEmit` 通过。
+
+### 上线（待老板批准）
+- 含 Python 代码改动（config / adapters / settings）→ 需 `supervisorctl restart api-gateway:api-gateway_00` 才生效（会踢网页会话）；纯 yaml 的 hot_reload 只重载供应商/模型定义，`requires_session_header` 字段与注入逻辑要重启后代码才认。
+- 前端 build 覆盖 `dist`（纯前端上线动作）与 CNB 推送待老板确认。
 
 **一句话**：老板拍板——**现有 + 以后新增的每一个文本模型都必须加入 `routes.wjd` 兜底链**。本次把 `agnes-2.5-flash` 补进 wjd，并把这句作为长期规则写入 MEMORY / README / CHANGELOG，供后续新增模型照做。
 

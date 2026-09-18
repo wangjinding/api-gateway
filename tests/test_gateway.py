@@ -89,15 +89,16 @@ def _login_admin_session(client=None):
 # ── 配置加载 ──
 def test_load_config_providers():
     cfg = load_config(CONFIG)
-    assert set(cfg.providers.keys()) == {"agnes", "volc_engine"}
+    # 三家供应商：Agnes / 火山方舟 / OpenCode Go
+    assert set(cfg.providers.keys()) == {"agnes", "volc_engine", "opencode"}
     assert cfg.providers["agnes"].models[0].id == "agnes-3.0-flash"
 
 
 def test_load_config_routes():
     cfg = load_config(CONFIG)
     assert "wjd" in cfg.routes
-    # wjd 链路 = 全部文本模型（ark-code-latest / agnes-3.0-flash / agnes-2.5-flash）
-    assert len(cfg.routes["wjd"].models) == 3
+    # wjd 链路 = 全部文本模型（20 个：火山 + Agnes×2 + OpenCode Go×17）
+    assert len(cfg.routes["wjd"].models) == 20
     assert cfg.routes["wjd"].timeout == 60
     assert cfg.routes["wjd"].retry == 1
 
@@ -321,16 +322,23 @@ def test_effective_rps_priority():
     import app.main as m
     from app.config import RouteInfo
     cfg = m._cfg()
+    # 还原陷阱（新增 OpenCode 供应商后暴露）：这里直接改的是共享 m._cfg() 的
+    # provider，必须用 finally 还原，否则 agnes 限流=9 会污染后续所有真实调用测试
+    # （chat_unknown / batch / streaming fallback 会因 agnes 被限流 9rps 而异常 502）。
+    saved_agnes_rps = cfg.providers["agnes"].rate_limit_rps
     route = RouteInfo(name="r", rate_limit_rps=5)
-    # 路由级优先
-    assert m._effective_rps(cfg, route, "agnes") == 5
-    # 无路由 → 全局
-    assert m._effective_rps(cfg, None, "agnes") == cfg.server.rate_limit_rps
-    # 供应商级：给 provider 配 rps
-    cfg.providers["agnes"].rate_limit_rps = 9
-    assert m._effective_rps(cfg, None, "agnes") == 9
-    # 路由级仍优先于供应商级
-    assert m._effective_rps(cfg, route, "agnes") == 5
+    try:
+        # 路由级优先
+        assert m._effective_rps(cfg, route, "agnes") == 5
+        # 无路由 → 全局
+        assert m._effective_rps(cfg, None, "agnes") == cfg.server.rate_limit_rps
+        # 供应商级：给 provider 配 rps
+        cfg.providers["agnes"].rate_limit_rps = 9
+        assert m._effective_rps(cfg, None, "agnes") == 9
+        # 路由级仍优先于供应商级
+        assert m._effective_rps(cfg, route, "agnes") == 5
+    finally:
+        cfg.providers["agnes"].rate_limit_rps = saved_agnes_rps
 
 
 # ── Bug 2: 限流桶 LRU 清理 ──
