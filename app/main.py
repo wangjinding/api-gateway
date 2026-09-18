@@ -1309,6 +1309,7 @@ async def _chat_fallback(cfg, rid, caller, request, req, chain, route, messages,
                     max_tokens=req.max_tokens, stop=req.stop,
                     tools=tools, tool_choice=tool_choice,
                     extra=req.upstream_extra() or None,
+                    session_id=req.conversation_id,
                 )
                 ok = True
                 break
@@ -1412,6 +1413,7 @@ def _stream_response(request, req, chain, route, messages, tools):
                         max_tokens=req.max_tokens, stop=req.stop,
                         tools=tools, tool_choice=req.tool_choice,
                         extra=req.upstream_extra() or None,
+                        session_id=req.conversation_id,
                     )
                     async for chunk in stream_gen:
                         if chunk.get("done"):

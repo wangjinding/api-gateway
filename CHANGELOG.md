@@ -4,7 +4,24 @@
 
 ---
 
-## 2026-09-18 · 添加 OpenCode Go 供应商（订阅编程模型）
+## 2026-09-18 · OpenCode Go 会话 id 升级为「对话级稳定」（方案 A）
+
+**背景**：上一轮 `x-opencode-session` 是每请求随机 UUID —— 能过上游 400 强校验，但每次 id 都变，吃不到文档所述的提示词缓存。本轮按老板要求实现**稳定会话**：同一段对话共用同一个 session id。
+
+### 改动
+- **`app/models.py`**：`ChatRequest` 显式声明 `conversation_id: str | None`（网关内部字段，不进 `model_extra` → **不透传上游**）。
+- **`app/adapters/openai_compat.py`**：`_req_headers(session_id)`、`chat`/`chat_stream` 新增 `session_id` 参数——传入则原样用作 `x-opencode-session`，缺省回退随机 UUID。
+- **`app/main.py`**：非流式与流式主链路把 `req.conversation_id` 作为 `session_id` 传入适配器。
+- **`frontend/src/views/Chat.vue`**：对话页新增 `convId`（`crypto.randomUUID`，带老浏览器回退），`buildPayload` 注入 `conversation_id`，随对话状态持久化（sessionStorage + 服务端历史）；`applyChat` 沿用历史里的 id、否则新建；`clearConversation` 生成新 id（新对话不共享旧缓存）。
+- **`tests/test_gateway.py`**：新增 `test_chat_conversation_id_is_internal_not_upstream`、`test_opencode_session_header_from_conversation_id`。
+
+### 验证
+- 单测 **157 passed / 0 failed**（+2）；前端 `vue-tsc --noEmit` 通过。
+- 真实 key 冒烟：同一 `conversation_id` 两次调用均 200，`x-opencode-session` 稳定一致；缺省回退 32 位随机、两次不同；非会话供应商不带该头。
+- 说明：缓存命中是上游机会性优化，网关侧保证的是「同一对话稳定 session」。
+
+### 上线（待老板批准）
+- 含后端代码改动 → 需 `supervisorctl restart`；前端 `Settings.vue`/`Chat.vue` 改动需 `npm run build` 覆盖 `dist`；CNB 推送待确认。
 
 **一句话**：给网关接入 OpenCode Go（`https://opencode.ai/zen/go/v1`）的 OpenAI 兼容 `/chat/completions` 线 17 个文本模型；按老板「wjd = 全部文本模型」规则全部并入 `routes.wjd`。
 

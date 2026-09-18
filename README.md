@@ -49,8 +49,13 @@ api-gateway/
 
 > OpenCode Go 是每月订阅的编程模型入口（不在订阅内按 token 额外计费）。官方硬性要求每个
 > `/chat/completions` 带 **`x-opencode-session`**（缺失直接 400），并建议专属 `User-Agent`。
-> 网关通过供应商 `requires_session_header: true` 在每次请求动态注入一个 UUID 会话头；
-> 该头不能放静态 `extra_headers`（适配器缓存会冻结它）。
+> 网关通过供应商 `requires_session_header: true` 动态注入该头，且**该头不能放静态
+> `extra_headers`**（适配器缓存会把它冻结）。会话 id 的取值逻辑（方案 A）：
+> 前端对话页为「同一段对话」维持一个稳定 `conversation_id` 并随请求带来，网关把它
+> 原样透传为 `x-opencode-session`——同一段对话的多次请求共享同一 session，可命中
+> 上游提示词缓存；请求未带时回退为每次请求一个随机 UUID（仍能过强校验，只是没有
+> 缓存收益）。`conversation_id` 是网关内部字段（在 `ChatRequest` 显式声明），
+> **不会透传给上游**。
 >
 > 收录的 17 个文本模型（OpenAI 兼容 `/chat/completions` 线，真实 key 实测 200）：
 > `glm-5.3-flash`、`glm-5.3`、`glm-5.2`、`glm-5.1`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、

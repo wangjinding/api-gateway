@@ -38,12 +38,17 @@ class OpenAICompatAdapter(BaseAdapter):
         # 所以在每次请求时动态生成一个 UUID 会话头。
         self._requires_session = requires_session_header
 
-    def _req_headers(self) -> dict[str, str]:
-        """每次请求的 headers。需要会话头的供应商动态注入 x-opencode-session。"""
+    def _req_headers(self, session_id: str | None = None) -> dict[str, str]:
+        """每次请求的 headers。需要会话头的供应商动态注入 x-opencode-session。
+
+        session_id 由调用方传入（网关把对话的 conversation_id 透传过来）：
+        - 有 → 同一段对话的所有请求共用同一个 session（吃到上游提示词缓存）；
+        - 无 → 回退为每请求一个随机 UUID（仍能过上游的强校验，只是没有缓存收益）。
+        """
         if not self._requires_session:
             return self._headers
         headers = dict(self._headers)
-        headers["x-opencode-session"] = uuid.uuid4().hex
+        headers["x-opencode-session"] = session_id or uuid.uuid4().hex
         return headers
 
     def _build_payload(
@@ -94,6 +99,7 @@ class OpenAICompatAdapter(BaseAdapter):
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
         extra: dict[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         payload = self._build_payload(
             model, messages, temperature, top_p, max_tokens,
@@ -101,7 +107,7 @@ class OpenAICompatAdapter(BaseAdapter):
         )
         # Bug 4 修复: 用 lease 占用 client，热重载 close 会等本次请求结束才真正关连接
         async with self._lease() as client:
-            resp = await client.post("/chat/completions", json=payload, headers=self._req_headers())
+            resp = await client.post("/chat/completions", json=payload, headers=self._req_headers(session_id))
             resp.raise_for_status()
             data = json_or_raise(resp)
 
@@ -126,6 +132,7 @@ class OpenAICompatAdapter(BaseAdapter):
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
         extra: dict[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> AsyncIterator[dict]:
         payload = self._build_payload(
             model, messages, temperature, top_p, max_tokens,
@@ -134,7 +141,7 @@ class OpenAICompatAdapter(BaseAdapter):
         # Bug 4 修复: lease 在整个流式期间持有占用，热重载/关闭不会掐断在途流
         async with self._lease() as client:
             async with client.stream(
-                "POST", "/chat/completions", json=payload, headers=self._req_headers()
+                "POST", "/chat/completions", json=payload, headers=self._req_headers(session_id)
             ) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():

@@ -332,6 +332,15 @@ const params = reactive({
 const paramsOpen = ref(false)
 const streaming = ref(false)
 const messages = ref<ChatMessage[]>([])
+
+// 方案 A：为「同一段对话」维持一个稳定 id，随请求带给网关 → 网关透传为
+// OpenCode Go 的 x-opencode-session，使同一段对话的多次请求命中上游提示词缓存。
+// 清空/新建对话时重新生成；持久化进对话状态，刷新或换设备都续用同一段会话。
+function genConvId(): string {
+  try { if (crypto?.randomUUID) return crypto.randomUUID() } catch { /* 老浏览器回退 */ }
+  return 'c-' + Math.random().toString(16).slice(2) + Date.now().toString(16)
+}
+const convId = ref(genConvId())
 const text = ref('')
 // 第十三轮: 视觉对话 —— 待发送消息附带的图片（上传的图片在浏览器内压成 data URI；也支持粘 URL）
 interface PendingImg { uri: string; name: string; thumb: string }
@@ -394,7 +403,7 @@ async function persist() {
     reasoning: m.reasoning || '', meta: m.meta || null, usage: m.usage || null,
     cost: m.cost ?? null, error: m.error || '',
   }))
-  const state = { params: { ...params, model: params.model }, messages: slim }
+  const state = { params: { ...params, model: params.model }, messages: slim, convId: convId.value }
   try {
     sessionStorage.setItem(SKEY, JSON.stringify(state))   // 本地留一份当缓存/离线兜底
   } catch { /* 配额满就只靠服务端 */ }
@@ -413,6 +422,8 @@ function applyDefaults(defs: any) {
 }
 
 function applyChat(j: any) {
+  // 同一段对话的稳定 id：历史里带着就沿用，否则视为新对话生成一个
+  convId.value = (typeof j?.convId === 'string' && j.convId) ? j.convId : genConvId()
   if (j?.params?.model) Object.assign(params, j.params)
   if (Array.isArray(j?.messages)) {
     let maxId = 0
@@ -570,6 +581,8 @@ function buildPayload() {
     top_p: params.top_p,
     max_tokens: params.max_tokens ?? undefined,
     stream: params.stream,
+    // 同一段对话不变的会话 id（网关用作 OpenCode Go 的 x-opencode-session）
+    conversation_id: convId.value || undefined,
   }
 }
 
@@ -686,6 +699,7 @@ function stop() {
 
 function clearConversation() {
   messages.value = []
+  convId.value = genConvId()   // 新对话 → 新的会话 id（不再共享上一段对话的缓存）
   persist()
 }
 

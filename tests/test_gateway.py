@@ -3747,6 +3747,38 @@ def test_admin_disabled_flag_in_file_is_autohealed():
         assert _json.loads(p.read_text(encoding="utf-8"))["users"]["admin"]["disabled"] is False
 
 
+def test_chat_conversation_id_is_internal_not_upstream():
+    """方案 A：conversation_id 是网关内部字段，绝不能透传给上游。"""
+    from app.models import ChatRequest
+    req = ChatRequest(model="wjd", messages=[{"role": "user", "content": "hi"}],
+                      conversation_id="conv-123")
+    assert req.conversation_id == "conv-123"
+    assert "conversation_id" not in req.upstream_extra(), "内部字段不应透传上游"
+    assert "conversation_id" not in req.unknown_fields()
+    # 未带时为 None，且同样不透传
+    req2 = ChatRequest(model="wjd", messages=[{"role": "user", "content": "hi"}])
+    assert req2.conversation_id is None
+    assert "conversation_id" not in req2.upstream_extra()
+
+
+def test_opencode_session_header_from_conversation_id():
+    """方案 A：同一对话的 conversation_id 原样作为 x-opencode-session；缺省回退随机 UUID。"""
+    from app.adapters import create_adapter
+    cfg = load_config(CONFIG)
+    p = cfg.providers["opencode"]
+    assert p.requires_session_header is True
+    ad = create_adapter(p, "dummy-token")
+    # 传会话 id → 原样使用（同一段对话稳定，吃上游提示词缓存）
+    assert ad._req_headers("conv-abc")["x-opencode-session"] == "conv-abc"
+    # 未传 → 回退 32 位随机 hex，且两次不同
+    h1 = ad._req_headers()["x-opencode-session"]
+    h2 = ad._req_headers()["x-opencode-session"]
+    assert len(h1) == 32 and h1 != h2
+    # 非会话供应商（agnes / 火山）根本不该带这个头
+    ag = create_adapter(cfg.providers["agnes"], "dummy-token")
+    assert "x-opencode-session" not in ag._req_headers("conv-abc")
+
+
 # 直接运行（非 pytest）
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]

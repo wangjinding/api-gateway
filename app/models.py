@@ -108,6 +108,10 @@ class ChatRequest(BaseModel):
     top_logprobs: int | None = None
     parallel_tool_calls: bool | None = None
     stream_options: dict[str, Any] | None = None
+    # 网关内部字段（显式声明 → 不进 model_extra → 不透传上游）：
+    # 由前端对话页为「同一段对话」提供一个稳定 id；后端只拿它当 OpenCode Go 的
+    # x-opencode-session（同一对话共享，吃到上游提示词缓存）。非 opencode 供应商忽略。
+    conversation_id: str | None = None
     # 透传供应商特有参数
     extra: dict[str, Any] = Field(default_factory=dict)
 
