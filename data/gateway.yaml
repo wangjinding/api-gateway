@@ -27,6 +27,12 @@ providers:
         # 第十三轮: Agnes 3.0 Flash 文档「输入模态：文本、图像 URL」→ 支持视觉（对话带图）。
         #   实测 data:image/png;base64,... 也能识别。带图请求走路由别名时会被排到链首。
         vision: true
+      - id: "agnes-2.5-flash"
+        display_name: "Agnes 2.5 Flash"
+        type: "text"
+        # Agnes 2.5 Flash（2.0 升级版）：OpenAI 兼容 /v1/chat/completions，支持图像 URL 输入与工具调用，
+        #   上下文 512K / 最大输出 65.5K；当前定价暂免（¥0/百万）。参见官方文档 agnes-25-flash。
+        vision: true
       - id: "agnes-image-2.5-flash"
         display_name: "Agnes Image 2.5 Flash"
         type: "image"
@@ -86,6 +92,7 @@ observability:
 pricing:
   per_model:
     agnes-3.0-flash:      { input: 0.35, output: 1.00 }
+    agnes-2.5-flash:      { input: 0, output: 0 }   # 文档现价暂免（输入/输出/缓存命中均 ¥0/百万）
     ark-code-latest:      { input: 0.50, output: 2.00 }
 
 # ── 媒体下载代理白名单（第十七轮）────────────────────────

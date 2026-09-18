@@ -43,7 +43,7 @@ api-gateway/
 
 | 供应商 | Base URL | 认证 | 模型 |
 |---|---|---|---|
-| Agnes AI | `https://api.agnes-ai.cn/v1` | Bearer | `agnes-3.0-flash`(text)、`agnes-image-2.5-flash`(image)、`agnes-video-2.5-flash`(video) |
+| Agnes AI | `https://api.agnes-ai.cn/v1` | Bearer | `agnes-3.0-flash`、`agnes-2.5-flash`(text，支持图像输入)、`agnes-image-2.5-flash`(image)、`agnes-video-2.5-flash`(video) |
 | 火山方舟 Coding | `https://ark.cn-beijing.volces.com/api/coding/v3` | Bearer | `ark-code-latest`（text） |
 
 > Agnes 的图像/视频走自有端点，通过供应商配置里的 `media` 段指定。

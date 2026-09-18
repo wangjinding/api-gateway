@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-09-18 · 新增 Agnes 2.5 Flash 文本模型
+
+**一句话**：给 Agnes 供应商注册新模型 `agnes-2.5-flash`（2.0 升级版，OpenAI 兼容 Chat Completions，支持图像 URL 输入）。
+
+### 改动
+- **`data/gateway.yaml`**：`providers.agnes.models` 新增：
+  - `agnes-2.5-flash`（text，`vision: true`，注释注明：2.0 升级版、OpenAI 兼容 `/v1/chat/completions`、支持图像 URL 输入与工具调用、上下文 512K / 输出 65.5K、现价暂免）。
+  - `pricing.per_model` 新增 `agnes-2.5-flash: { input: 0, output: 0 }`（文档现价输入/输出/缓存命中均 ¥0/百万）。
+- **`frontend/src/views/Settings.vue`**：`TEXT_MODELS`（对话默认模型下拉）插入 `agnes-2.5-flash`（`['wjd','agnes-3.0-flash','agnes-2.5-flash','ark-code-latest']`）。
+- **`README.md`**：供应商表 Agnes 行补 `agnes-2.5-flash`（text，支持图像输入）。
+
+### 实测（连真实 AGNES_API_KEY，经生产适配器直调）
+- 文本 `agnes-2.5-flash` → 200 "正常" ✅
+- 视觉（200×200 红图 data:URI）→ 200 "红色" ✅（vision 标记确认正确）
+
+### 上线
+- 纯配置（gateway.yaml）`hot_reload` ≤15s 自动生效、**免重启**；前端 `npm run build` 覆盖 dist（新入口 `index-BcM3V8if.js`），`/web/` 静态服务自动服务新产物。
+- 单测 **155 passed / 0 failed**（新增模型未破坏现有断言，`models[0]` 仍为 `agnes-3.0-flash`）。
+
+### 说明
+- **未加入 `routes.wjd` 兜底链**（boss 未要求）——如需让它在 wjd 路由里兜底，加进 `routes.wjd.models` 即可。
+- `agnes-3.0-flash` 仍是 `TOKEN_MODELS` 里第 2 顺位（紧随 wjd）。
+
+---
+
 ## 2026-09-17 · 移除智谱 GLM（bigmodel）供应商
 
 **一句话**：老板要求删除智谱供应商，代码/配置/文档/测试/前端全清——覆盖上上轮新增的 6 个 GLM 文本模型（含 3 视觉）、CogView-3-Flash 文生图、CogVideoX-Flash 文生视频及配套的媒体契约代码。
