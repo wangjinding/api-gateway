@@ -407,6 +407,25 @@ export default {
     protocolNaHint: 'Image / video models use the dedicated /v1/images/generations and /v1/videos endpoints and are not tied to the three protocol lines',
     protocolHintRow: 'Supported formats: {lines}　',
     probedLine: 'probed via {p}',
+    // Round 31: virtual model id (alias) — clients always send model: wjd, the gateway
+    // forwards to the model an admin picks. An alias is not a model: it never shows up in
+    // the speed-test list or the model counts, only in this card and its read-only row.
+    aliasCard: 'Virtual model id (alias)',
+    aliasSub: 'Clients always send model: {id}; the gateway forwards to the model you pick',
+    aliasLine: 'Only the chat/completions (OpenAI) format is supported: calling {id} on /v1/messages or /v1/responses is rejected with 400 at the gateway (it never translates formats).',
+    aliasInherit: 'Vision, forced params and pricing all follow the target model — the alias stores no configuration of its own, so switching the target switches everything.',
+    aliasName: 'Alias id',
+    aliasTarget: 'Target model',
+    aliasTargetPick: 'Pick a text model that supports chat/completions',
+    aliasPickHint: 'Only text models that support chat/completions can be picked; everything else is greyed out (image/video models, and models that only speak messages or responses).',
+    aliasCurrentTarget: 'Currently points to',
+    aliasEnabled: 'Enabled',
+    aliasDisabled: 'Disabled',
+    aliasNotConfigured: 'No target model configured yet — clients sending model: {id} get "unknown model".',
+    aliasReadonly: 'Read-only: the mapping is chosen by an admin in the gateway config',
+    aliasSave: 'Save mapping',
+    aliasSaved: '{id} → {target} is live',
+    aliasSaveFail: 'Save failed',
   },
   history: {
     saveFail: 'History could not be saved to the gateway (it may be lost on refresh) — check your session or network',

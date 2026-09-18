@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,32 @@ DEFAULT_PROTOCOLS: tuple[str, ...] = (PROTOCOL_CHAT,)
 
 # 出站鉴权方式：bearer（Authorization: Bearer xxx）/ x-api-key（Anthropic 系）/ none
 AUTH_STYLES: frozenset[str] = frozenset({"bearer", "x-api-key", "none"})
+
+# ── 虚拟模型 id（别名，第三十一轮）───────────────────────────────────
+# 老板决策（2026-09-18）：「设置一个 wjd 模型 id，路由到指定的模型上；在管理员的网关配置里
+# 可以选择 wjd 映射的模型」。落到实现上就是**一对一指针**：
+#
+#   aliases:
+#     wjd:
+#       enabled: true                     # false = 这个 id 不存在（调用返回未知模型）
+#       target: opencode/deepseek-v4.1-flash   # 必须是已配置的真实模型 id
+#       note: "给客户用的固定入口"           # 任意备注，只给人看
+#
+# 五条硬规则（都在保存期校验，不靠前端自觉）：
+#   ① 别名**固定走 chat/completions 线**（OpenAI 格式）—— 客户端要一个"名字稳定"的入口，
+#      不是"格式稳定"的转换器；用 messages / responses 打 wjd 在入口 400 指路，网关不做
+#      任何跨格式翻译（与三线直传的边界一致，见 PROTOCOLS 说明）。
+#   ② 因此 target 必须**支持 chat/completions**：面板里其余模型置灰不可选，服务端同样拒绝
+#      （置灰只是 UX，校验才是边界 —— 手改 YAML 也绕不过去）。
+#   ③ target 必须存在（写错 id 直接报错，不等到调用时才 404）。
+#   ④ 别名 id 不得与任何真实模型 id 重名（否则"wjd 到底指哪个"说不清）。
+#   ⑤ 别名不复制目标的任何配置：协议线、视觉能力、强制参数、定价一律**继承 target**
+#      —— 唯一事实来源，免得两份配置各自漂移。
+#
+# 与第二十七轮删掉的「路由链」（routes/fallback）的关系：那套是按 API Key 选链路、可多跳，
+# 别名是"这个名字转发给谁"的单跳指针。两者混在一起后没人看得懂配置，所以**不复活 routes**。
+# 配置里残留的 routes 段继续只告警、不解析。
+ALIAS_PROTOCOLS: tuple[str, ...] = (PROTOCOL_CHAT,)
 
 
 @dataclass
@@ -183,6 +210,21 @@ class ProviderConfig:
         return protocol in self.endpoints
 
 
+# ── 虚拟模型 id（别名）──
+@dataclass
+class AliasSpec:
+    """虚拟模型 id 的定义（详见 ALIAS_PROTOCOLS 上方的五条硬规则）。
+
+    它**不是模型**：不进 `_model_index`，也没有自己的 protocols/params/定价 ——
+    网关只拿它做一件事：把客户端写的 `wjd` 换成 target 那个真实模型 id，其余一切照旧
+    （挑供应商、盖强制参数、记账全按 target 走）。
+    """
+
+    enabled: bool = True     # false = 该 id 不生效（客户端拿到"未知模型"，等同于没配）
+    target: str = ""         # 目标真实模型 id（必须支持 chat/completions，保存期校验）
+    note: str = ""           # 备注，只给人看（面板/配置里显示）
+
+
 # ── 网关入口鉴权 ──
 # 账号体系（用户名/密码/API Key）由页面管理，保存在 data/users.json（见 app/users.py），
 # 配置文件**不再承载**鉴权用户/密钥 —— 这里只保留前端会话时长这一个运维开关。
@@ -269,6 +311,11 @@ class GatewayConfig:
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     pricing: Pricing = field(default_factory=Pricing)
     download: DownloadConfig = field(default_factory=DownloadConfig)
+    # 第三十一轮: 虚拟模型 id（别名）。键是客户端写的名字（当前就一个 `wjd`），
+    #   值是"转发到哪个真实模型"。**不建反向索引**：别名不属于 _model_index，
+    #   因为它不是模型 —— 谁想用别名，谁就得显式 resolve_alias()（见 main.py 的三处入口）。
+    #   这样媒体端点 / 未知模型分支不会"顺手"接受别名，行为可预测。
+    aliases: dict[str, AliasSpec] = field(default_factory=dict)
     # 模型 → (pkey, ProviderConfig, ModelInfo) 索引，避免每次请求线性扫描（性能）
     _model_index: dict[str, tuple[str, ProviderConfig, ModelInfo]] = field(
         default_factory=dict, init=False, repr=False, compare=False
@@ -276,6 +323,23 @@ class GatewayConfig:
 
     def __post_init__(self) -> None:
         self._rebuild_index()
+
+    def alias_of(self, model_id: str) -> AliasSpec | None:
+        """该 id 是不是一个**已启用**的别名；是则返回定义，否则 None。
+
+        停用（enabled: false）的别名与"没配过"完全同义 —— 调用方不需要知道它存在过。
+        """
+        spec = self.aliases.get(model_id)
+        return spec if (spec is not None and spec.enabled) else None
+
+    def resolve_alias(self, model_id: str) -> str:
+        """别名 → 目标真实模型 id；不是别名（或已停用、target 为空）→ 原样返回。
+
+        target 为空只可能出现在"已停用的半成品配置"里（保存期校验会拦住启用的空 target），
+        这里一律原样返回，绝不让空字符串流到下游去拼 URL。
+        """
+        spec = self.alias_of(model_id)
+        return spec.target if (spec is not None and spec.target) else model_id
 
     def _rebuild_index(self) -> None:
         index: dict[str, tuple[str, ProviderConfig, ModelInfo]] = {}
@@ -458,6 +522,52 @@ def _parse_protocols(v: Any, where: str) -> list[str]:
     return out
 
 
+def _parse_aliases(v: Any) -> dict[str, AliasSpec]:
+    """解析顶层 `aliases` 段（第三十一轮虚拟模型 id）。
+
+    容错口径（宁可报错，不可静默失效 —— 别名写错的后果是"客户端调这个 id 全部被拒"，
+    而且现场离配置很远）：
+
+      - 缺失 / None → {}（没配别名 = 功能没启用，不是错误）；
+      - 不是映射 → ConfigError；
+      - 别名 id 必须是 [A-Za-z0-9._-] 组成的 1~64 字符串（要能当 model 字段原样传）；
+      - 每个别名必须是映射（也认 `wjd: opencode/kimi-k3` 这种只写 target 的简写）；
+      - enabled 走 _opt_bool（认 "false"/no/off，默认 true）；
+      - target 首尾空白清掉。
+
+    **target 是否真实存在、是否支持 chat/completions 不在这里校验** —— 那需要模型索引，
+    统一放到 validate_config（保存期/启动期都会走它，一处口径）。
+    """
+    if v is None:
+        return {}
+    if not isinstance(v, dict):
+        raise ConfigError(f"aliases 必须是映射（如 {{wjd: {{target: 模型id}}}}），得到 {type(v).__name__}")
+    out: dict[str, AliasSpec] = {}
+    for raw_name, raw_spec in v.items():
+        name = str(raw_name or "").strip()
+        where = f"aliases.{name or '（空名）'}"
+        if not name:
+            raise ConfigError("aliases 里有空的别名 id")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", name):
+            raise ConfigError(
+                f"别名 id '{name}' 不合法：只能用字母/数字/点/下划线/连字符，长度 1~64"
+                f"（它会被客户端原样写进 model 字段）")
+        if isinstance(raw_spec, str):
+            # 简写：`wjd: opencode/kimi-k3` 等价于只填 target（其余用默认值）
+            spec = AliasSpec(target=raw_spec.strip())
+        elif isinstance(raw_spec, dict):
+            spec = AliasSpec(
+                enabled=_opt_bool(raw_spec.get("enabled"), f"{where}.enabled", True),
+                target=str(raw_spec.get("target") or "").strip(),
+                note=str(raw_spec.get("note") or ""),
+            )
+        else:
+            raise ConfigError(
+                f"{where} 必须是映射（enabled/target/note）或直接写目标 id，得到 {type(raw_spec).__name__}")
+        out[name] = spec
+    return out
+
+
 def _parse_endpoints(pval: dict[str, Any], pkey: str) -> dict[str, EndpointSpec]:
     """解析供应商级 `endpoints`（每条协议线的出站路径 / 鉴权 / 固定头）。
 
@@ -561,6 +671,44 @@ def validate_config(cfg: GatewayConfig) -> list[str]:
                         f"但该供应商的 endpoints 里没有这条线")
     # 账号体系已由页面管理（data/users.json，见 app/users.py），配置文件不再承载鉴权。
     #   首次启动会创建 admin/admin，不存在「自锁」场景。
+    #
+    # 第三十一轮: 虚拟模型 id（别名）—— 五条硬规则的 ①~④（见 ALIAS_PROTOCOLS 上方）。
+    #   这里是**唯一的边界**：面板把不支持 chat/completions 的模型置灰只是 UX，
+    #   手改 YAML / 直接打 PUT /config 都得在同一处被拦下，否则别名就成了绕过三线直传的后门。
+    for name, spec in (cfg.aliases or {}).items():
+        if cfg.find_provider_for_model(name) is not None:
+            issues.append(
+                f"别名 '{name}' 与真实模型 id 重名 —— 同一个名字不能既是模型又是别名，请改其中一方")
+        if not spec.enabled:
+            # 停用的别名不校验 target：允许"先停用、再慢慢改目标"，
+            #   也允许目标模型被删掉后先把别名停着（否则用户会被逼着立刻填一个不想要的 id）。
+            continue
+        if not spec.target:
+            issues.append(f"别名 '{name}' 已启用但没写 target（要转发到哪个真实模型）")
+            continue
+        found = cfg.find_provider_for_model(spec.target)
+        if found is None:
+            issues.append(
+                f"别名 '{name}' 的目标 '{spec.target}' 不存在"
+                f"（当前共 {len(cfg.all_models())} 个真实模型，可在「供应商与模型」页选择）")
+            continue
+        _pkey, _pconfig, minfo = found
+        proto = ALIAS_PROTOCOLS[0]
+        if minfo.type != "text":
+            # 图像/视频模型在 yaml 里没写 protocols → 会走 DEFAULT_PROTOCOLS(chat/completions)，
+            #   于是"格式上"看着可选，但它们真正的调用端点是 /v1/images/generations 之类，
+            #   拿别名去聊天只会把上游的 400 抛给用户。这里直接拦掉（面板里也不列出它们）。
+            issues.append(
+                f"别名 '{name}' 的目标 '{spec.target}' 是 {minfo.type} 模型 —— 别名只用于文本对话"
+                f"（chat/completions 线），请选一个文本模型")
+        elif not minfo.supports(proto):
+            issues.append(
+                f"别名 '{name}' 固定走 {proto} 线，但目标 '{spec.target}' 不支持这条线"
+                f"（它支持：{'、'.join(minfo.protocols) or '无'}）—— 网关不做跨格式转换，"
+                f"请选一个支持 {proto} 的模型")
+        elif not _pconfig.supports_protocol(proto):
+            issues.append(
+                f"别名 '{name}' 的目标 '{spec.target}' 所在供应商 '{_pkey}' 没有配置 {proto} 线的出站地址")
     return issues
 
 
@@ -683,8 +831,11 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
 
     # 第二十七轮: 「路由别名 / fallback 链」功能已整体移除。
     #   老配置里残留的 routes 段不再解析，只在日志里提醒一声（不报错，免得旧配置起不来）。
+    #   第三十一轮补一句：现在想要"给客户端一个固定模型名"用 `aliases` 段（见 ALIAS_PROTOCOLS
+    #   上方的说明）——它是一对一指针，不是按 Key 分链路，别拿旧概念往上套。
     if raw.get("routes"):
-        log.warning("配置里的 'routes' 段已废弃（路由别名功能已移除），本次加载忽略该段")
+        log.warning("配置里的 'routes' 段已废弃（路由链功能已移除），本次加载忽略该段 —— "
+                    "如果只是想要一个固定模型名指向某个真实模型，请改用 'aliases' 段")
 
     # 熔断器
     c_raw = raw.get("circuit", {}) or {}
@@ -717,6 +868,7 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
         providers=providers, server=server, auth=auth,
         circuit=circuit, observability=observability, pricing=pricing,
         download=_parse_download(raw),
+        aliases=_parse_aliases(raw.get("aliases")),
     )
     # Bug 12 修复: 结构性校验，坏配置立刻抛友好错误（启动/热重载都能拦住）
     issues = validate_config(cfg)

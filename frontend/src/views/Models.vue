@@ -78,6 +78,53 @@
       </div>
     </div>
 
+    <!-- 第三十一轮：虚拟模型 id（别名）。客户端固定写 model: wjd，实际转发到哪个真实模型
+         由管理员在这里选；member 只看只读行（数据来自 /v1/models 的 alias_of —— 普通账号
+         读不到 /config，也不需要读到）。
+         保存走 PUT /config（管理员 + 网页会话），**保存即生效**：不需要重启网关。 -->
+    <div v-if="aliasRows.length" class="card" style="margin-top: var(--gap)">
+      <div class="card-h">
+        <b>{{ t('models.aliasCard') }}</b>
+        <span class="sub">{{ t('models.aliasSub', { id: aliasRows[0].name }) }}</span>
+      </div>
+
+      <div v-for="a in aliasRows" :key="a.name" class="alias">
+        <div class="alias-top">
+          <Icon name="link" :size="14" class="alias-ico" />
+          <span class="pill alias-id">{{ a.name }}</span>
+          <span class="alias-arrow">→</span>
+          <span v-if="a.target" class="code">{{ a.target }}</span>
+          <span v-else class="muted-2">—</span>
+          <span class="pill" :class="a.enabled ? 'ok' : 'mute'">
+            {{ a.enabled ? t('models.aliasEnabled') : t('models.aliasDisabled') }}
+          </span>
+        </div>
+
+        <!-- 管理员：选目标（只有支持 chat/completions 的文本模型可选，其余置灰） -->
+        <div v-if="isAdmin" class="alias-edit">
+          <el-switch v-model="a.enabled" :active-text="t('models.aliasEnabled')" />
+          <el-select v-model="a.target" class="alias-sel" clearable
+                     :placeholder="t('models.aliasTargetPick')">
+            <el-option v-for="o in aliasOptions" :key="o.id" :value="o.id"
+                       :label="o.label" :disabled="!o.ok" />
+          </el-select>
+          <span style="flex:1"></span>
+          <el-button type="primary" size="small" :disabled="aliasSaveDisabled"
+                     :loading="aliasSaving" @click="saveAlias()">
+            {{ t('models.aliasSave') }}
+          </el-button>
+        </div>
+        <div v-else class="alias-ro">{{ t('models.aliasReadonly') }}</div>
+
+        <div class="alias-hint">
+          <div>{{ t('models.aliasLine', { id: a.name }) }}</div>
+          <div>{{ t('models.aliasInherit') }}</div>
+          <div v-if="isAdmin">{{ t('models.aliasPickHint') }}</div>
+          <div v-if="!a.target" class="alias-warn">{{ t('models.aliasNotConfigured', { id: a.name }) }}</div>
+        </div>
+      </div>
+    </div>
+
     <div class="card" style="margin-top: var(--gap)">
       <div class="card-h">
         <b>{{ t('models.modelListTitle') }}</b>
@@ -146,11 +193,14 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { api } from '../api'
+import { api, errText } from '../api'
+import { useSessionStore } from '../store/session'
 import Icon from '../components/Icon.vue'
 
 const router = useRouter()
 const { t } = useI18n()
+const store = useSessionStore()
+const isAdmin = computed(() => store.isAdmin)
 const items = ref<any[]>([])
 const health = ref<any>({})
 const loading = ref(false)
@@ -239,8 +289,77 @@ function latCls(id: string): string {
   return row ? (row.ok ? 'ok' : 'err') : 'mute'
 }
 
-// 第二十七轮: 路由别名条目（type === 'route'）已从 /v1/models 消失 → 这里只剩真实模型
-const models = computed(() => items.value)
+// 第三十一轮: /v1/models 里除了真实模型，还有「虚拟模型 id（别名）」（带 alias_of）。
+//   它**不是模型**：不进模型计数、不进测速列表、也不进下方模型表（它在自己的卡片里）——
+//   否则 KPI 的「N 个模型」会把别名也算进去，一键测速还会对着 wjd 报一个无意义的失败。
+const aliasItems = computed(() => items.value.filter((x: any) => x.alias_of))
+const models = computed(() => items.value.filter((x: any) => !x.alias_of))
+
+// ── 别名（第三十一轮）──
+// admin：读 GET /config 的 aliases（**含 enabled** —— 停用的别名在 /v1/models 里看不到），
+//   可改可存；没配过就给一行以 wjd 为名的空白模板（选完目标点保存即可）。
+// member：读 /v1/models 里的 alias_of，只显示只读行（PUT /config 本就只认管理员+会话）。
+const ALIAS_ID = 'wjd'      // 当前就这一个（老板 2026-09-18 定）；配置层支持多个，页面按列表渲染
+const aliasEdit = ref<any[]>([])
+const aliasSaving = ref(false)
+
+// 可选目标：**文本 + 支持 chat/completions**。其余一律置灰（图像/视频模型、只认 messages/
+//   responses 的模型）—— 置灰只是 UX，真正拦人的是保存期的配置校验（手改 YAML 也绕不过去）。
+const aliasOptions = computed(() => models.value
+  .filter((m: any) => m.type === 'text')
+  .map((m: any) => {
+    const lines = protocolsOf(m)
+    const ok = lines.includes('chat/completions')
+    const provider = m.provider_name || '—'
+    // 不可选的选项把"为什么不能选"写进标签（否则用户只能猜自己哪里填错了）
+    return { id: m.id, ok, label: ok ? `${m.id} · ${provider}` : `${m.id} · ${provider} · ${lines.join(' / ')}` }
+  })
+  // 可选的排前面（同一家供应商聚在一起），再按 id —— 30 多个模型里找目标不用来回扫
+  .sort((a: any, b: any) => (a.ok === b.ok ? a.label.localeCompare(b.label) : (a.ok ? -1 : 1))))
+
+const aliasRows = computed(() => (isAdmin.value
+  ? aliasEdit.value
+  : aliasItems.value.map((x: any) => ({ name: x.id, enabled: true, target: x.alias_of, note: x.alias_note || '' }))))
+
+// 启用但没选目标 = 存下去必被服务端拦（"已启用但没写 target"）→ 按钮直接置灰
+const aliasSaveDisabled = computed(() => aliasSaving.value || aliasEdit.value.some((a: any) => a.enabled && !a.target))
+
+async function loadAlias() {
+  try {
+    const j = await api('/config')
+    const al = (j && j.config && j.config.aliases) || {}
+    const rows = Object.keys(al).map((name) => ({
+      name, enabled: !!al[name].enabled, target: al[name].target || '', note: al[name].note || '',
+    }))
+    aliasEdit.value = rows.length ? rows : [{ name: ALIAS_ID, enabled: true, target: '', note: '' }]
+  } catch (e: any) {
+    if (e && e.status === 401) { router.push('/login'); return }
+    ElMessage.error(t('models.loadErr') + ': ' + errText(e))
+  }
+}
+
+async function saveAlias() {
+  if (aliasSaving.value) return
+  aliasSaving.value = true
+  try {
+    const aliases: Record<string, any> = {}
+    for (const a of aliasEdit.value) {
+      aliases[a.name] = { enabled: !!a.enabled, target: a.target || '', note: a.note || '' }
+    }
+    // PUT /config 的 body 形式：{config: <面板视图>} —— 只提交 aliases 这一段，
+    //   服务端按段合并（其余段沿用文件原文），所以这里不会碰供应商/服务参数。
+    await api('/config', { method: 'PUT', body: JSON.stringify({ config: { aliases } }) })
+    const hit = aliasEdit.value.find((a: any) => a.enabled && a.target)
+    ElMessage.success(hit ? t('models.aliasSaved', { id: hit.name, target: hit.target })
+      : t('models.aliasDisabled'))
+    await load()      // 保存即生效：重新拉一遍（/v1/models 与 /config 都以服务端为准）
+  } catch (e: any) {
+    if (e && e.status === 401) { router.push('/login'); return }
+    ElMessage.error(t('models.aliasSaveFail') + ': ' + errText(e))
+  } finally {
+    aliasSaving.value = false
+  }
+}
 
 const providerOf = computed(() => {
   const m: Record<string, string> = {}
@@ -314,19 +433,22 @@ const cards = computed(() => [
   { k: t('models.imageModels'), v: models.value.filter((m) => m.type === 'image').length, note: t('images.title') },
 ])
 
-onMounted(async () => {
+async function load() {
   loading.value = true
   try {
     const j = await api('/v1/models')
     items.value = j.data || []
     try { health.value = await api('/health') } catch { /* 可选 */ }
+    if (isAdmin.value) await loadAlias()      // 别名映射（管理员才有 /config 读权限）
   } catch (e: any) {
     if (e && e.status === 401) { router.push('/login'); return }
     err.value = t('models.loadErr') + ': ' + ((e && e.message) || String(e))
   } finally {
     loading.value = false
   }
-})
+}
+
+onMounted(load)
 </script>
 
 <style scoped>
@@ -388,4 +510,19 @@ onMounted(async () => {
 .st-lat { min-width: 88px; text-align: center; }
 .st-loading { font-style: italic; }
 .lat-head { display: flex; align-items: center; gap: 8px; padding: 2px 0 6px; }
+/* 第三十一轮：别名卡片（别名不是模型，用"指针"感的排版：名字 → 目标） */
+.alias { padding: 10px 0; }
+.alias + .alias { border-top: 1px dashed var(--line); }
+.alias-top { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.alias-ico { flex: none; color: var(--primary); }
+.alias-id {
+  color: var(--primary); background: var(--primary-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; padding: 2px 8px;
+}
+.alias-arrow { color: var(--muted-2); }
+.alias-edit { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.alias-sel { width: 340px; max-width: 100%; }
+.alias-ro { margin-top: 8px; font-size: 11.5px; color: var(--muted-2); }
+.alias-hint { margin-top: 8px; font-size: 11.5px; line-height: 1.65; color: var(--muted-2); }
+.alias-warn { color: var(--warn); }
 </style>

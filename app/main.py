@@ -42,7 +42,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.adapters import create_adapter
 from app.circuit import CircuitBreakerRegistry
 from app.config import (ConfigError, GatewayConfig, load_config, validate_warnings,
-                        PROTOCOL_CHAT, PROTOCOL_MESSAGES, PROTOCOL_RESPONSES, PROTOCOLS)
+                        PROTOCOL_CHAT, PROTOCOL_MESSAGES, PROTOCOL_RESPONSES, PROTOCOLS,
+                        ALIAS_PROTOCOLS)
 from app.metrics import (Metrics, AccessLog, RateLimiter, BODY_BY_RID, _BODY_MAX,
                          video_poll_push, video_polls,
                          ACCOUNT, ROLE)
@@ -252,6 +253,7 @@ async def _apply_config(new: GatewayConfig, *, source: str = "热重载") -> Non
       那个连接池再没人关闭（连接泄漏）。
     """
     global config
+    old_cfg = config
     config = new
     _metrics.enabled = new.server.metrics_enabled
     _access.resize(new.observability.access_log_maxlen)
@@ -274,6 +276,30 @@ async def _apply_config(new: GatewayConfig, *, source: str = "热重载") -> Non
     _warn_security_posture(new)
     log.warning("配置已生效（%s：%d 供应商 / 熔断=%s）",
                 source, len(new.providers), new.circuit.enabled)
+    # 第三十一轮（虚拟模型 id）: 别名决定"客户端看到的那个名字实际打给谁"，谁在什么时候
+    #   把它改到哪个模型上，必须能在日志里查到（页面保存的 source 里带着账号，热重载也写明），
+    #   否则这个入口被改过就只能靠猜。
+    _log_alias_changes(old_cfg, new, source)
+
+
+def _enabled_aliases(cfg: GatewayConfig) -> dict[str, str]:
+    """别名 → 目标（只取启用的）。停用的别名与"没配过"同义，不参与改动比较。"""
+    return {n: s.target for n, s in (cfg.aliases or {}).items() if s.enabled}
+
+
+def _log_alias_changes(old: GatewayConfig, new: GatewayConfig, source: str) -> None:
+    """别名指向的改动逐条记日志（新增 / 改指向 / 停用），没变则一句话都不说。"""
+    before, after = _enabled_aliases(old), _enabled_aliases(new)
+    for name in sorted(set(before) | set(after)):
+        b, a = before.get(name), after.get(name)
+        if b == a:
+            continue
+        if b is None:
+            log.warning("虚拟模型 id 生效（%s）: %s → %s", source, name, a)
+        elif a is None:
+            log.warning("虚拟模型 id 停用（%s）: %s（原指向 %s）", source, name, b)
+        else:
+            log.warning("虚拟模型 id 改指向（%s）: %s → %s（原 %s）", source, name, a, b)
 
 
 async def _hot_reload_loop() -> None:
@@ -1013,16 +1039,41 @@ async def require_auth_or_open(
         raise HTTPException(401, "无效或缺失的账号 / API Key", headers={"WWW-Authenticate": "Bearer"})
 
 
-def _require_protocol_model(cfg: GatewayConfig, model: str, protocol: str) -> str:
-    """校验「模型存在 + 声明了这条协议线」，返回模型 id（第二十七轮三线直传的闸门）。
+def _alias_line_mismatch(spec, name: str, protocol: str) -> str:
+    """用别名去打非 chat/completions 线时的 400 文案。
 
-    路由别名 / fallback 链已在第二十七轮整体移除：入站 model 必须是真实模型 id，
-    网关不再"帮你挑一个"、也不会跨线降级。为什么必须在这里挡：实测（OpenCode Go
-    2026-09-18）把 chat 线的模型打到 /messages 上，上游回的是 **500 Internal server
-    error**；把 messages 线的模型打到 /responses 上，回的是 401 "not supported for
-    format openai"。两种都不像"你选错了格式"，与其让用户对着这种错误猜，不如网关
-    直接 400 说清楚——候选支持哪几条线也一并报出来。
+    老板要的是一个"名字稳定"的入口，不是"格式稳定"的转换器：别名固定走 chat/completions
+    （见 config.ALIAS_PROTOCOLS）。这里把话说全 —— 它指向谁、该用哪个端点、哪个端点能用别名
+    —— 否则用户只看到一句"不支持"，还得回来问人。
     """
+    return (f"{name} 是虚拟模型 id（别名，指向 {spec.target or '（未配置目标）'}），"
+            f"只支持 {ALIAS_PROTOCOLS[0]} 格式。网关不做跨格式转换："
+            f"请把请求发到 POST /v1/{ALIAS_PROTOCOLS[0]}；"
+            f"要用 {protocol} 格式请直接写它指向的真实模型 id {spec.target or ''}".rstrip())
+
+
+def _require_protocol_model(cfg: GatewayConfig, model: str, protocol: str) -> str:
+    """校验「模型存在 + 声明了这条协议线」，返回**真实**模型 id（第二十七轮三线直传的闸门）。
+
+    路由链 / fallback 已在第二十七轮整体移除：入站 model 必须是真实模型 id（或第三十一轮
+    起的**别名**），网关不再"帮你挑一个"、也不会跨线降级。为什么必须在这里挡：实测
+    （OpenCode Go 2026-09-18）把 chat 线的模型打到 /messages 上，上游回的是 **500 Internal
+    server error**；把 messages 线的模型打到 /responses 上，回的是 401 "not supported for
+    format openai"。两种都不像"你选错了格式"，与其让用户对着这种错误猜，不如网关直接 400
+    说清楚——候选支持哪几条线也一并报出来。
+
+    第三十一轮（虚拟模型 id）：入站 model 允许写别名（如 wjd），这里把它换成目标真实模型 id
+    **后**再往下走 —— 于是"挑供应商 / 盖强制参数 / 记账 / 熔断"全部作用在真实模型上（一份事实），
+    而客户端请求名与真实目标名的对应关系由响应壳（model / served_model）与访问日志（model /
+    served）分别体现。返回真实 id 是**有意**的：下游每一处都该按真实模型办事。
+    """
+    spec = cfg.alias_of(model)
+    if spec is not None:
+        if protocol not in ALIAS_PROTOCOLS:
+            raise HTTPException(400, _alias_line_mismatch(spec, model, protocol))
+        if not spec.target:
+            raise HTTPException(400, f"虚拟模型 id {model} 没有配置目标模型（请在网关配置里设置）")
+        model = spec.target      # 之后一切按真实模型走
     found = cfg.find_provider_for_model(model)
     if found is None:
         raise HTTPException(400, f"未知模型: {model}")
@@ -1063,8 +1114,19 @@ def _resolve_media_model(cfg, model: str, media_type: str):
     - model 是真实模型 ID 且类型匹配（或 text）→ 直接 resolve
     - 找不到 → 返回 None
 
-    第二十七轮: 路由别名（如 wjd）解析分支已随路由功能整体移除 —— 媒体端点也只认真实模型 id。
+    第二十七轮: 路由链解析分支已随路由功能整体移除 —— 媒体端点也只认真实模型 id。
+    第三十一轮: 别名（wjd）在这里**显式拒绝**（抛 400），不是"找不到"。理由：别名只在文本
+      chat/completions 线上存在；图像/视频端点的契约（尺寸/时长/参考图/回调）跟文本完全不同，
+      "换个名字"在这边等于换一条业务线，很容易让人以为改名就能用。给一句能直接照做的错误，
+      比返回"模型不存在"更省事。
     """
+    aspec = cfg.alias_of(model)
+    if aspec is not None:
+        kind = {"image": "图像生成", "video": "视频生成"}.get(media_type, f"{media_type} 调用")
+        raise HTTPException(
+            400,
+            f"模型 {model} 是虚拟模型 id（别名，指向 {aspec.target}，只用于文本对话的 "
+            f"{ALIAS_PROTOCOLS[0]} 线），不能用于{kind}。请直接使用该端点支持的真实模型 id。")
     found = cfg.find_provider_for_model(model)
     if found:
         pkey, pconfig, minfo = found
@@ -1170,6 +1232,28 @@ def _models_payload():
                     #   调用方据此决定把请求发到 /v1/chat/completions、/v1/messages 还是
                     #   /v1/responses —— 网关不做任何跨线翻译，写错线直接 400。
                     "protocols": list(m.get("protocols") or [PROTOCOL_CHAT])})
+    # 第三十一轮: 虚拟模型 id（别名）也进目录 —— 客户端得能发现"有个叫 wjd 的 id 可以用"，
+    #   否则这个入口只存在于口头约定里。但它是指针不是模型：
+    #     · protocols 固定 chat/completions（别名只走 OpenAI 格式线，见 config.ALIAS_PROTOCOLS）；
+    #     · vision / params / provider / type 全部**继承目标**（唯一事实来源，避免两份配置漂移）；
+    #     · 多一个 alias_of（真实模型 id）与 alias_note —— 前端据此渲染「wjd → 目标」那一行
+    #       （admin 的选择框默认选中项、member 的只读行都读它）。
+    #   停用的别名、以及目标不可用的别名一律不出现（与"没配过"同义）。
+    for name, spec in (cfg.aliases or {}).items():
+        if not spec.enabled:
+            continue
+        tgt = cfg.find_provider_for_model(spec.target) if spec.target else None
+        if tgt is None:
+            continue      # 保存期已校验；这里只兜底，宁可不出条目也不给一个坏条目
+        apkey, apconfig, aminfo = tgt
+        data.append({"id": name, "object": "model", "created": created,
+                     "owned_by": apkey,
+                     "display_name": aminfo.display_name,
+                     "type": aminfo.type, "provider": apkey, "provider_name": apconfig.name,
+                     "vision": bool(aminfo.vision),
+                     "params": dict(aminfo.params or {}),
+                     "protocols": list(ALIAS_PROTOCOLS),
+                     "alias_of": aminfo.id, "alias_note": spec.note})
     payload = {
         "object": "list",
         "data": data,
@@ -1311,6 +1395,12 @@ def _resolve_passthrough(cfg: GatewayConfig, body: dict, protocol: str):
         conv = normalize_conversation_id(clean.pop("conversation_id", None))
     except ValueError as e:
         raise HTTPException(400, f"conversation_id {e}")
+    # 第三十一轮: 别名只走 chat/completions 线 —— 拿它打 messages / responses 一律入口 400，
+    #   且**在查模型之前**先判（否则用户会收到"未知模型: wjd"，而 wjd 明明在 /v1/models 里，
+    #   那种报错会把人带偏到"是不是我权限不够"上去）。
+    aspec = cfg.alias_of(model_in)
+    if aspec is not None:
+        raise HTTPException(400, _alias_line_mismatch(aspec, model_in, protocol))
     found = cfg.find_provider_for_model(model_in)
     if found is None:
         raise HTTPException(400, f"未知模型: {model_in}")
@@ -1529,6 +1619,15 @@ async def models_speedtest(request: Request, _auth=Depends(require_auth)):
     except Exception:
         _body = {}
     only = _body.get("model") if isinstance(_body, dict) else None
+    # 第三十一轮: 别名不单独测速。它没有"自己的"延迟（跑的就是目标模型的延迟），
+    #   而目标模型那一行本来就能测 —— 返回一句能直接照做的说明，
+    #   比落到下面的"模型不存在或非文本模型"（wjd 明明在 /v1/models 里）清楚得多。
+    _aspec = cfg.alias_of(str(only)) if only else None
+    if _aspec is not None:
+        return {"object": "list", "total": 1, "results": [{
+            "model": str(only), "display_name": str(only), "provider": "—",
+            "protocol": ALIAS_PROTOCOLS[0], "ok": False, "latency_ms": None,
+            "error": f"{only} 是虚拟模型 id（别名），不单独测速 —— 请测它指向的模型 {_aspec.target}"}]}
     # 探针超时（第二十五轮: 15s → 30s）：
     #   15s 对"慢的推理模型"太紧 —— 实测 mimo-v2.5 过网关 2.9s~8.4s、agnes-2.5-flash 11s，
     #   上游一排队就冲破 15s，被记成「调用失败」，和「模型真的坏了」完全分不清。
@@ -1845,6 +1944,13 @@ def _stream_response(request, req, model_id, messages, tools):
                             resp_parts.append(_d["content"])
                         if _d.get("reasoning_content"):
                             reason_parts.append(_d["reasoning_content"])
+                    # 第三十一轮（别名调用）: 上游 chunk 里带的是**真实模型 id**，而元信息帧
+                    #   报的是客户端请求的名字（req.model）。同一条流里出现两个名字，客户端会
+                    #   以为网关中途换过模型 —— 所以别名调用时把 chunk 的 model 也统一成请求名，
+                    #   真实目标由 served_model 表达（与非流式响应壳同一口径）。
+                    #   非别名调用时 req.model == model_id，这个分支恒不成立，一个字节都不动。
+                    if req.model != model_id:
+                        chunk["model"] = req.model
                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                 cb.record(True)
                 _metrics.record_call(model_id, pkey, ok=True)

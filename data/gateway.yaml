@@ -1,320 +1,414 @@
 # AI 网关配置文件（data/ 目录）
-# 供应商：Agnes / 火山方舟 Coding / OpenCode Go（订阅编程模型）
-# 密钥统一走 token_env 指向的环境变量（本机见 data/.env），不再在 yaml 存明文
-# 端口默认 8808
 #
-# 说明：本文件是项目的**唯一配置文件**（run.py 默认读取；GATEWAY_CONFIG 可覆盖）。
-
+# ⚠ 本文件由管理页面「网关配置」生成（管理员账号），页面保存时会**整份重写**：
+#   想要的历史决策/踩坑说明在 README.md（按轮次记录），这里只保留必要的现场注释。
+#   手改本文件仍然有效（server.hot_reload=true 时按 mtime 自动重载），
+#   但页面下次保存会以页面上的值为准 —— 改配置优先用页面。
+#
+# 端口默认 8808；密钥统一走 auth.token_env 指向的环境变量（本机见 .env），不在 yaml 存明文。
+# 本文件是项目的唯一配置文件（run.py 默认读取；GATEWAY_CONFIG 可覆盖）。
+# ── 供应商 + 模型清单 ───────────────────────────────────
+# auth.token_env 指向存放密钥的环境变量；auth.token 只有在不用环境变量时才填（明文）。
+# media 段留空 = 该供应商不支持图像/视频（Agnes 是自有非标准端点，故单独覆盖）。
+# models.type: text | image | video；vision: 该模型是否支持图像输入（带图对话会被优先排到链首）。
 providers:
   agnes:
-    name: "Agnes AI"
-    base_url: "https://api.agnes-ai.cn/v1"
+    name: Agnes AI
+    base_url: https://api.agnes-ai.cn/v1
     auth:
-      token_env: "AGNES_API_KEY"
+      token_env: AGNES_API_KEY
+      token: ''
     extra_headers: {}
-    # 图像 / 视频端点（Agnes 非标准，走自有路径）
-    media:
-      image_endpoint: "/images/generations"
-      image_default_size: "1K"           # 图像默认档位（Agnes: 1K/2K/3K/4K）
-      video_create_endpoint: "/videos"
-      video_poll_base: "https://api.agnes-ai.cn"
-      video_poll_path: "/agnesapi"
-      video_model_name: "agnes-video-2.5-flash"
-    models:
-      - id: "agnes-3.0-flash"
-        display_name: "Agnes 3.0 Flash"
-        type: "text"
-        # 第十三轮: Agnes 3.0 Flash 文档「输入模态：文本、图像 URL」→ 支持视觉（对话带图）。
-        #   实测 data:image/png;base64,... 也能识别。
-        vision: true
-      - id: "agnes-2.5-flash"
-        display_name: "Agnes 2.5 Flash"
-        type: "text"
-        # Agnes 2.5 Flash（2.0 升级版）：OpenAI 兼容 /v1/chat/completions，支持图像 URL 输入与工具调用，
-        #   上下文 512K / 最大输出 65.5K；当前定价暂免（¥0/百万）。参见官方文档 agnes-25-flash。
-        vision: true
-      - id: "agnes-image-2.5-flash"
-        display_name: "Agnes Image 2.5 Flash"
-        type: "image"
-      - id: "agnes-video-2.5-flash"
-        display_name: "Agnes Video 2.5 Flash"
-        type: "video"
-
-  volc_engine:
-    name: "火山方舟 Coding Plan"
-    base_url: "https://ark.cn-beijing.volces.com/api/coding/v3"
-    auth:
-      token_env: "VOLC_API_KEY"
-    extra_headers: {}
-    media: {}
-    models:
-      - id: "ark-code-latest"
-        display_name: "火山方舟 ark-code-latest"
-        type: "text"
-
-  opencode:
-    name: "OpenCode Go"
-    base_url: "https://opencode.ai/zen/go/v1"
-    auth:
-      token_env: "OPENCODE_API_KEY"
-    # OpenCode Go 是每月订阅编程模型入口。官方硬性要求**三条线**都带
-    # x-opencode-session（缺失直接 400 MissingSessionID），并建议用专属 UA
-    # 而非通用库名（实测 UA 不敏感，会话头才是必需）。适配器据此开关在
-    # 每次请求动态注入会话头（不能放静态 extra_headers——会被 _get_adapter 缓存冻结）。
-    requires_session_header: true
-    extra_headers:
-      User-Agent: "api-gateway/2.4.0 (jakon opencode-go)"
-    # 无媒体能力（纯文本编程模型；图像/视频不走本供应商）
-    media: {}
-    # ── 协议线（第二十七轮「三线直传」）──────────────────────────
-    # 同一家供应商的三条线共用 base_url，只有「路径 + 鉴权方式 + 固定头」不同。
-    # 实测（2026-09-18，真实 key）：
-    #   /chat/completions 与 /responses → Authorization: Bearer
-    #   /messages                      → x-api-key（用 Bearer 打会 401 Missing API key）
-    #   缺少 anthropic-version 时 /messages 也会被拒 → 作为该线固定头带上。
-    # 语义：**这里没写的线 = 该供应商没有这条线**（模型就算声明了也调用不了，
-    #   validate_config 会直接报错拦住）。老板决策：先只做 OpenCode 一家，
-    #   其余供应商（Agnes / 火山）暂不声明 → 走默认值 = 只认 chat/completions，
-    #   行为与改造前完全一致。
+    rate_limit_rps: null
+    requires_session_header: false
     endpoints:
       chat/completions:
-        path: "/chat/completions"
-        auth: "bearer"
+        path: /chat/completions
+        auth: bearer
+        headers: {}
       messages:
-        path: "/messages"
-        auth: "x-api-key"
+        path: /messages
+        auth: x-api-key
         headers:
-          anthropic-version: "2023-06-01"
+          anthropic-version: '2023-06-01'
       responses:
-        path: "/responses"
-        auth: "bearer"
-    # ── 模型 ─────────────────────────────────────────────────
-    # models[].protocols = 该模型**能用哪几条线**（入站格式必须与出站一致）。
-    #   取值：chat/completions | messages | responses；不写 = 只认 chat/completions。
-    #   实测口径（2026-09-18 全量扫描 29 个文档模型 × 3 条线，非文档线另做
-    #   「流式 + 工具调用」复核，全部 200）：官方文档标注的线**一定**可用；
-    #   另外有一批模型实测能走多条线（OpenCode 侧自带跨格式适配），按实测多标：
-    #     · 四条 DeepSeek 三线全通（chat + messages + responses）
-    #     · kimi-k3 / minimax-m3 / minimax-m2.5 / qwen3.6~3.8 系列：chat + messages
-    #   反向证据（为什么必须逐条实测而不是"猜全支持"）：把只认 chat 的 glm 系打到
-    #   /messages 上是 500 Internal server error，把 messages 线的模型打到
-    #   /responses 上是 401 "not supported for format openai" —— 都不像"选错格式"，
-    #   所以网关改成按本表拦在入口（400 并说清该模型支持哪些线）。
+        path: /responses
+        auth: bearer
+        headers: {}
+    media:
+      image_endpoint: /images/generations
+      image_default_size: 1K
+      video_create_endpoint: /videos
+      video_poll_base: https://api.agnes-ai.cn
+      video_poll_path: /agnesapi
+      video_model_name: agnes-video-2.5-flash
     models:
-      # ── OpenAI Chat Completions 线 ────────────────────────
-      - id: "glm-5.3-flash"
-        display_name: "GLM-5.3-Flash"
-        type: "text"
-        protocols: ["chat/completions"]
-      - id: "glm-5.3"
-        display_name: "GLM-5.3"
-        type: "text"
-        protocols: ["chat/completions"]
-      - id: "glm-5.2"
-        display_name: "GLM-5.2"
-        type: "text"
-        protocols: ["chat/completions"]
-      - id: "glm-5.1"
-        display_name: "GLM-5.1"
-        type: "text"
-        protocols: ["chat/completions"]
-      - id: "kimi-k2.7-code"
-        display_name: "Kimi K2.7 Code"
-        type: "text"
-        protocols: ["chat/completions"]
-        # 上游硬约束：该模型**只接受 temperature=1**，传 0 / 0.7 等一律 400
-        #   "invalid temperature: only 1 is allowed for this model"。
-        # 写死后网关无论收到什么温度都按 1 发（前端温度滑块、API 传参、一键测速探针
-        # 统一生效）；客户端不传 temperature 时也会显式按 1 发送，与上游默认值一致。
-        params:
-          temperature: 1
-      - id: "kimi-k2.6"
-        display_name: "Kimi K2.6"
-        type: "text"
-        protocols: ["chat/completions"]
-      - id: "longcat-2.0"
-        display_name: "LongCat 2.0"
-        type: "text"
-        protocols: ["chat/completions"]
-      - id: "mimo-v2.5"
-        display_name: "MiMo V2.5"
-        type: "text"
-        protocols: ["chat/completions"]
-      - id: "mimo-v2.5-pro"
-        display_name: "MiMo V2.5 Pro"
-        type: "text"
-        protocols: ["chat/completions"]
-      - id: "hy4-preview"
-        display_name: "Hy4 Preview"
-        type: "text"
-        protocols: ["chat/completions"]
-      - id: "hy3"
-        display_name: "Hy3"
-        type: "text"
-        protocols: ["chat/completions"]
-      # ── Chat + Messages 两条线都实测可用 ─────────────────
-      - id: "kimi-k3"
-        display_name: "Kimi K3"
-        type: "text"
-        protocols: ["chat/completions", "messages"]
-      - id: "minimax-m3"
-        display_name: "MiniMax M3"
-        type: "text"
-        protocols: ["chat/completions", "messages"]
-      - id: "minimax-m2.5"
-        display_name: "MiniMax M2.5"
-        type: "text"
-        protocols: ["chat/completions", "messages"]
-      - id: "qwen3.8-max"
-        display_name: "Qwen3.8 Max"
-        type: "text"
-        protocols: ["chat/completions", "messages"]
-      - id: "qwen3.8-flash"
-        display_name: "Qwen3.8 Flash"
-        type: "text"
-        protocols: ["chat/completions", "messages"]
-      - id: "qwen3.7-max"
-        display_name: "Qwen3.7 Max"
-        type: "text"
-        protocols: ["chat/completions", "messages"]
-      - id: "qwen3.7-plus"
-        display_name: "Qwen3.7 Plus"
-        type: "text"
-        protocols: ["chat/completions", "messages"]
-      - id: "qwen3.6-plus"
-        display_name: "Qwen3.6 Plus"
-        type: "text"
-        protocols: ["chat/completions", "messages"]
-      # ── 三条线全通（实测 chat / messages / responses 均 200，
-      #    非文档线另经流式 + 工具调用复核） ────────────────
-      - id: "deepseek-v4.1-flash"
-        display_name: "DeepSeek V4.1 Flash"
-        type: "text"
-        vision: true   # 2026-09-18 实测确认多模态：data:image/png;base64 红/蓝/绿三色均识别正确；
-                       #   同一带图请求打到纯文本模型 deepseek-v4-flash 会被上游 400 拒（对照有效）。
-        protocols: ["chat/completions", "messages", "responses"]
-      - id: "deepseek-v4-pro"
-        display_name: "DeepSeek V4 Pro"
-        type: "text"
-        protocols: ["chat/completions", "messages", "responses"]
-      - id: "deepseek-v4-flash"
-        display_name: "DeepSeek V4 Flash"
-        type: "text"
-        protocols: ["chat/completions", "messages", "responses"]
-      - id: "deepseek-v4-flash-vision-exp"
-        display_name: "DeepSeek V4 Flash Vision Exp"
-        type: "text"
-        vision: true   # 官方标 Vision，支持图像转 token 输入
-        protocols: ["chat/completions", "messages", "responses"]
-      # ── Anthropic Messages 线（文档主推这条）─────────────
-      - id: "minimax-m2.7"
-        display_name: "MiniMax M2.7"
-        type: "text"
-        # 实测：messages 线 200，chat / responses 都是 500 → 只标 messages
-        protocols: ["messages"]
-      - id: "union-alpha"
-        display_name: "Union Alpha Free"
-        type: "text"
-        # 文档标的 messages 线，但实测上游回 400「Model is unavailable.」
-        #   （限时免费模型，额度/可用性由上游控制）。先按文档收录并标注真实线，
-        #   调用时上游的不可用会原样回给客户端（网关不替它编文案）。
-        protocols: ["messages"]
-      # ── OpenAI Responses 线 ───────────────────────────────
-      - id: "grok-4.6"
-        display_name: "Grok 4.6"
-        type: "text"
-        # 实测：responses 200；chat / messages 都是 401 "not supported for format"
-        protocols: ["responses"]
-      - id: "gpt-5.6-luna"
-        display_name: "GPT 5.6 Luna"
-        type: "text"
-        protocols: ["responses"]
-      - id: "muse-spark-1.3-contributor"
-        display_name: "Muse Spark 1.3 Contributor"
-        type: "text"
-        # 实测三条线都 403 DataPolicyError：该模型会拿数据训练，需要先在
-        #   OpenCode 控制台**显式同意数据条款**才能调用（当前工作区未同意）。
-        #   先收录并标好线：老板去控制台点了同意就能直接用，不用再改网关。
-        protocols: ["responses"]
-      - id: "muse-spark-1.2-contributor"
-        display_name: "Muse Spark 1.2 Contributor"
-        type: "text"
-        protocols: ["responses"]
+    - id: agnes-3.0-flash
+      display_name: Agnes 3.0 Flash
+      type: text
+      vision: true
+      protocols:
+      - chat/completions
+    - id: agnes-2.5-flash
+      display_name: Agnes 2.5 Flash
+      type: text
+      vision: true
+      protocols:
+      - chat/completions
+    - id: agnes-image-2.5-flash
+      display_name: Agnes Image 2.5 Flash
+      type: image
+      vision: false
+      protocols:
+      - chat/completions
+    - id: agnes-video-2.5-flash
+      display_name: Agnes Video 2.5 Flash
+      type: video
+      vision: false
+      protocols:
+      - chat/completions
+  volc_engine:
+    name: 火山方舟 Coding Plan
+    base_url: https://ark.cn-beijing.volces.com/api/coding/v3
+    auth:
+      token_env: VOLC_API_KEY
+      token: ''
+    extra_headers: {}
+    rate_limit_rps: null
+    requires_session_header: false
+    endpoints:
+      chat/completions:
+        path: /chat/completions
+        auth: bearer
+        headers: {}
+      messages:
+        path: /messages
+        auth: x-api-key
+        headers:
+          anthropic-version: '2023-06-01'
+      responses:
+        path: /responses
+        auth: bearer
+        headers: {}
+    media:
+      image_endpoint: null
+      image_default_size: null
+      video_create_endpoint: null
+      video_poll_base: null
+      video_poll_path: null
+      video_model_name: null
+    models:
+    - id: ark-code-latest
+      display_name: 火山方舟 ark-code-latest
+      type: text
+      vision: false
+      protocols:
+      - chat/completions
+  opencode:
+    name: OpenCode Go
+    base_url: https://opencode.ai/zen/go/v1
+    auth:
+      token_env: OPENCODE_API_KEY
+      token: ''
+    extra_headers:
+      User-Agent: api-gateway/2.4.0 (jakon opencode-go)
+    rate_limit_rps: null
+    requires_session_header: true
+    endpoints:
+      chat/completions:
+        path: /chat/completions
+        auth: bearer
+      messages:
+        path: /messages
+        auth: x-api-key
+        headers:
+          anthropic-version: '2023-06-01'
+      responses:
+        path: /responses
+        auth: bearer
+    media:
+      image_endpoint: null
+      image_default_size: null
+      video_create_endpoint: null
+      video_poll_base: null
+      video_poll_path: null
+      video_model_name: null
+    models:
+    - id: glm-5.3-flash
+      display_name: GLM-5.3-Flash
+      type: text
+      protocols:
+      - chat/completions
+      vision: false
+    - id: glm-5.3
+      display_name: GLM-5.3
+      type: text
+      protocols:
+      - chat/completions
+      vision: false
+    - id: glm-5.2
+      display_name: GLM-5.2
+      type: text
+      protocols:
+      - chat/completions
+      vision: false
+    - id: glm-5.1
+      display_name: GLM-5.1
+      type: text
+      protocols:
+      - chat/completions
+      vision: false
+    - id: kimi-k2.7-code
+      display_name: Kimi K2.7 Code
+      type: text
+      protocols:
+      - chat/completions
+      params:
+        temperature: 1
+      vision: false
+    - id: kimi-k2.6
+      display_name: Kimi K2.6
+      type: text
+      protocols:
+      - chat/completions
+      vision: false
+    - id: longcat-2.0
+      display_name: LongCat 2.0
+      type: text
+      protocols:
+      - chat/completions
+      vision: false
+    - id: mimo-v2.5
+      display_name: MiMo V2.5
+      type: text
+      protocols:
+      - chat/completions
+      vision: false
+    - id: mimo-v2.5-pro
+      display_name: MiMo V2.5 Pro
+      type: text
+      protocols:
+      - chat/completions
+      vision: false
+    - id: hy4-preview
+      display_name: Hy4 Preview
+      type: text
+      protocols:
+      - chat/completions
+      vision: false
+    - id: hy3
+      display_name: Hy3
+      type: text
+      protocols:
+      - chat/completions
+      vision: false
+    - id: kimi-k3
+      display_name: Kimi K3
+      type: text
+      protocols:
+      - chat/completions
+      - messages
+      vision: false
+    - id: minimax-m3
+      display_name: MiniMax M3
+      type: text
+      protocols:
+      - chat/completions
+      - messages
+      vision: false
+    - id: minimax-m2.5
+      display_name: MiniMax M2.5
+      type: text
+      protocols:
+      - chat/completions
+      - messages
+      vision: false
+    - id: qwen3.8-max
+      display_name: Qwen3.8 Max
+      type: text
+      protocols:
+      - chat/completions
+      - messages
+      vision: false
+    - id: qwen3.8-flash
+      display_name: Qwen3.8 Flash
+      type: text
+      protocols:
+      - chat/completions
+      - messages
+      vision: false
+    - id: qwen3.7-max
+      display_name: Qwen3.7 Max
+      type: text
+      protocols:
+      - chat/completions
+      - messages
+      vision: false
+    - id: qwen3.7-plus
+      display_name: Qwen3.7 Plus
+      type: text
+      protocols:
+      - chat/completions
+      - messages
+      vision: false
+    - id: qwen3.6-plus
+      display_name: Qwen3.6 Plus
+      type: text
+      protocols:
+      - chat/completions
+      - messages
+      vision: false
+    - id: deepseek-v4.1-flash
+      display_name: DeepSeek V4.1 Flash
+      type: text
+      vision: true
+      protocols:
+      - chat/completions
+      - messages
+      - responses
+    - id: deepseek-v4-pro
+      display_name: DeepSeek V4 Pro
+      type: text
+      protocols:
+      - chat/completions
+      - messages
+      - responses
+      vision: false
+    - id: deepseek-v4-flash
+      display_name: DeepSeek V4 Flash
+      type: text
+      protocols:
+      - chat/completions
+      - messages
+      - responses
+      vision: false
+    - id: deepseek-v4-flash-vision-exp
+      display_name: DeepSeek V4 Flash Vision Exp
+      type: text
+      vision: true
+      protocols:
+      - chat/completions
+      - messages
+      - responses
+    - id: minimax-m2.7
+      display_name: MiniMax M2.7
+      type: text
+      protocols:
+      - messages
+      vision: false
+    - id: union-alpha
+      display_name: Union Alpha Free
+      type: text
+      protocols:
+      - messages
+      vision: false
+    - id: grok-4.6
+      display_name: Grok 4.6
+      type: text
+      protocols:
+      - responses
+      vision: false
+    - id: gpt-5.6-luna
+      display_name: GPT 5.6 Luna
+      type: text
+      protocols:
+      - responses
+      vision: false
+    - id: muse-spark-1.3-contributor
+      display_name: Muse Spark 1.3 Contributor
+      type: text
+      protocols:
+      - responses
+      vision: false
+    - id: muse-spark-1.2-contributor
+      display_name: Muse Spark 1.2 Contributor
+      type: text
+      protocols:
+      - responses
+      vision: false
+# ── 虚拟模型 id（别名，第三十一轮）──────────────────────
+# 给客户端一个"名字固定"的入口：客户端永远只写 model: wjd，实际转发到哪个真实模型
+# 由这里决定（页面上改：供应商与模型页 → 虚拟模型 wjd → 单选 + 保存）。
+# 规则（保存时校验，手改 yaml 一样拦）：
+#   · 只走 chat/completions（OpenAI）格式；用 /v1/messages、/v1/responses 打 wjd 会在入口 400；
+#   · target 必须是**存在的文本模型**且支持 chat/completions（面板里其余模型置灰）；
+#   · 别名 id 不能和真实模型 id 重名；
+#   · 别名不复制目标的配置（协议线/视觉/强制参数/定价全部继承 target，一处修改全局生效）；
+#   · enabled: false = 该 id 不存在（等同没配），停用时不校验 target。
+# 别名不进 /v1/models/speedtest（测速请测它指向的模型），但会出现在 /v1/models 里（带 alias_of）。
+aliases:
+  wjd:
+    enabled: true
+    target: agnes-3.0-flash
+    note: 老板的固定入口（默认指向旗舰，随时可在页面上改）
+# ── 服务与运维开关 ──────────────────────────────────────
+# host/port/graceful_shutdown/docs_enabled/hot_reload 这几项**改完要重启进程**才生效，
+# 其余每请求读取，页面保存即生效。
+# 安全相关：health_auth（/health/* 是否鉴权）、webhook_allow_private（视频回调是否允许内网地址）、
+#   docs_enabled（FastAPI 文档，默认关）、auth_fail_limit_per_min（同源 IP 每分钟鉴权失败上限）。
+# cors_origins 写 ["*"] 表示任意站点都能跨域驱动本网关（会把上游额度暴露给陌生网页），
+#   生产建议收敛成可信前端域名白名单。
 server:
-  host: "127.0.0.1"
+  host: 127.0.0.1
   port: 8808
   timeout: 120
-  retry: 3               # 同一模型的重试次数（含首次）。第二十七轮: 路由别名已删除，无 route.retry
-  # ── 运维开关 ──
-  health_auth: false      # /health/* 是否也需鉴权（默认否，留给探活）
-  hot_reload: true        # 监听 gateway.yaml mtime 自动重载（改配置免重启）
-  hot_reload_interval: 15 # 重载检查间隔（秒）
-  metrics_enabled: true   # 记录调用指标（/metrics）
-  rate_limit_rps: null    # 全局单 user QPS 上限（null=不限；供应商级用 provider.rate_limit_rps）
-  max_body_size: 2000000  # 请求体字节上限（防 DDoS，约 2MB）
-  cors_origins: ["*"]     # CORS 允许来源（生产收紧为具体域名）
-  graceful_shutdown: 30   # 优雅关闭等待在途请求的秒数
-  # ── 防滥用 / 安全 ──
-  batch_max_concurrency: 16   # /batch 并发上限（客户端 max_concurrency 会被钳到此值）
-  batch_max_items: 64         # /batch 单次最大条目数（超出返回 400）
-  webhook_allow_private: false        # 视频 callback_url 是否允许指向内网/回环（SSRF 防护，默认禁）
-  docs_enabled: false                 # FastAPI 文档（/docs、/openapi.json）是否开放（安全默认关）
-  auth_fail_limit_per_min: 20         # 同一来源 IP 每分钟鉴权失败上限，超过 → 429（防暴力枚举）
-
-# ── 供应商熔断（Circuit Breaker） ──────────────────────
-# 某供应商连续/滑动窗口失败达到 failure_threshold 就熔断 cooldown 秒，
-# 期间直接跳过（不再白等），让 fallback 快速切到健康供应商。
+  retry: 3
+  health_auth: false
+  hot_reload: true
+  hot_reload_interval: 15
+  metrics_enabled: true
+  rate_limit_rps: null
+  max_body_size: 2000000
+  cors_origins:
+  - '*'
+  graceful_shutdown: 30
+  batch_max_concurrency: 16
+  batch_max_items: 64
+  webhook_allow_private: false
+  docs_enabled: false
+  auth_fail_limit_per_min: 20
+# ── 供应商熔断 ──────────────────────────────────────────
+# 某供应商在 window 秒内失败达到 failure_threshold 次就熔断 cooldown 秒，
+# 期间直接跳过它（不再白等），让 fallback 快速切到健康供应商。
 circuit:
   enabled: true
-  failure_threshold: 3   # 连续失败 3 次即熔断
-  cooldown: 30           # 熔断持续 30 秒
-  window: 10            # 滑动窗口
-
-# ── 可观测性 ───────────────────────────────────────────
+  failure_threshold: 3
+  cooldown: 30
+  window: 10
+# ── 可观测性 ────────────────────────────────────────────
+# log_level 支持 DEBUG/INFO/WARNING/ERROR；log_json=true 输出结构化 JSON 行（接 ELK）。
+# access_log_maxlen = 访问日志环形缓冲长度（日志页「已加载 N 条」的上限）。
 observability:
-  log_level: "INFO"
-  log_json: false          # true = 结构化 JSON 行日志（接 ELK/CloudWatch）
-  access_log_maxlen: 500  # 访问日志环形缓冲长度
-
-# ── 定价（用于 /v1 响应里估算成本，人民币/百万 token） ─
-# 不配则该模型 estimated_cost_cny 不返回（不影响调用）。
+  log_level: INFO
+  log_json: false
+  access_log_maxlen: 500
+# ── 定价（人民币 / 百万 token，用于 /v1 响应里估算成本） ─
+# 不配则该模型不返回 estimated_cost_cny（不影响调用）。
 pricing:
   per_model:
-    agnes-3.0-flash:      { input: 0.35, output: 1.00 }
-    agnes-2.5-flash:      { input: 0, output: 0 }   # 文档现价暂免（输入/输出/缓存命中均 ¥0/百万）
-    ark-code-latest:      { input: 0.50, output: 2.00 }
-
-# ── 媒体下载代理白名单（第十七轮）────────────────────────
-# 生成的图片/视频挂在第三方 CDN 上且不带 CORS 头，浏览器里既 fetch 不到 blob、
-# 跨域 <a download> 也不生效（只会打开新标签页）。所以由网关代拉一次并加上
-# Content-Disposition: attachment，前端「下载」按钮才真的能存文件。
-# 安全：这是网关唯一一个服务端主动出网的接口 —— 只有这里列出的域名（含其子域）
-#   允许被代下载，且解析出来的 IP 必须是公网地址；列表为空 = 该功能整体关闭。
-#   换了供应商/换了 CDN 域名时，往这里加一条即可（如 volc 的 tos-*.volces.com）。
+    agnes-3.0-flash:
+      input: 0.35
+      output: 1.0
+    agnes-2.5-flash:
+      input: 0.0
+      output: 0.0
+    ark-code-latest:
+      input: 0.5
+      output: 2.0
+# ── 媒体下载代理白名单 ──────────────────────────────────
+# 生成的图片/视频挂在第三方 CDN 上且不带 CORS 头，浏览器 fetch 不到 blob、跨域 <a download>
+# 也不生效 —— 所以由网关代拉一次并加 Content-Disposition: attachment。
+# 安全：这是全网关唯一一个服务端主动出网的接口，只有这里列出的域名（含子域）允许被代下载，
+#   且解析出的 IP 必须是公网地址；allowed_hosts 为空 = 该功能整体关闭。
+#   换了供应商/CDN 域名时，往这里加一条即可（如 volc 的 tos-*.volces.com）。
 download:
-  # 维护提醒（第三十轮）：这张表是**下载代理的出网白名单** —— /v1/media/download 只肯代抓这里列出的域名。
-  #   供应商换 CDN、或同一供应商多套存储（普通版 / 水印版）时，**漏加就会让「下载」按钮 400**
-  #   （报「该地址不在允许下载的域名白名单内」）。新增前先确认域名确实属于该供应商的产物存储。
   allowed_hosts:
-    - "cos-platform-outputs.agnes-ai.cn"             # Agnes 图像/视频产物 CDN（普通版）
-    - "maas-watermark-prod-new.cn-wlcb.ufileos.com"  # Agnes 水印版产物 CDN（UCloud ufileos）
-  max_bytes: 67108864                      # 单文件上限 64MB
-
-# ── 网关入口鉴权 ─────────────────────────────────────
-# 账号与 API Key 全部由页面管理，存在 data/users.json（见 app/users.py）：
-#   管理员在「用户管理」页建账号，各账号在「设置 → 我的 API Key」自助铸 Key。
-# 本文件里**不再有任何用户/密钥**，只有一个运维开关：
-#   auth.session_ttl_minutes —— 网页登录签发的会话有效期（分钟，默认 1440 = 24h）
-# 第十八轮: 删掉了这里残留的旧 `auth.enabled/users/key` 死配置（含一把明文 wjd- Key）。
-#   那些键早已不再被 config.py 读取（只读 session_ttl_minutes），
-#   那把 Key 在 users.json 里也不存在 → 认不了任何入口，但会让"yaml 里没有明文凭证"的说法失真。
+  - cos-platform-outputs.agnes-ai.cn
+  - maas-watermark-prod-new.cn-wlcb.ufileos.com
+  max_bytes: 67108864
+# ── 网关入口鉴权 ────────────────────────────────────────
+# 账号与 API Key 由页面管理，存在 data/users.json（见 app/users.py）：
+#   管理员在「用户管理」建账号，各账号在「设置 → 我的 API Key」自助铸 Key。
+# 本文件里没有任何用户/密钥，只有会话时长这一个开关。
 auth:
   session_ttl_minutes: 1440
-
-# ── 路由别名 / fallback 链：已整体删除 ──────────────────
-# 第二十七轮（老板 2026-09-18 决策）：**路由别名功能整体删除**，不再有 routes 段。
-#   原因：三线直传落地后"入站格式 = 出站格式"，模型 id 必须与协议线一一对应；
-#   再套一层"自动挑最快模型"的别名，会把调用方选定的格式/能力（视觉、工具、协议线）
-#   悄悄换掉。现在调用方直接填真实模型 id；要换模型就换 id，网关不再替谁做主。
-# 老配置里残留的 routes 段会被忽略（不会让进程起不来），日志里有 warning 可查。
-# 一键测速（Models 页每个模型后面的）不受影响，仍然逐个模型实测延迟。

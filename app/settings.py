@@ -154,6 +154,13 @@ def config_to_view(cfg: GatewayConfig) -> dict[str, Any]:
             "allowed_hosts": list(cfg.download.allowed_hosts or []),
             "max_bytes": cfg.download.max_bytes,
         },
+        # 第三十一轮（虚拟模型 id）: 别名整段回给面板。
+        #   「供应商与模型」页的 wjd 卡片读它（admin 的选择框默认选中 target、member 只看只读行），
+        #   保存时也整段回传 —— 面板是别名的唯一编辑入口，YAML 全文编辑器里改的同样能读回来。
+        "aliases": {
+            name: {"enabled": bool(spec.enabled), "target": spec.target, "note": spec.note}
+            for name, spec in (cfg.aliases or {}).items()
+        },
     }
 
 
@@ -351,6 +358,27 @@ def view_to_raw(cfg: GatewayConfig, raw: dict[str, Any], view: dict[str, Any]) -
             merged_d["max_bytes"] = dv["max_bytes"]
         out["download"] = merged_d
 
+    # ── aliases（虚拟模型 id：整段以面板为准）──
+    #   面板提交了这一段，就按它重建（键序保持页面提交的顺序）：
+    #     · 没提交这段 → 沿用原文（老页面/老前端只发自己那块，不能因此把别名删了）；
+    #     · 提交了空映射 → 清空别名（用户真的想在页面上删掉，这是明确意图）；
+    #     · target 去空白、enabled 缺省 true（与 config._parse_aliases 同口径，
+    #       这里只做形状归一，合法性一律交给随后的 parse_and_validate）。
+    if "aliases" in view:
+        av = _as_dict(view.get("aliases"), "aliases")
+        aliases: dict[str, Any] = {}
+        for raw_name, raw_spec in av.items():
+            name = str(raw_name).strip()
+            if not name:
+                raise ConfigError("aliases 里有空的别名 id")
+            spec = _as_dict(raw_spec, f"aliases.{name}")
+            aliases[name] = {
+                "enabled": spec.get("enabled", True),
+                "target": str(spec.get("target") or "").strip(),
+                "note": str(spec.get("note") or ""),
+            }
+        out["aliases"] = aliases
+
     return out
 
 
@@ -407,6 +435,18 @@ _SECTION_COMMENTS = {
 # media 段留空 = 该供应商不支持图像/视频（Agnes 是自有非标准端点，故单独覆盖）。
 # models.type: text | image | video；vision: 该模型是否支持图像输入（带图对话会被优先排到链首）。
 """,
+    "aliases": """\
+# ── 虚拟模型 id（别名，第三十一轮）──────────────────────
+# 给客户端一个"名字固定"的入口：客户端永远只写 model: wjd，实际转发到哪个真实模型
+# 由这里决定（页面上改：供应商与模型页 → 虚拟模型 wjd → 单选 + 保存）。
+# 规则（保存时校验，手改 yaml 一样拦）：
+#   · 只走 chat/completions（OpenAI）格式；用 /v1/messages、/v1/responses 打 wjd 会在入口 400；
+#   · target 必须是**存在的文本模型**且支持 chat/completions（面板里其余模型置灰）；
+#   · 别名 id 不能和真实模型 id 重名；
+#   · 别名不复制目标的配置（协议线/视觉/强制参数/定价全部继承 target，一处修改全局生效）；
+#   · enabled: false = 该 id 不存在（等同没配），停用时不校验 target。
+# 别名不进 /v1/models/speedtest（测速请测它指向的模型），但会出现在 /v1/models 里（带 alias_of）。
+""",
     "server": """\
 # ── 服务与运维开关 ──────────────────────────────────────
 # host/port/graceful_shutdown/docs_enabled/hot_reload 这几项**改完要重启进程**才生效，
@@ -446,7 +486,7 @@ _SECTION_COMMENTS = {
 """,
 }
 
-_SECTION_ORDER = ("providers", "server", "circuit", "observability", "pricing", "download", "auth")
+_SECTION_ORDER = ("providers", "aliases", "server", "circuit", "observability", "pricing", "download", "auth")
 
 
 def _dump(obj: Any) -> str:

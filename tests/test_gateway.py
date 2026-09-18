@@ -241,8 +241,13 @@ def test_app_endpoints():
     r2 = client.get("/v1/models")
     assert r2.status_code == 200
     ids = [x["id"] for x in r2.json()["data"]]
-    assert "wjd" not in ids
     assert "hy3" in ids
+    # 第二十七轮: 路由功能整体删除 → /v1/models 不再有 type="route" 的旧条目
+    # 第三十一轮: 但 wjd 这个名字合法回来了 —— 它必须是**别名条目**（带 alias_of），
+    #   不是旧路由；这里对"有没有配别名"保持无关（老板随时可能停用它）
+    assert all(x.get("type") != "route" for x in r2.json()["data"])
+    assert all(x.get("protocols") == ["chat/completions"]
+               for x in r2.json()["data"] if x.get("alias_of")), "别名只走 OpenAI 线"
     # 每个模型都带 protocols（三线直传的能力声明）
     byid2 = {x["id"]: x for x in r2.json()["data"]}
     assert byid2["hy3"]["protocols"] == ["chat/completions"]
@@ -314,12 +319,26 @@ def test_resolve_media_model_direct():
 
 
 def test_resolve_media_model_rejects_alias():
-    """第二十七轮: 路由别名已删除 —— 媒体端点只认真实模型 id，别名一律解析不到。"""
+    """第二十七轮 + 第三十一轮: 媒体端点只认真实模型 id。
+
+    - 已配置的别名（wjd）→ **明确 400 指路**（第三十一轮起：别名只在文本线上存在，
+      静默返回 None 会让调用方以为"这模型不存在"，而它明明在 /v1/models 里）；
+    - 从没配过的名字 → 仍然返回 None（交给调用方报"未知模型"）。
+    用自带别名的合成配置，不依赖生产配置里有没有配别名。
+    """
+    from fastapi import HTTPException
     import app.main as m
     cfg = m._cfg()
     assert m._resolve_media_model(cfg, "agnes-image-2.5-flash", "image") is not None
-    for alias in ("img", "wjd", "any-alias"):
-        assert m._resolve_media_model(cfg, alias, "image") is None, alias
+    acfg = _alias_cfg("m-chat")
+    try:
+        m._resolve_media_model(acfg, "wjd", "image")
+    except HTTPException as e:
+        assert e.status_code == 400 and "别名" in str(e.detail), e.detail
+    else:
+        raise AssertionError("别名打到媒体端点必须明确 400，不能静默放行")
+    for unknown in ("img", "any-alias"):
+        assert m._resolve_media_model(cfg, unknown, "image") is None, unknown
 
 
 
@@ -2460,9 +2479,14 @@ def test_models_expose_vision_capability():
     assert byid["agnes-3.0-flash"]["vision"] is True, "Agnes 3.0 Flash 文档写了图像输入"
     assert byid["agnes-image-2.5-flash"]["vision"] is False
     assert byid["ark-code-latest"]["vision"] is False
-    # 第二十七轮: 路由别名已撤（/v1/models 不再有 type=route 的 wjd 条目），
-    #   改为断言每个模型的**协议线**标签（调用方据此决定发到哪条线）
-    assert "wjd" not in byid, "撤掉的路由别名不该还出现在模型列表里"
+    # 第二十七轮: 路由别名已撤（/v1/models 里没有 type=route 的条目），
+    #   改为断言每个模型的**协议线**标签（调用方据此决定发到哪条线）。
+    # 第三十一轮: wjd 这个名字合法回来了，但只作为**别名条目**（alias_of 指向真实目标，
+    #   protocols 固定 chat/completions）—— 与旧路由是两回事，别再断言"它不存在"。
+    assert all(d.get("type") != "route" for d in data)
+    for d in data:
+        if d.get("alias_of"):
+            assert d["protocols"] == ["chat/completions"], d
     assert byid["hy3"]["protocols"] == ["chat/completions"]
     assert byid["grok-4.6"]["protocols"] == ["responses"]
     assert byid["deepseek-v4.1-flash"]["protocols"] == ["chat/completions", "messages", "responses"]
@@ -3304,7 +3328,7 @@ def test_config_view_masks_secrets_and_roundtrips():
     from app import settings as S
     cfg = load_config(CONFIG)
     view = S.config_to_view(cfg)
-    assert set(view) == {"providers", "server", "auth", "circuit",
+    assert set(view) == {"providers", "aliases", "server", "auth", "circuit",
                          "observability", "pricing", "download"}, set(view)
     # 面板能改的 server 键 = 文件里 server 段的键（少一个都算"配置项漏搬"）
     raw_file = S.read_raw(CONFIG)
@@ -4552,6 +4576,259 @@ def test_password_min_length_raised_to_8():
     finally:
         try: os.unlink(p)
         except OSError: pass
+
+
+# ── 第三十一轮：虚拟模型 id（别名 wjd）───────────────────────────────
+#
+# 老板决策（2026-09-18）：客户端固定写 `model: wjd`，实际转发到哪个真实模型由管理员在
+# 「供应商与模型」页选。规则（保存期校验，见 app/config.py 的 ALIAS_PROTOCOLS 注释）：
+#   ① 别名只走 chat/completions（OpenAI）线 —— 用 messages / responses 打 wjd 入口 400；
+#   ② target 必须是**存在的文本模型**且支持 chat/completions（面板里其余模型置灰）；
+#   ③ 别名 id 不得与真实模型 id 重名；
+#   ④ 别名不复制目标配置：协议线/视觉/强制参数/定价全继承 target（一份事实）；
+#   ⑤ enabled: false = 该 id 不存在（等同没配），且停用时不校验 target。
+# 下面把「配置解析 / 五条规则 / 目录 / 三条入口 / 测速 / 面板保存」逐个钉住。
+
+_ALIAS_BASE_RAW = {"providers": {"p": {"name": "P", "base_url": "http://x/v1", "models": [
+    {"id": "m-chat", "display_name": "Chat 模型", "vision": True, "params": {"temperature": 1}},
+    {"id": "m-msg", "display_name": "Messages 模型", "protocols": ["messages"]},
+    {"id": "m-img", "display_name": "画图模型", "type": "image"},
+]}}}
+
+
+def _alias_cfg(target: str, name: str = "wjd", **spec):
+    """真·测试配置：一个供应商 + 三个模型（chat / 只有 messages 线 / 图像）+ 一个别名。"""
+    from app.config import parse_config
+    raw = json.loads(json.dumps(_ALIAS_BASE_RAW))
+    raw["aliases"] = {name: {"enabled": True, "target": target, **spec}}
+    return parse_config(raw)
+
+
+def test_alias_config_rules_and_resolution():
+    """规则①~⑤ + 解析：别名→真实 id、普通 id 原样、停用等同不存在；违规一律拦在保存期。"""
+    from app.config import parse_config, ALIAS_PROTOCOLS
+    cfg = parse_config({**_ALIAS_BASE_RAW,
+                        "aliases": {"wjd": {"target": "m-chat", "note": "客户入口"}}})
+    assert ALIAS_PROTOCOLS == ("chat/completions",), "别名固定一条线，不许偷偷放宽"
+    assert cfg.resolve_alias("wjd") == "m-chat", "别名要解析成真实 id"
+    assert cfg.resolve_alias("m-chat") == "m-chat", "普通 id 必须原样返回"
+    assert cfg.alias_of("wjd").note == "客户入口"
+    assert cfg.find_provider_for_model("wjd") is None, "别名不是模型：不进模型索引"
+    # 简写 `wjd: m-chat` 等价于只填 target
+    assert parse_config({**_ALIAS_BASE_RAW, "aliases": {"wjd": "m-chat"}}).resolve_alias("wjd") == "m-chat"
+    # 停用：不校验 target，该 id 相当于不存在
+    off = parse_config({**_ALIAS_BASE_RAW,
+                        "aliases": {"wjd": {"enabled": False, "target": "这个目标不存在"}}})
+    assert off.alias_of("wjd") is None and off.resolve_alias("wjd") == "wjd"
+
+    # 违规：每一条都必须报错（静默接受 = 用户拿着一个永远 400 的入口不知道找谁）
+    cases = [
+        ("目标不存在", "wjd", {"target": "nope"}),
+        ("目标是图像模型", "wjd", {"target": "m-img"}),
+        ("目标只有 messages 线", "wjd", {"target": "m-msg"}),
+        ("启用了但没写 target", "wjd", {"target": "   "}),
+        ("与真实模型 id 重名", "m-chat", {"target": "m-chat"}),
+        ("非法别名 id", "w jd", {"target": "m-chat"}),
+    ]
+    for why, name, spec in cases:
+        try:
+            parse_config({**_ALIAS_BASE_RAW, "aliases": {name: spec}})
+        except ConfigError:
+            continue
+        raise AssertionError(f"非法别名未被拦截（{why}）: {name} {spec}")
+
+
+def test_alias_in_models_payload_inherits_target():
+    """目录里要有别名条目（客户端得能发现它），能力/参数全继承目标，另带 alias_of；
+    停用的别名不出现。"""
+    import app.main as m
+    old_cfg, old_cache = m.config, m._state.get("_models_cache")
+    try:
+        m.config, m._state["_models_cache"] = _alias_cfg("m-chat"), None
+        rows = {x["id"]: x for x in m._models_payload()["data"]}
+        w = rows["wjd"]
+        assert w["alias_of"] == "m-chat", w
+        assert w["protocols"] == ["chat/completions"], w        # 别名只走 OpenAI 线
+        assert w["vision"] is True, w                           # 视觉能力继承目标
+        assert w["params"] == {"temperature": 1}, w             # 强制参数继承目标
+        assert w["type"] == "text" and w["provider"] == "p", w
+        assert w["display_name"] == "Chat 模型", w
+        # 停用 → 目录里不出现（与"没配过"同义）
+        m.config.aliases["wjd"].enabled = False
+        m._state["_models_cache"] = None
+        assert "wjd" not in {x["id"] for x in m._models_payload()["data"]}
+    finally:
+        m.config, m._state["_models_cache"] = old_cfg, old_cache
+
+
+def test_alias_chat_completions_hits_target_and_echoes_alias():
+    """核心：model=wjd → 上游收到真实 id；响应 model 回显客户端请求名、served_model 是真实目标；
+    指标/记账记在**真实模型**上（wjd 不是模型，别污染成本与指标口径）。"""
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    class _FakeChat:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, **kw):
+            self.calls.append(kw)
+            return {"id": "c1",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "OK"}}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 2}}
+
+    fake = _FakeChat()
+    old_cfg, old_adapter, old_cache = m.config, m._get_adapter, m._state.get("_models_cache")
+    m.config, m._state["_models_cache"] = _alias_cfg("m-chat"), None
+    m._get_adapter = lambda model_id, timeout=None, cfg=None: (fake, "p", m.config.providers["p"])
+    try:
+        with _Isolated():
+            r = TestClient(m.app).post("/v1/chat/completions", json={
+                "model": "wjd", "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 16})
+            assert r.status_code == 200, r.text
+            j = r.json()
+            assert fake.calls[-1]["model"] == "m-chat", fake.calls[-1]   # 上游只看到真实 id
+            assert j["model"] == "wjd", j                                # 回显客户端请求的名字
+            assert j["served_model"] == "m-chat", j                      # 真实目标
+            assert j["choices"][0]["message"]["content"] == "OK", j
+            snap = m._metrics.snapshot()
+            assert snap["calls"]["m-chat"]["ok"] == 1, snap["calls"]
+            assert "wjd" not in snap["calls"], "别名不该出现在指标里（它不是模型）"
+            # 访问日志两条线索都留：model=请求名、served=真实目标
+            last = m._access.tail(1)[0]
+            assert last.get("served") == "m-chat", last
+    finally:
+        m.config, m._get_adapter, m._state["_models_cache"] = old_cfg, old_adapter, old_cache
+
+
+def test_alias_rejected_on_messages_and_responses_lines():
+    """规则①：别名只走 chat/completions —— 另两条线入口 400（指路 + 说出目标），
+    且**一次都不打上游**（不能让用户对着上游的 500/401 猜自己哪里写错）。"""
+    from fastapi.testclient import TestClient
+    import app.main as m
+    touched = []
+    old_cfg, old_adapter = m.config, m._get_adapter
+    m.config = _alias_cfg("m-chat")
+    m._get_adapter = lambda model_id, timeout=None, cfg=None: (touched.append(model_id), None)[1]
+    try:
+        c = TestClient(m.app)
+        for path, body in (
+            ("/v1/messages", {"model": "wjd", "max_tokens": 16,
+                              "messages": [{"role": "user", "content": "x"}]}),
+            ("/v1/responses", {"model": "wjd", "input": "x", "max_output_tokens": 16}),
+        ):
+            r = c.post(path, json=body)
+            assert r.status_code == 400, (path, r.status_code, r.text)
+            assert "wjd" in r.text and "chat/completions" in r.text and "m-chat" in r.text, (path, r.text)
+        assert touched == [], "被入口挡下的请求不该碰上游"
+    finally:
+        m.config, m._get_adapter = old_cfg, old_adapter
+
+
+def test_alias_rejected_on_media_endpoint():
+    """图像/视频端点不吃别名（别名只在文本线上存在）：明确 400 指路，而不是"未知图像模型"。"""
+    from fastapi.testclient import TestClient
+    import app.main as m
+    old_cfg = m.config
+    m.config = _alias_cfg("m-chat")
+    try:
+        r = TestClient(m.app).post("/v1/images/generations",
+                                   json={"model": "wjd", "prompt": "一只猫"})
+        assert r.status_code == 400, (r.status_code, r.text)
+        assert "别名" in r.text and "m-chat" in r.text, r.text
+    finally:
+        m.config = old_cfg
+
+
+def test_alias_not_speedtested():
+    """别名不单独测速：给一句能照做的说明（测它指向的模型），而不是"模型不存在"。"""
+    from fastapi.testclient import TestClient
+    import app.main as m
+    old_cfg = m.config
+    m.config = _alias_cfg("m-chat")
+    try:
+        r = TestClient(m.app).post("/v1/models/speedtest", json={"model": "wjd"})
+        assert r.status_code == 200, r.text
+        row = r.json()["results"][0]
+        assert row["ok"] is False and "别名" in row["error"] and "m-chat" in row["error"], row
+    finally:
+        m.config = old_cfg
+
+
+def test_alias_panel_round_trip_and_save_validation():
+    """面板是别名的编辑入口：GET 读出来带 aliases → 原样 PUT 不丢 → 非法目标 400（不写盘）。
+    用临时配置文件，绝不碰生产 data/gateway.yaml。"""
+    import tempfile
+    import yaml as _yaml
+    from pathlib import Path as P
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    client = TestClient(m.app)
+    ah = {"Authorization": f"Bearer {_login_admin_session(client)}"}
+    tmp = tempfile.TemporaryDirectory()
+    cfg_path = P(tmp.name) / "gateway.yaml"
+    cfg_path.write_text(P(CONFIG).read_text(encoding="utf-8"), encoding="utf-8")
+    old_path, old_cfg = m.CONFIG_PATH, m.config
+    m.CONFIG_PATH = cfg_path
+    try:
+        view = client.get("/config", headers=ah).json()["config"]
+        # 生产配置里**可能已经配了**别名（老板在页面上配的）—— 本用例只钉
+        #   「面板往返不丢 / 保存即生效 / 非法目标 400 不写盘」，不假设起始状态为空。
+        assert "aliases" in view, view.keys()
+        # 换一个和生产默认不同的目标，才能证明写入真的生效了
+        target = "ark-code-latest"
+        view["aliases"] = {"wjd": {"enabled": True, "target": target, "note": "客户入口"}}
+        r = client.put("/config", headers=ah, json={"config": view})
+        assert r.status_code == 200, r.text
+        assert m.config.resolve_alias("wjd") == target, "保存即生效"
+        # 落盘 yaml 里也确实有这一段（面板下次读得回来）
+        assert _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["aliases"]["wjd"]["target"] == target
+        lm = client.get("/v1/models", headers=ah).json()["data"]
+        assert next(x for x in lm if x["id"] == "wjd")["alias_of"] == target
+        # 非法目标：400 + 不写盘（盘上仍是上一个合法值）
+        bad = client.get("/config", headers=ah).json()["config"]
+        bad["aliases"]["wjd"]["target"] = "根本没有这个模型"
+        r2 = client.put("/config", headers=ah, json={"config": bad})
+        assert r2.status_code == 400 and "wjd" in r2.text, r2.text
+        assert _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["aliases"]["wjd"]["target"] == target
+        assert m.config.resolve_alias("wjd") == target
+    finally:
+        m.CONFIG_PATH, m.config = old_path, old_cfg
+        tmp.cleanup()
+
+
+def test_alias_streaming_uses_one_name_throughout():
+    """流式（别名调用）：同一条 SSE 里不该出现两个模型名 —— 元信息帧报请求名 wjd，
+    上游 chunk 带的是真实 id，也要统一成 wjd；真实目标只在 served_model 里体现。
+    （普通调用不受影响：那是 chunk 里 model 本来就是请求的那个 id。）"""
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    class FakeAdapter:
+        async def chat_stream(self, **kw):
+            yield {"choices": [{"delta": {"content": "hi"}}], "model": "m-chat"}
+            yield {"done": True}
+
+    old_cfg, old_adapter, old_cache = m.config, m._get_adapter, m._state.get("_models_cache")
+    m.config, m._state["_models_cache"] = _alias_cfg("m-chat"), None
+    m._get_adapter = lambda model_id, timeout=None, cfg=None: (FakeAdapter(), "p", m.config.providers["p"])
+    try:
+        with _Isolated():
+            client = TestClient(m.app)
+            with client.stream("POST", "/v1/chat/completions",
+                               json={"model": "wjd", "messages": [{"role": "user", "content": "x"}],
+                                     "stream": True}) as r:
+                body = "".join(r.iter_text())
+    finally:
+        m.config, m._get_adapter, m._state["_models_cache"] = old_cfg, old_adapter, old_cache
+    frames = [json.loads(ln[6:]) for ln in body.splitlines()
+              if ln.startswith("data: ") and ln[6:].strip() != "[DONE]"]
+    assert frames, body
+    for f in frames:
+        assert f.get("model") == "wjd", f          # 名字只有一个：客户端请求的那个
+    assert frames[0]["served_model"] == "m-chat", frames[0]   # 真实目标在这里说清楚
 
 
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`
