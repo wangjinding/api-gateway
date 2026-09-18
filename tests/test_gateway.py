@@ -3783,7 +3783,9 @@ def test_api_conversation_id_flows_to_session_header():
     """API 调用（HTTP body）传 conversation_id → 适配器 session_id；且不透传上游 payload。
 
     覆盖老板问的「非前端、纯 API 调用是否支持稳定会话」：只要请求体带
-    conversation_id，后端就把它作为 OpenCode Go 的 x-opencode-session 透传。
+    conversation_id，后端就把它作为 OpenCode Go 的 x-opencode-session。
+    第二十六轮起不再**原样透传**，而是派生成「账号 + 会话 id」的稳定哈希（隔离见
+    test_conversation_id_isolated_per_account）。
     """
     from fastapi.testclient import TestClient
     import app.main as m
@@ -3810,7 +3812,15 @@ def test_api_conversation_id_flows_to_session_header():
                               "messages": [{"role": "user", "content": "hi"}],
                               "conversation_id": "conv-api-42"})
         assert r.status_code == 200, r.text
-        assert captured["session_id"] == "conv-api-42"
+        # 第二十六轮：不再原样透传，改为「账号 + 会话 id」的稳定派生值
+        derived = captured["session_id"]
+        assert derived and derived != "conv-api-42", "不应把客户端原值直接发给上游"
+        # 同账号 + 同会话 → 恒定不变（否则缓存收益就没了）
+        client.post("/v1/chat/completions", headers={"Authorization": _AUTOBEARER},
+                    json={"model": "agnes-3.0-flash",
+                          "messages": [{"role": "user", "content": "hi"}],
+                          "conversation_id": "conv-api-42"})
+        assert captured["session_id"] == derived, "同一会话必须派生出同一个 session"
         assert not captured["extra"] or "conversation_id" not in captured["extra"]
         # ② 不传 → session_id 为 None（由适配器回退随机 UUID）
         r2 = client.post("/v1/chat/completions", headers={"Authorization": _AUTOBEARER},
@@ -3818,6 +3828,95 @@ def test_api_conversation_id_flows_to_session_header():
                                "messages": [{"role": "user", "content": "hi"}]})
         assert r2.status_code == 200, r2.text
         assert captured["session_id"] is None
+    finally:
+        m._get_adapter = orig
+
+
+# ── 第二十六轮：会话 id 入站校验 + 按账号隔离 ──
+#
+# 起因（实测）：conversation_id 最终要进 **HTTP header**（x-opencode-session）。原先
+# 无任何校验，传中文时 httpx 组 header 抛 UnicodeEncodeError → 被误判成"上游失败"
+# → 重试 3 次（必然全失败）→ 最终 502「路由 x 全部模型调用失败」+ 记熔断，真实原因
+# （客户端传错值）被完全掩盖；同时原值直接透传，两个账号用同一个字符串会共用上游
+# 缓存命名空间（不泄露内容，但命中率/计费口径互相干扰）。
+
+
+def test_conversation_id_model_level_normalization():
+    """模型层：剥空白、空白串视作未传；非 ASCII / 超长一律校验失败。"""
+    from pydantic import ValidationError
+    from app.models import ChatRequest, CONVERSATION_ID_MAX
+
+    base = {"model": "x", "messages": [{"role": "user", "content": "hi"}]}
+    # 两端空白剥掉；全空白等同未传（回退上游随机会话，与旧行为一致）
+    assert ChatRequest(**base, conversation_id="  abc-1  ").conversation_id == "abc-1"
+    assert ChatRequest(**base, conversation_id="   ").conversation_id is None
+    # 恰好到上限可用，超一个字符就拒
+    assert ChatRequest(**base, conversation_id="A" * CONVERSATION_ID_MAX).conversation_id
+    for bad in ["会话一号", "café", "🙂", "A" * (CONVERSATION_ID_MAX + 1)]:
+        try:
+            ChatRequest(**base, conversation_id=bad)
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError(f"{bad!r} 应被拒绝")
+
+
+def test_conversation_id_isolated_per_account():
+    """同一 conversation_id 在不同账号下必须派生成不同的上游 session（反之恒定）。"""
+    import app.main as m
+
+    a = m._upstream_session("shared-conv", "alice")
+    b = m._upstream_session("shared-conv", "bob")
+    assert a != b, "不同账号必须隔离（否则共用上游缓存命名空间）"
+    assert a == m._upstream_session("shared-conv", "alice"), "同账号同会话必须稳定（保住缓存收益）"
+    assert m._upstream_session("other-conv", "alice") != a, "同账号不同会话必须不同"
+    assert m._upstream_session(None, "alice") is None, "未传 → None（适配器回退随机 UUID）"
+    assert m._upstream_session("", "alice") is None
+    # 上游只应看到一个十六进制串，不该看到账号名或业务命名
+    assert len(a) == 32 and all(c in "0123456789abcdef" for c in a), a
+    assert "alice" not in a and "shared" not in a
+
+
+def test_non_ascii_conversation_id_rejected_before_upstream():
+    """非法会话 id 必须在入站回 422，且**一次都不发上游**（此前会重试 3 次再报 502）。"""
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    calls = []
+
+    class Capture:
+        async def chat(self, model=None, messages=None, session_id=None, extra=None, **kw):
+            calls.append(session_id)
+            return {"id": "c1", "object": "chat.completion", "model": model,
+                    "choices": [{"message": {"role": "assistant", "content": "ok"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 2, "completion_tokens": 1}}
+
+    orig = m._get_adapter
+    m._get_adapter = lambda model_id, timeout=None, cfg=None: (
+        Capture(), "agnes", m._cfg().providers["agnes"])
+    try:
+        client = TestClient(m.app)
+        base = {"model": "agnes-3.0-flash", "messages": [{"role": "user", "content": "hi"}]}
+
+        # ① 中文 → 422（不是 502），且适配器零调用
+        r = client.post("/v1/chat/completions", headers={"Authorization": _AUTOBEARER},
+                        json={**base, "conversation_id": "会话一号"})
+        assert r.status_code == 422, (r.status_code, r.text)
+        assert "ASCII" in r.text, r.text
+        assert calls == [], "非法会话 id 不该发往上游（此前会重试 3 次 + 502）"
+
+        # ② 超长 → 422，同样零调用
+        r = client.post("/v1/chat/completions", headers={"Authorization": _AUTOBEARER},
+                        json={**base, "conversation_id": "A" * 500})
+        assert r.status_code == 422, (r.status_code, r.text)
+        assert calls == []
+
+        # ③ 空白串 → 视作未传，正常放行（session_id=None → 上游随机 UUID）
+        r = client.post("/v1/chat/completions", headers={"Authorization": _AUTOBEARER},
+                        json={**base, "conversation_id": "   "})
+        assert r.status_code == 200, r.text
+        assert calls == [None]
     finally:
         m._get_adapter = orig
 

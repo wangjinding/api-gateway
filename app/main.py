@@ -584,6 +584,35 @@ _ERROR_TYPES = {
 }
 
 
+def _jsonable_errors(errors: list) -> list:
+    """把 pydantic 的 `errors()` 清洗成一定能 JSON 序列化的形式。
+
+    第二十六轮实测踩到：自定义校验器 `raise ValueError(...)` 时，pydantic v2 会把**原始异常
+    对象**放进 `errors()[i]["ctx"]["error"]`。这里原先直接把 `exc.errors()` 塞进响应体，
+    于是 422 响应在序列化时抛 `TypeError: Object of type ValueError is not JSON serializable`
+    → 中间件兜底成 **500「网关内部错误: TypeError」**：明明只是客户端参数写错，却被伪装成
+    "网关崩了"，且**任何新增的校验器都会踩同一个坑**。所以这里统一清洗：
+    `ctx` 里的异常对象转字符串、`input` 收敛成 JSON 安全类型，拿不准的一律 str()。
+    """
+    out: list = []
+    for e in errors or []:
+        try:
+            item = dict(e)
+        except Exception:
+            out.append({"msg": str(e)})
+            continue
+        ctx = item.get("ctx")
+        if isinstance(ctx, dict):
+            item["ctx"] = {
+                k: (str(v) if isinstance(v, BaseException) else v) for k, v in ctx.items()
+            }
+        inp = item.get("input")
+        if inp is not None and not isinstance(inp, (str, int, float, bool, list, dict)):
+            item["input"] = str(inp)
+        out.append(item)
+    return out
+
+
 @app.exception_handler(RequestValidationError)
 async def openai_compat_validation_error(request: Request, exc: RequestValidationError):
     """Bug 2 修复: 请求体校验失败也返回 OpenAI 兼容格式。
@@ -595,13 +624,25 @@ async def openai_compat_validation_error(request: Request, exc: RequestValidatio
     try:
         err0 = exc.errors()[0]
         loc = ".".join(str(x) for x in err0.get("loc", []) if x != "body")
-        msg = f"请求参数校验失败: {loc or 'body'}: {err0.get('msg', '')}"
+        raw = str(err0.get("msg", ""))
+        # pydantic 会给校验器抛出的 ValueError 加 "Value error, " 前缀；字段名已在 loc 里，
+        # 保留前缀只会让调用方看到「conversation_id: Value error, …」这种噪音。
+        if raw.startswith("Value error, "):
+            raw = raw[len("Value error, "):]
+        msg = f"请求参数校验失败: {loc or 'body'}: {raw}"
     except Exception:
         msg = "请求参数校验失败"
+    # 第二十六轮: detail 必须清洗后再输出 —— 校验器抛出的异常对象不可 JSON 序列化，
+    #   直接放进去会让 422 变成 500（详见 _jsonable_errors 的说明）。
+    detail = _jsonable_errors(exc.errors())
+    try:
+        json.dumps(detail, ensure_ascii=False)
+    except Exception:
+        detail = []
     return UTF8JSONResponse(
         status_code=422,
         content={"error": {"message": msg, "type": "invalid_request_error",
-                           "code": "422", "detail": exc.errors()},
+                           "code": "422", "detail": detail},
                  "x_request_id": rid},
     )
 
@@ -1287,6 +1328,25 @@ async def chat_completions(request: Request, req: ChatRequest, _auth=Depends(req
     return await _chat_fallback(cfg, rid, caller, request, req, chain, route, messages, tools)
 
 
+def _upstream_session(conversation_id: str | None, account: str) -> str | None:
+    """把客户端的会话 id 派生成**按账号隔离**的上游 session id（第二十六轮）。
+
+    上游（OpenCode Go）的提示词缓存以 `x-opencode-session` 为作用域 —— 实测：同一 session
+    的第二次请求 `cached_tokens` 全量命中，换成另一个 session 则恒为 0（换 session = 完全不
+    吃缓存）。所以这个值值得稳定，但也**不该原样透传客户端的字符串**：
+
+    两个账号只要用了相同的值（`test`、`1`、照文档抄的示例），就会落进同一个上游缓存命名
+    空间。这不会泄露彼此内容（缓存只是前缀 KV 复用，绝不会返回别人的回答），但**命中率会
+    互相干扰**，计费和缓存收益的口径也就串了。
+
+    这里加账号前缀后哈希：对上游仍是"同一对话恒定不变"的稳定 id（缓存收益不变），但不同
+    账号之间天然隔离；同时上游只看到一个 32 位十六进制串，既不暴露账号名也不暴露业务命名。
+    """
+    if not conversation_id:
+        return None
+    return hashlib.sha256(f"{account}:{conversation_id}".encode("utf-8")).hexdigest()[:32]
+
+
 async def _chat_fallback(cfg, rid, caller, request, req, chain, route, messages, tools):
     """非流式：按优先级逐个尝试 + 熔断 + 重试。"""
     errors: list[dict] = []
@@ -1339,7 +1399,7 @@ async def _chat_fallback(cfg, rid, caller, request, req, chain, route, messages,
                     max_tokens=req.max_tokens, stop=req.stop,
                     tools=tools, tool_choice=tool_choice,
                     extra=req.upstream_extra() or None,
-                    session_id=req.conversation_id,
+                    session_id=_upstream_session(req.conversation_id, caller),
                 )
                 ok = True
                 break
@@ -1443,7 +1503,7 @@ def _stream_response(request, req, chain, route, messages, tools):
                         max_tokens=req.max_tokens, stop=req.stop,
                         tools=tools, tool_choice=req.tool_choice,
                         extra=req.upstream_extra() or None,
-                        session_id=req.conversation_id,
+                        session_id=_upstream_session(req.conversation_id, caller),
                     )
                     async for chunk in stream_gen:
                         if chunk.get("done"):
