@@ -59,7 +59,7 @@ api-gateway/
 >
 > 收录的 17 个文本模型（OpenAI 兼容 `/chat/completions` 线，真实 key 实测 200）：
 > `glm-5.3-flash`、`glm-5.3`、`glm-5.2`、`glm-5.1`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、
-> `longcat-2.0`、`deepseek-v4-pro`、`deepseek-v4-flash`、`deepseek-flash`、`deepseek-v4.1-flash`、
+> `longcat-2.0`、`deepseek-v4-pro`、`deepseek-v4-flash`、`deepseek-flash`、`deepseek-v4.1-flash`（视觉）、
 > `deepseek-v4-flash-vision-exp`（视觉）、`mimo-v2.5`、`mimo-v2.5-pro`、`hy4-preview`、`hy3`。
 > OpenCode Go 其余模型走 Anthropic `messages` 或 OpenAI `responses` 契约（本网关为 OpenAI 兼容
 > 转发，暂未接入）；`glm-5`、`kimi-k2.5`、`hy3-preview` 实测上游返回「Model is unavailable」未收录。
@@ -766,7 +766,8 @@ curl "http://localhost:8808/v1/videos/<video_id>?model=agnes-video-2.5-flash&wai
 > - **轮询限流不再误伤**：实测 `/agnesapi` 每 3 秒一问就零星回 429「查询过于频繁」；原逻辑把 429 记成熔断失败
 >   并给前端 502 —— 连撞三次就把整个媒体服务熔断 30 秒。现在回 `200 + throttled + retry_after`，
 >   熔断桶与调用指标都不动，前端按退避继续轮（页面轮询间隔保持 5s，不按文档建议的 1~2s，正是为了不撞限流）。
-> - **视觉能力位**：`/v1/models` 新增 `vision`（`agnes-3.0-flash` = true，即文档里的"输入模态：文本、图像 URL"）；
+> - **视觉能力位**：`/v1/models` 新增 `vision`（`agnes-3.0-flash` = true，即文档里的"输入模态：文本、图像 URL"；
+>   OpenCode Go 侧 `deepseek-v4.1-flash` 与 `deepseek-v4-flash-vision-exp` 实测同为 true）；
 >   **带图请求走路由别名 `wjd` 时把视觉模型排到链首**（否则链首的纯文本模型要么忽略图片、要么报参数错误，
 >   两种都极难自查）；直接指定真实模型时不改用户选择。
 > - 回归测试新增 6 组（vision 暴露 / 视觉优先重排 / 带图块识别 / 图像 n 拦截 / 图像 4xx·5xx 分流 /

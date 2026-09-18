@@ -110,6 +110,8 @@ providers:
       - id: "deepseek-v4.1-flash"
         display_name: "DeepSeek V4.1 Flash"
         type: "text"
+        vision: true   # 2026-09-18 实测确认多模态：data:image/png;base64 红/蓝/绿三色均识别正确；
+                       #   同一带图请求打到纯文本模型 deepseek-v4-flash 会被上游 400 拒（对照有效）。
       - id: "deepseek-v4-flash-vision-exp"
         display_name: "DeepSeek V4 Flash Vision Exp"
         type: "text"

@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-09-18 · deepseek-v4.1-flash 视觉能力实测确认（纯配置，hot_reload 生效）
+
+**背景**：老板提示 `deepseek-v4.1-flash`（OpenCode Go）是多模态。上游 `/models` 不提供能力字段（返回只有
+`id`/`object`/`created`/`owned_by`），**只能靠真实调用判定**，不能凭文档或模型名猜。
+
+### 实测方法与结果（真实 key）
+- **对照组设计**：同一条带图请求（`content=[{type:"text"},{type:"image_url",image_url:{url:"data:image/png;base64,…"}}]`）
+  分别打给目标模型和**已确认纯文本**的 `deepseek-v4-flash` —— 后者 **HTTP 400**，前者 **HTTP 200**，区分成立
+  （否则"200"可能只是上游忽略图片块，无法证明它真的看了图）。
+- **颜色判别（64×64 纯色 PNG，红 `220,30,30` / 蓝 `30,60,220` / 绿 `30,200,80`）**：`deepseek-v4.1-flash`
+  **红/蓝/绿三色全部答对**，与已标视觉的 `deepseek-v4-flash-vision-exp` 表现完全一致。
+- **过网关复测**（公网 `https://api.wangjinding.com`）：直连 `deepseek-v4.1-flash` 三色全对；路由别名 `wjd`
+  带图请求被排到视觉模型、答对「红色」。
+- **踩坑（判定方法的坑）**：它是**推理模型**，`max_tokens` 给小了（首次探针用 40）时 token 全被
+  `reasoning_content` 吃光、`content` 返回空串——**看起来像"只收图不回答"**。复测放大到 300+ 才拿到答案。
+  以后判定视觉能力别用 40 这种量级。
+
+### 改动
+- `data/gateway.yaml`：`deepseek-v4.1-flash` 增加 `vision: true`（附实测注释）。
+- `README.md`：OpenCode Go 模型清单里该模型标注「（视觉）」，并补进「视觉能力位」说明段。
+- **纯配置改动 → hot_reload 15s 自动生效，未重启后端、未踢网页会话**。`/v1/models` 中该模型 `vision`
+  由 `false` → `true`（实测确认）；带图请求现在也会在 `wjd` 路线上把该模型视为视觉候选。
+
+---
+
 ## 2026-09-18 · 第二十五轮：模型参数硬约束 + 测速超时/错误文案（一轮全修）
 
 **背景（两条线一起收）**：上一轮排查出两个"看起来都坏了"的模型，其实是两回事：
