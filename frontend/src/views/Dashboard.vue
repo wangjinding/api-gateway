@@ -41,16 +41,16 @@
         <div class="sep" />
 
         <div class="card-h" style="margin-bottom: 8px">
-          <b>{{ t('dashboard.routeAlias') }}</b>
-          <span class="sub">{{ t('dashboard.routeChain') }}</span>
+          <b>{{ t('dashboard.byProtocol') }}</b>
+          <span class="sub">{{ t('dashboard.byProtocolSub') }}</span>
         </div>
         <div class="pv" style="gap: 7px">
-          <div v-for="(r, i) in routeRows" :key="r.name" class="pv-i" style="font-size: 12px">
+          <div v-for="(r, i) in protoRows" :key="r.name" class="pv-i" style="font-size: 12px">
             <span class="pill mute">{{ i + 1 }}</span>
             <span class="code flex-1">{{ r.name }}</span>
             <span class="st muted-2 nowrap">{{ r.short }}</span>
           </div>
-          <div v-if="!routeRows.length" class="hint">{{ t('dashboard.noData') }}</div>
+          <div v-if="!protoRows.length" class="hint">{{ t('dashboard.noData') }}</div>
         </div>
       </div>
     </div>
@@ -94,7 +94,6 @@
         <span>{{ t('dashboard.running') }}</span>
         <span>{{ t('dashboard.uptime') }} {{ uptimeText }}</span>
         <span>{{ t('dashboard.inflight') }} {{ health.in_flight ?? '-' }} / {{ health.in_flight_peak ?? '-' }}</span>
-        <span>{{ t('dashboard.fallback') }} {{ health.fallback_total ?? 0 }}</span>
       </div>
     </div>
   </div>
@@ -116,7 +115,7 @@ const { resolved } = useTheme() // 主题变化时重算图表配色
 const health = ref<any>({})
 const metrics = ref<any>({})
 const models = ref<any>({})
-const routes = ref<any[]>([])
+const modelsList = ref<any[]>([])
 const loading = ref(false)
 const err = ref('')
 
@@ -149,7 +148,6 @@ const cards = computed(() => {
     { k: t('dashboard.requests'), v: total.value, note: t('dashboard.noteOkFail', { ok: totalOk.value, fail: totalFail.value }) },
     { k: t('dashboard.successRate'), v: rate.value.toFixed(1) + '%', note: t('dashboard.noteFail', { n: totalFail.value }) },
     { k: t('dashboard.avgLatency'), v: avgP50.value.toFixed(2) + 's', note: t('dashboard.noteP95', { v: maxP95.value.toFixed(2) }) },
-    { k: t('dashboard.fallbackShort'), v: health.value.fallback_total ?? 0, note: t('dashboard.noteInflight', { n: health.value.in_flight ?? 0 }) },
   ]
 })
 
@@ -171,12 +169,14 @@ const providerRows = computed(() => {
   })
 })
 
-const routeRows = computed(() => {
-  const m = models.value
-  return routes.value.map((r: any) => {
-    const chain: string[] = (m[r.id] || []).map((x: any) => (typeof x === 'string' ? x : x.id || x.name))
-    return { name: r.id, short: chain.length ? t('models.chainCount', { n: chain.length }) : '—' }
-  })
+// 第二十七轮: 路由别名链已删除 → 这里改成"每条协议线各有几个模型"
+//   （三线直传后这个分布才是运维真正关心的：哪条线现在有货）
+const protoRows = computed(() => {
+  const count: Record<string, number> = {}
+  for (const m of modelsList.value) {
+    for (const p of (m.protocols || ['chat/completions'])) count[p] = (count[p] || 0) + 1
+  }
+  return Object.keys(count).sort().map((k) => ({ name: k, short: t('dashboard.modelCountN', { n: count[k] }) }))
 })
 
 const callRows = computed(() => {
@@ -258,14 +258,10 @@ async function load() {
     try {
       const um = await api('/v1/models')
       const data = um.data || []
-      routes.value = data.filter((x: any) => x.type === 'route')
+      modelsList.value = data
       const map: Record<string, string> = {}
-      for (const x of data) if (x.type !== 'route') map[x.id] = x.provider_name || ''
+      for (const x of data) map[x.id] = x.provider_name || ''
       textModels.value = map
-      const list = data.filter((x: any) => x.type === 'route')
-      const m: Record<string, any> = {}
-      for (const r of list) m[r.id] = r.models || []
-      models.value = m
     } catch { /* 模型列表可选 */ }
   } catch (e: any) {
     if (e && e.status === 401) { router.push('/login'); return }

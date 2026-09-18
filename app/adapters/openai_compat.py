@@ -14,12 +14,18 @@ import json
 import logging
 import re
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 import httpx
 
 from app.adapters.base import BaseAdapter, json_or_raise
-from app.config import MODEL_PARAM_KEYS
+from app.config import (
+    PROTOCOL_CHAT,
+    EndpointSpec,
+    MODEL_PARAM_KEYS,
+    _default_endpoints,
+)
 from app.models import CHAT_CORE_KEYS, PROTECTED_VIDEO_KEYS, strip_protected
 
 log = logging.getLogger("api-gateway")
@@ -38,7 +44,13 @@ _PARAM_MIN_RE = re.compile(
 
 
 class OpenAICompatAdapter(BaseAdapter):
-    """适用于所有 OpenAI 兼容 /chat/completions 端点的适配器。"""
+    """适用于所有 OpenAI 兼容 /chat/completions 端点的适配器。
+
+    第二十七轮（三线直传）后它同时承担**协议直传**职责：同一家供应商的三条线
+    （chat/completions、messages、responses）共用这一个适配器、共用一个连接池，
+    差别只在「路径 + 鉴权头」——由 provider 的 `endpoints` 配置提供（见 config.EndpointSpec）。
+    直传路径**不翻译任何内容**：入站 body 原样出去，上游响应原样回来。
+    """
 
     def __init__(
         self,
@@ -49,9 +61,17 @@ class OpenAICompatAdapter(BaseAdapter):
         media=None,
         requires_session_header: bool = False,
         model_params: dict[str, dict[str, Any]] | None = None,
+        token: str = "",
+        endpoints: dict[str, EndpointSpec] | None = None,
     ):
         super().__init__(name=name, base_url=base_url, timeout=timeout, media=media)
         self._headers: dict[str, str] = headers or {}
+        # 第二十七轮: 每条协议线的出站配置（路径 / 鉴权方式 / 该线固定头）。
+        #   不传 = 三条标准线的默认值，所以旧调用点（含单测直接 new）行为不变。
+        self._endpoints: dict[str, EndpointSpec] = dict(endpoints or _default_endpoints())
+        # 裸 token：每条线要发的鉴权头不同（Bearer / x-api-key），所以不能在构造时就把
+        #   header 拼死。没显式传就回头从静态 headers 里解析（兼容直接 new 的调用方）。
+        self._token = token or self._token_from_headers(self._headers)
         # OpenCode Go 要求每个 /chat/completions 带稳定 x-opencode-session。
         # 不能放静态 headers（_get_adapter 会缓存适配器、冻结 header），
         # 所以在每次请求时动态生成一个 UUID 会话头。
@@ -64,6 +84,45 @@ class OpenAICompatAdapter(BaseAdapter):
         #   仅作兜底 —— 管理员在 gateway.yaml 写死 params 后就不再需要它。
         self._learned_params: dict[str, dict[str, Any]] = {}
 
+    @staticmethod
+    def _token_from_headers(headers: dict[str, str]) -> str:
+        """从静态 headers 里反解 token（兼容历史调用方式：构造时就带 Authorization）。"""
+        auth = headers.get("Authorization") or headers.get("authorization") or ""
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return headers.get("x-api-key") or ""
+
+    # ── 协议线（第二十七轮） ─────────────────────────
+
+    def endpoint(self, protocol: str) -> EndpointSpec | None:
+        """取某条线的出站配置（None = 该供应商没有这条线）。"""
+        return self._endpoints.get(protocol)
+
+    def _path(self, protocol: str) -> str:
+        ep = self._endpoints.get(protocol)
+        if ep is None:
+            # 走到这里说明配置校验漏了（validate_config 会拦「模型声明了但供应商没配」），
+            #   抛清晰错误而不是退化成默认路径 —— 猜出来的地址只会收到 404，更难查。
+            raise ValueError(f"供应商 {self.name} 未配置协议线 {protocol}")
+        return ep.path
+
+    def auth_headers(self, protocol: str) -> dict[str, str]:
+        """按该线的鉴权方式组装鉴权头（Bearer / x-api-key / 无）。
+
+        这是三线直传里"唯一必须做的 glue"：同一个供应商的三条线鉴权方式可能不同
+        （实测 OpenCode Go：chat/completions 与 responses 认 `Authorization: Bearer`，
+        messages 认 `x-api-key`；用 Bearer 打 /messages 会 401 Missing API key）。
+        """
+        ep = self._endpoints.get(protocol)
+        style = (ep.auth if ep else "bearer")
+        out: dict[str, str] = {}
+        if style == "bearer" and self._token:
+            out["Authorization"] = f"Bearer {self._token}"
+        elif style == "x-api-key" and self._token:
+            out["x-api-key"] = self._token
+        if ep:
+            out.update(ep.headers or {})       # 如 anthropic-version
+        return out
     # ── 模型级强制参数 / 上游参数约束自学习（第二十五轮） ──
 
     def _forced_params(self, model: str) -> dict[str, Any]:
@@ -128,18 +187,102 @@ class OpenAICompatAdapter(BaseAdapter):
                     model, changed)
         return self._forced_params(model)
 
-    def _req_headers(self, session_id: str | None = None) -> dict[str, str]:
-        """每次请求的 headers。需要会话头的供应商动态注入 x-opencode-session。
+    def _req_headers(self, session_id: str | None = None,
+                     protocol: str = PROTOCOL_CHAT) -> dict[str, str]:
+        """每次请求的 headers：静态头 + 本条线的鉴权头 + 会话头。
 
         session_id 由调用方传入（网关把对话的 conversation_id 透传过来）：
-        - 有 → 同一段对话的所有请求共用同一个 session（吃到上游提示词缓存）；
+        - 有 → 同一段对话的所有请求共用同一个 session（上游据此做路由与缓存）；
         - 无 → 回退为每请求一个随机 UUID（仍能过上游的强校验，只是没有缓存收益）。
+
+        第二十七轮实测：OpenCode Go 的**三条线都硬性要求该头**（缺任一条 → 400
+        MissingSessionID），所以注入逻辑与协议线无关，统一在这里做。
         """
-        if not self._requires_session:
-            return self._headers
         headers = dict(self._headers)
-        headers["x-opencode-session"] = session_id or uuid.uuid4().hex
+        # 鉴权头按线走：先清掉静态头里可能残留的鉴权（历史写法：create_adapter 曾把
+        #   Authorization 塞进静态 headers），再由 auth_headers 按该线的方式补上。
+        headers.pop("Authorization", None)
+        headers.pop("authorization", None)
+        headers.pop("x-api-key", None)
+        headers.update(self.auth_headers(protocol))
+        if self._requires_session:
+            headers["x-opencode-session"] = session_id or uuid.uuid4().hex
         return headers
+
+    def _media_headers(self) -> dict[str, str]:
+        """媒体端点（图像生成 / 视频创建 / 视频轮询）的 headers。
+
+        媒体端点不属于「三条协议线」，所以不走 `_req_headers` —— 历史口径是固定用 Bearer。
+        第二十七轮把鉴权头改成「按协议线在 `_req_headers` 里组装」之后，这三个调用点却还在
+        用静态 `self._headers`，而 `create_adapter` 已经不再往静态头里塞 Authorization
+        ⇒ **token 一个都没带出去**。真机表现：`POST /v1/images/generations` 上游 401
+        「未提供令牌」（同一个 key 直接 curl 同一个地址是 200）。
+        这里统一补回来：静态头 + Bearer（有 token 时）+ 会话头（供应商要求时）。
+        """
+        headers = dict(self._headers)
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        if self._requires_session:
+            headers["x-opencode-session"] = uuid.uuid4().hex
+        return headers
+
+    # ── 协议直传（第二十七轮）────────────────────────
+    # 「入站是什么格式，出站就是什么格式」：这两个原语把入站 body **原样**发到该线的上游
+    # 地址，**不翻译任何字段**。网关只做三件事：① 挑对供应商与线；② 把 model 改成真实
+    # id 并盖上模型级强制参数；③ 原样把响应（含 SSE）交回客户端。
+    # 中间不做 has_images 之类的语义判断，也不解析 body 结构。
+
+    def prepare_payload(self, model: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """直传前的定点改写：model 换成真实 id + 盖模型级强制参数（其余一律不动）。
+
+        - model：入站就是真实模型 id（第二十七轮起路由别名已删除，不再有别名解析，
+          网关也不会替你换模型）—— 这里仍保留"定点改写 model"的能力：调用方写的 id
+          必须落到某条线能认的 id 上；
+        - 强制参数：`models[].params`（如 kimi-k2.7-code 只接受 temperature=1）在直传里
+          同样必须生效，否则"直传"就成了"漏掉网关的硬约束"。
+        这两处是**唯一**允许改写入站 body 的地方（改的都是"发给谁/必须用什么参数"，
+        不是协议语义），其余字段一律原样。
+        """
+        out = dict(payload)
+        out["model"] = model
+        forced = self._forced_params(model)
+        if forced:
+            out.update(forced)
+        return out
+
+    async def raw_json(self, protocol: str, payload: dict[str, Any],
+                       session_id: str | None = None) -> tuple[int, Any]:
+        """非流式直传：返回 (上游状态码, 上游 JSON/文本)。
+
+        刻意**不 raise_for_status**：直传口径下上游的错误体要原样交回客户端
+        （老板决策："其他都不转" —— 错误文案也不转）。熔断/指标由调用方按状态码记。
+        """
+        async with self._lease() as client:
+            resp = await client.post(self._path(protocol), json=payload,
+                                     headers=self._req_headers(session_id, protocol))
+            body = resp.content
+            ctype = resp.headers.get("content-type", "")
+        if "application/json" in ctype:
+            try:
+                return resp.status_code, json.loads(body)
+            except (ValueError, json.JSONDecodeError):
+                pass
+        # 非 JSON（或声明 JSON 但解析失败）：把原始文本交回，别在这里编造结构
+        return resp.status_code, body.decode("utf-8", "replace")
+
+    @asynccontextmanager
+    async def raw_stream(self, protocol: str, payload: dict[str, Any],
+                         session_id: str | None = None):
+        """流式直传：上下文内可直接读 `resp`（状态码 + 字节流）。
+
+        为什么用 asynccontextmanager 而不是普通 async generator：调用方需要**先看到
+        状态码**再决定返回 SSE（200）还是上游的 JSON 错误（4xx/5xx）。同时 lease 必须在
+        整个流式期间持有（热重载/关闭不会掐断在途流，与 _stream_once 同一处理）。
+        """
+        async with self._lease() as client:
+            async with client.stream("POST", self._path(protocol), json=payload,
+                                     headers=self._req_headers(session_id, protocol)) as resp:
+                yield resp
 
     def _build_payload(
         self,
@@ -214,7 +357,8 @@ class OpenAICompatAdapter(BaseAdapter):
         """执行一次非流式 /chat/completions 请求（不含参数修正逻辑）。"""
         # Bug 4 修复: 用 lease 占用 client，热重载 close 会等本次请求结束才真正关连接
         async with self._lease() as client:
-            resp = await client.post("/chat/completions", json=payload, headers=self._req_headers(session_id))
+            resp = await client.post(self._path(PROTOCOL_CHAT), json=payload,
+                                     headers=self._req_headers(session_id, PROTOCOL_CHAT))
             resp.raise_for_status()
             data = json_or_raise(resp)
 
@@ -269,7 +413,8 @@ class OpenAICompatAdapter(BaseAdapter):
         # Bug 4 修复: lease 在整个流式期间持有占用，热重载/关闭不会掐断在途流
         async with self._lease() as client:
             async with client.stream(
-                "POST", "/chat/completions", json=payload, headers=self._req_headers(session_id)
+                "POST", self._path(PROTOCOL_CHAT), json=payload,
+                headers=self._req_headers(session_id, PROTOCOL_CHAT)
             ) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
@@ -316,7 +461,7 @@ class OpenAICompatAdapter(BaseAdapter):
             payload["extra_body"] = extra_body
 
         async with self._lease() as client:
-            resp = await client.post(endpoint, json=payload, headers=self._headers)
+            resp = await client.post(endpoint, json=payload, headers=self._media_headers())
             resp.raise_for_status()
             data = json_or_raise(resp)
         # 统一：返回 data 数组
@@ -350,7 +495,7 @@ class OpenAICompatAdapter(BaseAdapter):
             payload[k] = v
 
         async with self._lease() as client:
-            resp = await client.post(endpoint, json=payload, headers=self._headers)
+            resp = await client.post(endpoint, json=payload, headers=self._media_headers())
             resp.raise_for_status()
             data = json_or_raise(resp)
         # video_id 用于查询；id/task_id 是任务 id
@@ -372,7 +517,7 @@ class OpenAICompatAdapter(BaseAdapter):
         # 轮询用绝对 URL（poll_base 可能是去掉 /v1 的域名根）
         url = poll_base.rstrip("/") + poll_path
         async with self._lease() as client:
-            resp = await client.get(url, params=params, headers=self._headers)
+            resp = await client.get(url, params=params, headers=self._media_headers())
             resp.raise_for_status()
             data = json_or_raise(resp)
         return {"raw": data}

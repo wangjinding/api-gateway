@@ -12,13 +12,17 @@ def create_adapter(
 ) -> BaseAdapter:
     """根据供应商配置创建对应适配器。
 
-    当前三个供应商（Agnes / 火山方舟 / OpenCode Go）均为 OpenAI 兼容协议，
+    当前四个供应商（Agnes / 火山方舟 / OpenCode Go）均为 OpenAI 兼容协议，
     统一使用 OpenAICompatAdapter，通过 base_url 和 extra_headers 区分。
     图像/视频端点通过 media 配置覆盖（Agnes 走 /videos + /agnesapi）。
     OpenCode Go 由 requires_session_header 触发每请求动态注入 x-opencode-session。
+
+    第二十七轮（三线直传）: 鉴权头不再在这里拼死，而是把裸 token + 供应商的
+    `endpoints`（每条线的路径/鉴权方式/固定头）交给适配器，由它在**每次请求**时按
+    入站协议线组装（OpenCode Go 的 messages 线认 x-api-key，另两条线认 Bearer）。
+    这样同一个供应商的三条线共用一个适配器与连接池，也不需要在缓存 key 里区分协议。
     """
     headers = {
-        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
     headers.update(pconfig.extra_headers)
@@ -36,4 +40,7 @@ def create_adapter(
         #   不会出现"主链路修了、测速还漏着"的偏差。
         #   配置变更时 main._apply_config 会丢弃整个适配器缓存，约束不会滞留旧值。
         model_params={m.id: dict(m.params) for m in pconfig.models if m.params},
+        # 第二十七轮: 三条线的出站地址与鉴权方式（直传与常规调用共用）
+        token=token,
+        endpoints=pconfig.endpoints,
     )

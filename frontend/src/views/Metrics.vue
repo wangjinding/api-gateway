@@ -36,15 +36,14 @@
     <div class="grid-eq">
       <div class="card">
         <div class="card-h">
-          <b>{{ t('metrics.routeVsProvider') }}</b>
+          <b>{{ t('metrics.byProvider') }}</b>
           <span class="sub">{{ t('metrics.snapshot') }}</span>
           <div class="legend">
             <span><i style="background: var(--chart-a)" />ok</span>
             <span><i style="background: var(--err)" />fail</span>
-            <span><i style="background: var(--warn)" />fallback</span>
           </div>
         </div>
-        <EChart :option="routeOpt" height="250px" />
+        <EChart :option="providerOpt" height="250px" />
       </div>
       <div class="card">
         <div class="card-h">
@@ -88,7 +87,6 @@
       <div class="about-line">
         <b>{{ t('metrics.snapshot') }}</b>
         <span>{{ t('metrics.uptime') }} {{ fmtUptime }}</span>
-        <span>{{ t('metrics.fallback') }} {{ data.fallback_total ?? 0 }}</span>
         <span>{{ t('metrics.inflight') }} {{ data.in_flight ?? 0 }} / {{ data.in_flight_peak ?? 0 }}</span>
       </div>
     </div>
@@ -156,7 +154,8 @@ const cards = computed(() => {
     { k: t('metrics.requests'), v: all, note: t('dashboard.noteOkFail', { ok, fail }) },
     { k: t('metrics.failCount'), v: fail, note: t('metrics.failRateNote', { v: rate.toFixed(1) }) },
     { k: t('metrics.tokenUsage'), v: (tk.prompt || 0) + (tk.completion || 0), note: t('metrics.tokenNote', { p: tk.prompt ?? 0, c: tk.completion ?? 0 }) },
-    { k: t('metrics.inflightPeak'), v: `${data.value.in_flight ?? 0} / ${data.value.in_flight_peak ?? 0}`, note: t('metrics.fallback') + ' ' + (data.value.fallback_total ?? 0) },
+    // 第二十七轮: fallback 计数随路由功能删除 → 这张卡片的注脚改成运行时长
+    { k: t('metrics.inflightPeak'), v: `${data.value.in_flight ?? 0} / ${data.value.in_flight_peak ?? 0}`, note: t('metrics.uptime') + ' ' + fmtUptime.value },
   ]
 })
 
@@ -194,27 +193,26 @@ const provOpt = computed<EChartsCoreOption>(() => {
   }
 })
 
-const routeOpt = computed<EChartsCoreOption>(() => {
+// 第二十七轮: 路由维度指标随路由功能删除（routes/fallback_total 已不在 /metrics 里），
+//   这里改成按供应商看 成功 / 失败（供应商是现在唯一的"聚合维度"）。
+const providerOpt = computed<EChartsCoreOption>(() => {
   void resolved.value
   const c = chartTheme()
-  const r = data.value.routes || {}
-  const ks = Object.keys(r)
-  const names = ks.length ? ks : ['wjd']
-  const get = (k: string, f: string) => (r[k] || {})[f] || 0
+  const p = data.value.providers || {}
+  const names = Object.keys(p)
+  const get = (k: string, f: string) => (p[k] || {})[f] || 0
   const ok = names.map((n) => get(n, 'ok'))
   const fail = names.map((n) => get(n, 'fail'))
-  const fallback = names.map((n) => get(n, 'fallback'))
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    legend: legend(['ok', 'fail', 'fallback']),
+    legend: legend(['ok', 'fail']),
     grid,
-    graphic: emptyTip([ok, fail, fallback], t('metrics.none')),
+    graphic: emptyTip([ok, fail], t('metrics.none')),
     xAxis: categoryAxis(names, 10),
     yAxis: valueAxis('', 1),
     series: [
-      { name: 'ok', type: 'bar', stack: 'r', data: ok, itemStyle: { color: c.a } },
-      { name: 'fail', type: 'bar', stack: 'r', data: fail, itemStyle: { color: c.err } },
-      { name: 'fallback', type: 'bar', stack: 'r', data: fallback, itemStyle: { color: c.warn } },
+      { name: 'ok', type: 'bar', stack: 'p', data: ok, itemStyle: { color: c.a } },
+      { name: 'fail', type: 'bar', stack: 'p', data: fail, itemStyle: { color: c.err } },
     ],
   }
 })

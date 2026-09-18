@@ -1,9 +1,22 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import AutoImport from 'unplugin-auto-import/vite'
+import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
 // base 用 /web/：构建产物由网关挂载在同一源 /web 下，与 /v1 /auth /health 同源。
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    // 第二十八轮：element-plus 改按需引入（此前全量 app.use(ElementPlus)，vendor-element
+    //   一个 chunk 就 1089kB / gzip 341kB，是首屏体积大头）。
+    //   Components：模板里用到的 <el-*> 自动注入该组件 + 对应样式（importStyle 默认 css）。
+    //   AutoImport：只管命令式 ElMessage/ElMessageBox —— 但我们代码里显式 import 了它们，
+    //   样式在 main.ts 手动引了三处；这里开 resolver 只为兜住误用，不生成 dts（dts:false，
+    //   免得多一个触发全量解析的入口）。
+    AutoImport({ resolvers: [ElementPlusResolver()], dts: false }),
+    Components({ resolvers: [ElementPlusResolver()], dts: false }),
+  ],
   base: '/web/',
   server: {
     port: 5173,
@@ -25,15 +38,15 @@ export default defineConfig({
     },
   },
   build: {
-    // M5: 剩余超 500kB 的都是独立 vendor chunk（element-plus / echarts），缓存友好，
-    //    gzip 后约 340kB / 202kB。根因是 element-plus 全量引入，按需引入留作后续。
-    chunkSizeWarningLimit: 1500,
+    // M5: 按需引入后 element-plus 已拆分，超 500kB 的只剩 echarts（服务端大图渲染不可避免）。
+    chunkSizeWarningLimit: 900,
     rollupOptions: {
       output: {
-        // M5: 拆 vendor chunk，避免 element-plus/echarts/marked 打进单个入口超大 chunk。
+        // M5: 拆 vendor chunk，避免第三方打进单个入口超大 chunk。
         manualChunks: {
           'vendor-vue': ['vue', 'vue-router', 'pinia'],
-          'vendor-element': ['element-plus', '@element-plus/icons-vue'],
+          // 第二十八轮: element-plus 已按需引入——不再把整包塞进一个 chunk；
+          //   @element-plus/icons-vue 无用已从依赖移除，这里一并清掉。
           'vendor-echarts': ['echarts'],
           'vendor-markdown': ['marked', 'marked-highlight', 'dompurify', 'highlight.js'],
         },

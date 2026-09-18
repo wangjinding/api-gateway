@@ -1,5 +1,78 @@
 # CHANGELOG
 
+## 2026-09-18 · 第二十七轮：三线直传 + **彻底删除路由别名**
+
+**老板决策**：wjd 路由这个功能去掉、删除掉，相关的代码和文档一起更新。
+
+### 删除（路由别名 / fallback 链 —— 整块功能）
+- `app/config.py`：删掉 `RouteInfo` 类、`GatewayConfig.routes` 字段、`find_route()` /
+  `all_routes()` / `validate_routes()` 三个方法，以及 YAML 里 `routes:` 段的解析。
+  老配置残留的 `routes` 段**不报错、直接忽略**（日志一条 warning），免得旧配置起不来。
+- `app/main.py`：删掉 `_route_chain()` / `_order_chain_by_speed()` / `_filter_chain_by_protocol()` /
+  `_vision_first()` / `_chain_has_vision()`；`_chat_fallback()` → `_chat_once()`（单模型 + 同模型
+  重试 + 熔断，不再"这个不行换下一个"）；流式 `_stream_response()` 单模型化（新增 `_sse_error()`
+  统一错误帧）；batch / 媒体端点 / 热重载 / 启动日志 / `/` / `/health` / `/v1/models` 里的路由痕迹
+  全部清掉。
+- `app/metrics.py`：删掉 `routes` 维度、`fallback_total` 与 `record_fallback()`；指标只剩
+  **模型 / 供应商 / 账号** 三个维度。
+- `app/settings.py`：配置面板视图与写回不再有 `routes` 段。
+- `data/gateway.yaml`：`routes: {}` 整段删除，`server.retry` 注释去掉 route.retry 说法。
+- 限流从三级（全局/路由/供应商）变**两级（全局/供应商）**；`route.timeout`、路由级告警一并消失。
+- 前端：Models 页路由别名表 → 全部文本模型 + 一键测速；Chat 页去掉"路由"选项组与降级徽标；
+  Metrics 页「路由 vs 供应商」→「按供应商成功/失败」；Dashboard 路由链卡片 → 协议线覆盖卡片；
+  Settings 默认模型下拉去掉 `wjd`；ApiKeys 页示例改真实模型 id；中英文案同步（699 / 699 对称）。
+
+### 保留
+- **一键测速**（Models 页每行的延迟实测）保留，改为按**模型自己的协议线**探测。
+- `wjd-` 开头的 API Key 前缀规则不变（那是 Key，不是路由）。
+- `app/routing.py` 保留 —— 它只做「model_id → 供应商 + 认证解析」，与被删的路由别名无关（名字沿用）。
+
+### 为什么删（不是"藏"）
+三线直传落地后「入站格式 = 出站格式」，模型 id 必须与协议线一一对应；再套一层"自动挑最快模型"
+的别名，会把调用方选定的**格式与能力**（视觉 / 工具 / 协议线）悄悄换掉。要换模型就换 `model`，
+网关不替谁做主。
+
+### 验证
+- 后端单测：**165 passed / 0 failed**（删 6 个路由引擎用例、改写 10 个、新增 2 个）。
+- 前端：`vue-tsc --noEmit` 0 错、`npm run build` 成功、`check-i18n` 中英 699/699 对称。
+- 生产**未动**：后端需 `supervisorctl restart api-gateway:api-gateway_00`（踢会话），
+  前端 dist 覆盖需老板点头。
+
+### 上线（老板批准重启，2026-09-18 15:16）
+- 前端 `npm run build` 产物覆盖 `frontend/dist`（新入口 `index-CWUVm0px.js`，公网
+  `https://api.wangjinding.com/web/...` 已服务新入口、旧入口 404）。
+- 后端 `supervisorctl restart api-gateway:api-gateway_00` → 新 pid，127.0.0.1:8808 正常，
+  `/health` 200、启动日志「已加载 3 供应商」。
+- **代码仍未提交 git**（老板明确要求"先别提交"）。
+
+### 上线后真机复验：抓到并修掉 3 个本轮新引入的缺陷（P0×3）
+老板批准上线后，用 `live_check.py`（真实 key、走公网网关）复验，发现：
+1. **【P0】三线直传入门即 500**：`_passthrough()` 里 `_enforce_rate_limit(cfg, request, None, pkey, model_in)`
+   多传一个参数（函数只收 4 个）→ **每一次** `/v1/messages` 与 `/v1/responses` 都 `TypeError` → 500。
+   即本轮的核心功能两条线全灭（chat/completions 不受影响）。已改为 4 参调用。
+2. **【P0】`/metrics/prometheus` 500**：导出器仍读 `snapshot["fallback_total"]`（该字段已随路由/fallback 删除）
+   → `KeyError`。已删该指标行 + 其 HELP/TYPE，并顺带删掉 `/health` 里恒为 0 的 `fallback_total` 死字段。
+3. **【P0】图像/视频的 token 没发出去**：本轮改为"鉴权头按协议线在 `_req_headers` 组装"后，
+   `create_adapter` 不再往静态 headers 塞 `Authorization`，但媒体三个调用点仍在用 `self._headers`
+   ⇒ 图像生成/视频创建/视频轮询出站零鉴权头。真机：Agnes 图像 401「未提供令牌」，而同一 key
+   直接 curl 同地址 **200**。已新增 `_media_headers()`（静态头 + Bearer + 会话头）并在三处使用。
+4. **测试基建（漏检根因之一）**：`tests/test_gateway.py` 的 `if __name__ == "__main__"` 运行块夹在文件中间，
+   脚本模式下**只收集执行到该行时已存在的测试** → 定义在其后的用例根本不跑
+   （`test_image_request_goes_to_requested_model` 白写了一轮）。已把运行块移到文件末尾，
+   并新增 6 条**真发请求**的回归测试（`/v1/messages` 往返 + conversation_id 不透传、`/v1/responses` +
+   跨线 400 闸门、直传供应商级限流 429、上游 4xx 原样回且不计熔断、流式字节原样转发 + 上游 4xx 真实状态码、
+   Prometheus 200 且无已删指标、媒体三处带 Bearer）。
+   单测 **165 → 173 passed / 0 failed**。
+5. **文档订正**：README 残留的旧句「调用时 `model` 填 `wjd`，网关按顺序尝试」删除（路由已整块移除）；
+   鉴权小节「Key 均不落明文」改为与「Key 明文回显」取舍一致的表述。
+
+### 复验结果（重启后再次真机）
+`live_check.py`：**19 PASS / 0 FAIL / 0 WARN** —— 三线直传真实 200、跨线 400、`/metrics/prometheus` 200、
+图像生成 200。另手工验证：视频轮询可达上游（404「任务不存在」而非 401「未提供令牌」）、
+图像下载 `/v1/media/download` 560KB PNG 正常落盘、一键测速三条线各测一个模型均 ok
+（chat/completions 7106ms、responses 2014ms、messages 1360ms）。
+
+
 按轮次记录 api-gateway 的修复与优化（README 侧重能力/配置说明，这里侧重每轮的改动、排查、验证与上线）。
 
 ---

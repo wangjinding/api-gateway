@@ -7,7 +7,6 @@ export interface Meta {
   served: string
   provider: string
   requested: string
-  fallback: boolean
 }
 
 export interface Usage {
@@ -25,7 +24,7 @@ export interface ChatMessage {
   imgThumbs?: string[]          // 第十三轮：缩略图 data URI —— 落服务端历史时用它替代原图
                                 //   （服务端单条 512KB，原图 base64 会被截断成坏图）
   reasoning?: string          // 推理内容（reasoning_content），单独折叠展示
-  meta?: Meta                  // 网关元信息（served/provider/fallback）
+  meta?: Meta                  // 网关元信息（served/provider）
   usage?: Usage
   cost?: number                // estimated_cost_cny（仅非流式）
   streaming?: boolean           // 正在流式输出中

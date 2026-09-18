@@ -86,6 +86,37 @@ class ToolDef(BaseModel):
 CONVERSATION_ID_MAX = 128
 
 
+def normalize_conversation_id(v: Any) -> str | None:
+    """会话 id 的入口校验（第二十六轮，第二十七轮抽成函数给直传端点多路复用）。
+
+    它最终会作为 `x-opencode-session` **HTTP header** 发往上游，所以必须在入站拦掉
+    两类值——否则失败发生在组 header 的那一刻，会被误报成"上游挂了"：
+
+    ① **非 ASCII**（中文、全角符号等）：httpx 组 header 抛 `UnicodeEncodeError`
+       （实测 `'ascii' codec can't encode characters`），网关把它当成上游失败
+       **重试 3 次**（3 次必然都失败）→ 最终回 502「路由 x 全部模型调用失败」+
+       记一次熔断。真实原因是客户端传错了值，却被伪装成上游故障，排查成本极高。
+    ② **过长**：header 超限同样会失败，且一行 header 塞几百 KB 毫无意义。
+
+    空白串按"未传"处理（返回 None → 上游每次随机会话），与旧行为保持一致。
+    校验失败抛 ValueError，由调用方转成 400（pydantic 校验器与直传端点共用同一份规则）。
+    """
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise ValueError(f"类型必须是字符串，得到 {type(v).__name__}")
+    v = v.strip()
+    if not v:
+        return None
+    if len(v) > CONVERSATION_ID_MAX:
+        raise ValueError(f"过长：最多 {CONVERSATION_ID_MAX} 个字符（收到 {len(v)} 个）")
+    try:
+        v.encode("ascii")
+    except UnicodeEncodeError:
+        raise ValueError("只能包含 ASCII 字符（不能有中文/全角符号/emoji）；建议用 uuid4().hex")
+    return v
+
+
 class ChatRequest(BaseModel):
     # 兼容性修复：OpenAI 官方 SDK 会带不少可选参数（n / presence_penalty / response_format …），
     # 之前未声明的字段被 pydantic 静默丢弃，导致"网关号称 OpenAI 全兼容但参数悄悄丢失"。
@@ -155,33 +186,8 @@ class ChatRequest(BaseModel):
     @field_validator("conversation_id")
     @classmethod
     def _validate_conversation_id(cls, v: str | None) -> str | None:
-        """会话 id 的入口校验（第二十六轮）。
-
-        它最终会作为 `x-opencode-session` **HTTP header** 发往上游，所以必须在入站拦掉
-        两类值——否则失败发生在组 header 的那一刻，会被误报成"上游挂了"：
-
-        ① **非 ASCII**（中文、全角符号等）：httpx 组 header 抛 `UnicodeEncodeError`
-           （实测 `'ascii' codec can't encode characters`），网关把它当成上游失败
-           **重试 3 次**（3 次必然都失败）→ 最终回 502「路由 x 全部模型调用失败」+
-           记一次熔断。真实原因是客户端传错了值，却被伪装成上游故障，排查成本极高。
-        ② **过长**：header 超限同样会失败，且一行 header 塞几百 KB 毫无意义。
-
-        空白串按"未传"处理（返回 None → 上游每次随机会话），与旧行为保持一致。
-        """
-        if v is None:
-            return None
-        v = v.strip()
-        if not v:
-            return None
-        if len(v) > CONVERSATION_ID_MAX:
-            raise ValueError(
-                f"过长：最多 {CONVERSATION_ID_MAX} 个字符（收到 {len(v)} 个）")
-        try:
-            v.encode("ascii")
-        except UnicodeEncodeError:
-            raise ValueError(
-                "只能包含 ASCII 字符（不能有中文/全角符号/emoji）；建议用 uuid4().hex")
-        return v
+        """见 normalize_conversation_id（第二十七轮把规则抽成公共函数，直传端点多路复用）。"""
+        return normalize_conversation_id(v)
 
 
 # ── 图像生成 ─────────────────────────────────────────

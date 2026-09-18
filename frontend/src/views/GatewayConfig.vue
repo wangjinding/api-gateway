@@ -122,7 +122,8 @@ async function load() {
       value: envs[env].value || '',
       show: false,
     }))
-    warns.value = (body.meta?.warnings || []).concat(body.meta?.route_warnings || [])
+    // 第二十七轮: 路由告警（meta.route_warnings）随路由功能删除，体检结论只看 warnings
+    warns.value = body.meta?.warnings || []
   } catch (e: any) {
     err.value = (e?.body?.detail || e?.message || String(e))
   } finally {

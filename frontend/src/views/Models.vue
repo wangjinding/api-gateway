@@ -11,23 +11,16 @@
     </div>
 
     <div class="grid2">
-      <!-- 路由链：只读展示（排序策略在后端，页面不写盘） -->
-      <!-- 路由别名 + 全部文本模型延迟（一键测速填充） -->
+      <!-- 全部文本模型 + 一键测速（延迟逐行填充；测速按模型自己的协议线探测） -->
       <div class="card">
         <div class="card-h">
-          <b>{{ t('models.routeAliasTitle') }}</b>
+          <b>{{ t('models.allTextModels') }}</b>
+          <span class="sub">{{ t('models.speedtestHint') }}</span>
+          <span style="flex:1"></span>
+          <el-button size="small" :loading="latTesting" @click="runSpeedtest()">
+            {{ latTesting ? t('models.testingShort') : t('models.speedtest') }}
+          </el-button>
         </div>
-
-        <div v-for="r in routeRows" :key="r.name" class="route-block">
-          <div class="route-head">
-            <span class="code route-name">{{ r.name }}</span>
-            <span style="flex:1"></span>
-            <el-button size="small" :loading="latTesting" @click="runSpeedtest()">
-              {{ latTesting ? t('models.testingShort') : t('models.speedtest') }}
-            </el-button>
-          </div>
-        </div>
-        <div v-if="!routeRows.length" class="hint">{{ t('models.noRoute') }}</div>
 
         <div class="lat-head">
           <span class="muted-2 hint">{{ t('models.allTextModels') }}</span>
@@ -35,12 +28,15 @@
           <span class="muted-2 hint">{{ t('models.latency') }}</span>
         </div>
         <div v-for="m in textModelRows" :key="m.id" class="st-item">
-          <div class="st-row">
+          <div class="st-row" :title="rowTitle(m)">
             <Icon v-if="m.vision" name="eye" :size="12" class="vision" />
             <!-- 第二十五轮：该模型的参数被上游固定（如 temperature 只能是 1），
                  挂锁标注 + 悬浮说明，省掉「为什么我传的参数不生效」这类困惑。 -->
             <Icon v-if="m.paramNote" name="lock" :size="12" class="plock" :title="m.paramNote" />
             <span class="code">{{ m.id }}</span>
+            <!-- 支持的格式不在这里铺标签：这行还要放供应商/延迟/测速按钮，窄卡放不下第三颗
+                 （悬停整行可见格式 + 本次测速走的线，见 rowTitle）。权威展示在下方表格的
+                 「支持的格式」列。 -->
             <span class="muted-2 st-prov">{{ m.provider }}</span>
             <span style="flex:1"></span>
             <span class="pill st-lat" :class="latCls(m.id)">
@@ -87,20 +83,42 @@
         <b>{{ t('models.modelListTitle') }}</b>
         <span class="sub">{{ t('models.capability') }}</span>
         <div class="pager">
-          <span class="pill mute">{{ t('models.routeCount', { n: routeRows.length }) }}</span>
+          <span class="pill mute">{{ t('models.textModelCount', { n: textModelRows.length }) }}</span>
         </div>
       </div>
       <el-table :data="modelRows" size="small" v-loading="loading">
-        <el-table-column :label="t('models.id')" min-width="200">
+        <el-table-column :label="t('models.id')" min-width="185">
           <template #default="{ row }"><span class="code">{{ row.id }}</span></template>
         </el-table-column>
-        <el-table-column :label="t('models.type')" width="100">
+        <el-table-column :label="t('models.type')" width="90">
           <template #default="{ row }"><span class="pill" :class="typeCls(row.type)">{{ t(typeKey(row.type)) }}</span></template>
         </el-table-column>
-        <el-table-column :label="t('models.provider')" min-width="150">
+        <el-table-column :label="t('models.provider')" min-width="140">
           <template #default="{ row }">{{ row.provider_name || '—' }}</template>
         </el-table-column>
-        <el-table-column :label="t('models.capability')" width="190">
+        <!-- 第二十七轮追加：支持的格式（三条协议线）——
+             后端 /v1/models 里每个文本模型带 protocols 数组（chat/completions、messages、
+             responses 的一个子集）。这里只做展示，但它有实际约束力：用不在列表里的格式
+             调网关，会在入口被 400 挡下（网关不做跨格式转换，见 /v1/messages 的 400 文案）。
+             图像/视频模型走专用端点，不涉及三条协议线，统一显示「不适用」。
+             width 取 300：实测三颗标签（chat/completions=120px + messages=67px + responses=74px
+             + 间距）并排一行需 ~273px，留足余量让多线模型那行也单行，不挤到换行。 -->
+        <el-table-column width="300">
+          <template #header>
+            <el-tooltip :content="t('models.protocolHint')" placement="top">
+              <span class="proto-th">{{ t('models.protocols') }}</span>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <span v-if="protocolsOf(row).length" class="proto-cell">
+              <span v-for="p in protocolsOf(row)" :key="p" class="pill proto" :title="protoTitle(p)">{{ p }}</span>
+            </span>
+            <el-tooltip v-else :content="t('models.protocolNaHint')" placement="top">
+              <span class="muted-2">{{ t('models.protocolNa') }}</span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+        <el-table-column :label="t('models.capability')" width="170">
           <template #default="{ row }">
             <span v-if="row.vision" class="pill ok cap">
               <Icon name="eye" :size="12" />{{ t('models.visionTag') }}
@@ -111,7 +129,7 @@
             <span v-if="!row.vision && !paramKeys(row).length" class="muted-2">—</span>
           </template>
         </el-table-column>
-        <el-table-column :label="t('models.keySet')" width="120">
+        <el-table-column :label="t('models.keySet')" width="90">
           <template #default="{ row }">
             <span class="pill" :class="row.key_set ? 'ok' : 'err'">
               {{ row.key_set ? t('common.yes') : t('common.no') }}
@@ -138,14 +156,27 @@ const health = ref<any>({})
 const loading = ref(false)
 const err = ref('')
 
-const typeKeyMap: Record<string, string> = { text: 'models.text', image: 'models.image', video: 'models.video', route: 'models.route' }
-const typeClsMap: Record<string, string> = { text: 'mute', image: 'warn', video: 'warn', route: 'ok' }
+const typeKeyMap: Record<string, string> = { text: 'models.text', image: 'models.image', video: 'models.video' }
+const typeClsMap: Record<string, string> = { text: 'mute', image: 'warn', video: 'warn' }
 function typeKey(ty: string) { return typeKeyMap[ty] || ty }
 function typeCls(ty: string) { return typeClsMap[ty] || 'mute' }
 
+// ── 支持的格式（第二十七轮）──
+// 取值范围与后端 PROTOCOLS 一致：chat/completions（OpenAI 兼容线）、messages（Anthropic 线）、
+// responses（OpenAI Responses 线）。**名字直接取各家标准端点名**，不另起中文别名 —— 配置、
+// 日志、前端标签、上游文档四处同名，出问题时对得上号。
+function protocolsOf(row: any): string[] {
+  if (!row || row.type !== 'text') return []     // 图像/视频模型走专用端点，没有协议线概念
+  return (row.protocols as string[]) || []
+}
+// 每个格式标签的悬浮说明：这条线对应哪个端点（点进说明文档也是这个对应关系）
+function protoTitle(p: string): string { return `POST /v1/${p}` }
+
 const latTesting = ref(false)
 const latCurrentId = ref('')   // 当前正在测的模型 id：该行延迟位显示加载图标
-const latByModel = ref<Record<string, { ok: boolean; latency_ms: number | null; error: string }>>({})
+// protocol 由后端返回：探针**按模型自己的协议线**挑一条（优先级 chat → messages → responses），
+//   记下来才能在悬浮提示里说清「这次多少毫秒是走哪条线测的」——多线模型不写清楚会让人误解。
+const latByModel = ref<Record<string, { ok: boolean; latency_ms: number | null; error: string; protocol: string }>>({})
 async function runSpeedtest() {
   if (latTesting.value) return
   // 逐个测速：按列表顺序，测一个立刻显示那一行、再测下一个；当前测的行显示加载图标。
@@ -155,17 +186,17 @@ async function runSpeedtest() {
   latTesting.value = true
   for (const id of ids) {
     latCurrentId.value = id
-    let row: { ok: boolean; latency_ms: number | null; error: string }
+    let row: { ok: boolean; latency_ms: number | null; error: string; protocol: string }
     try {
       const j = await api('/v1/models/speedtest', { method: 'POST', body: JSON.stringify({ model: id }) })
       const r: any[] = (j && j.results) || []
       const hit = r[0]
       row = hit
-        ? { ok: !!hit.ok, latency_ms: hit.latency_ms ?? null, error: hit.error || '' }
-        : { ok: false, latency_ms: null, error: t('models.speedtestFail') }
+        ? { ok: !!hit.ok, latency_ms: hit.latency_ms ?? null, error: hit.error || '', protocol: hit.protocol || '' }
+        : { ok: false, latency_ms: null, error: t('models.speedtestFail'), protocol: '' }
     } catch (e: any) {
       // 单个模型出错不中断整轮，标记失败后继续下一个
-      row = { ok: false, latency_ms: null, error: (e && e.message) || String(e) }
+      row = { ok: false, latency_ms: null, error: (e && e.message) || String(e), protocol: '' }
     }
     latByModel.value = { ...latByModel.value, [id]: row }   // 响应式替换 → 该行即时更新
   }
@@ -182,11 +213,11 @@ async function retestOne(id: string) {
     const r: any[] = (j && j.results) || []
     const hit = r[0]
     const row = hit
-      ? { ok: !!hit.ok, latency_ms: hit.latency_ms ?? null, error: hit.error || '' }
-      : { ok: false, latency_ms: null, error: t('models.speedtestFail') }
+      ? { ok: !!hit.ok, latency_ms: hit.latency_ms ?? null, error: hit.error || '', protocol: hit.protocol || '' }
+      : { ok: false, latency_ms: null, error: t('models.speedtestFail'), protocol: '' }
     latByModel.value = { ...latByModel.value, [id]: row }
   } catch (e: any) {
-    latByModel.value = { ...latByModel.value, [id]: { ok: false, latency_ms: null, error: (e && e.message) || String(e) } }
+    latByModel.value = { ...latByModel.value, [id]: { ok: false, latency_ms: null, error: (e && e.message) || String(e), protocol: '' } }
   } finally {
     latCurrentId.value = ''
   }
@@ -208,8 +239,8 @@ function latCls(id: string): string {
   return row ? (row.ok ? 'ok' : 'err') : 'mute'
 }
 
-const routes = computed(() => items.value.filter((x) => x.type === 'route'))
-const models = computed(() => items.value.filter((x) => x.type !== 'route'))
+// 第二十七轮: 路由别名条目（type === 'route'）已从 /v1/models 消失 → 这里只剩真实模型
+const models = computed(() => items.value)
 
 const providerOf = computed(() => {
   const m: Record<string, string> = {}
@@ -222,16 +253,6 @@ const visionOf = computed(() => {
   return m
 })
 
-const routeRows = computed(() =>
-  routes.value.map((r) => {
-    const chain: string[] = r.models || []
-    return {
-      name: r.id,
-      models: chain.map((id) => ({ id, provider: providerOf.value[id] || '—', vision: visionOf.value[id] })),
-      providerCount: new Set(chain.map((id) => providerOf.value[id] || '—')).size,
-    }
-  }),
-)
 const textModelRows = computed(() =>
   models.value.filter((x) => x.type === 'text').map((m) => ({
     id: m.id,
@@ -239,8 +260,20 @@ const textModelRows = computed(() =>
     vision: !!m.vision,
     // 模型级强制参数（第二十五轮）：被上游固定住的采样参数，用挂锁标注出来。
     paramNote: paramKeys(m).length ? paramNote(m) : '',
+    // 支持的格式（第二十七轮）：悬浮这一行就能看到「能用哪几条线 + 本次测速走的哪条」
+    formats: protocolsOf(m),
   })),
 )
+
+// 测速行的悬浮提示：先说这个模型支持哪些格式，再说这次测的是哪条线
+//   （多线模型不标注的话，"12 ms"到底测的是哪条线是看不出来的）。
+function rowTitle(m: any): string {
+  const lines = (m.formats || []).join(' / ') || t('models.protocolNa')
+  const p = latByModel.value[m.id]?.protocol
+  return p
+    ? `${t('models.protocolHintRow', { lines })}· ${t('models.probedLine', { p })}`
+    : t('models.protocolHintRow', { lines })
+}
 
 // ── 模型级强制参数（第二十五轮）──
 // 后端 /v1/models 在 params 里给出「该模型发往上游前会被强制覆盖的参数」
@@ -279,7 +312,6 @@ const cards = computed(() => [
   { k: t('models.model'), v: models.value.length, note: t('models.providerCount2', { n: providerRows.value.length }) },
   { k: t('models.textModels'), v: models.value.filter((m) => m.type === 'text').length, note: t('models.visionTag') + ' · ' + models.value.filter((m) => m.vision).length },
   { k: t('models.imageModels'), v: models.value.filter((m) => m.type === 'image').length, note: t('images.title') },
-  { k: t('models.routes'), v: routes.value.length, note: t('models.routeAliasTitle') },
 ])
 
 onMounted(async () => {
@@ -298,15 +330,20 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.route-block { padding: 10px 0; border-bottom: 1px solid var(--line-2); }
-.route-block:last-child { border-bottom: 0; }
-.route-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.route-name { font-weight: 700; color: var(--text); font-size: 13px; }
 .chain { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .chain-item { display: inline-flex; align-items: center; gap: 6px; }
 .arrow { color: var(--muted-2); }
 .vision { color: var(--primary); }
 .plock { color: var(--warn); }
+/* 支持的格式：三条线是并列关系（没有谁更优），统一用主题色弱底，
+   不用 ok/warn/err —— 否则「messages」看起来像警告、「responses」像被禁用。 */
+.proto {
+  color: var(--primary); background: var(--primary-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;   /* 与全局 .code 同一套 */
+  font-size: 11px; padding: 2px 7px;
+}
+.proto-cell { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.proto-th { border-bottom: 1px dotted var(--muted-2); cursor: help; }
 .prov { padding: 10px 0; border-bottom: 1px solid var(--line-2); }
 .prov:last-child { border-bottom: 0; }
 .prov-top { display: flex; align-items: center; gap: 8px; }

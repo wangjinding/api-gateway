@@ -31,6 +31,8 @@ import yaml
 from app.config import (
     ConfigError,
     GatewayConfig,
+    PROTOCOLS,
+    _default_endpoints,
     parse_config,
     validate_config,
     validate_warnings,
@@ -88,11 +90,23 @@ def config_to_view(cfg: GatewayConfig) -> dict[str, Any]:
             "rate_limit_rps": p.rate_limit_rps,
             "requires_session_header": bool(p.requires_session_header),
             "media": {k: getattr(p.media, k) for k in MEDIA_KEYS},
+            # 第二十七轮（三线直传）: 每条协议线的出站路径/鉴权/固定头。
+            #   面板不提供编辑器（在 YAML 全文编辑器里改），但**必须一路带着走**：
+            #   view_to_raw 是按固定键集重建 providers 的，少带这一段 = 管理员在页面上
+            #   随手保存一次，OpenCode 的三条线配置就被静默清掉（模型全变"不支持该线"）。
+            "endpoints": {
+                name: {"path": ep.path, "auth": ep.auth, "headers": dict(ep.headers or {})}
+                for name, ep in (p.endpoints or {}).items()
+            },
             "models": [
                 {"id": m.id, "display_name": m.display_name, "type": m.type, "vision": bool(m.vision),
                  # 第二十五轮: 回传模型级强制参数。面板不提供编辑入口（在 YAML 全文编辑器里改），
                  #   但必须一路带着走 —— 否则读回来再提交一次就会把它弄丢。
-                 "params": dict(m.params or {})}
+                 "params": dict(m.params or {}),
+                 # 第二十七轮: 模型能走哪几条协议线。这一项**面板可编辑**
+                 #   （「供应商与模型」页给每个模型打格式标签），所以两处都要认：
+                 #   读回给页面显示、写盘时以页面提交的为准。
+                 "protocols": list(m.protocols)}
                 for m in p.models
             ],
         }
@@ -119,15 +133,6 @@ def config_to_view(cfg: GatewayConfig) -> dict[str, Any]:
             "auth_fail_limit_per_min": s.auth_fail_limit_per_min,
         },
         "auth": {"session_ttl_minutes": cfg.auth.session_ttl_minutes},
-        "routes": {
-            rname: {
-                "models": list(r.models or []),
-                "timeout": r.timeout,
-                "retry": r.retry,
-                "rate_limit_rps": r.rate_limit_rps,
-            }
-            for rname, r in cfg.routes.items()
-        },
         "circuit": {
             "enabled": cfg.circuit.enabled,
             "failure_threshold": cfg.circuit.failure_threshold,
@@ -153,6 +158,37 @@ def config_to_view(cfg: GatewayConfig) -> dict[str, Any]:
 
 
 # ── 写入：面板 JSON → 完整 yaml 字典 ───────────────────────
+def _parse_protocols_view(v: Any, where: str) -> list[str]:
+    """面板提交的模型协议线（第二十七轮三线直传）→ 写盘用的标准名列表。
+
+    页面上的格式标签就是这几个标准名（chat/completions | messages | responses），
+    写错名字在写盘前就报错（不能等运行时才发现"这个模型永远 400"）。
+    列表去重保序；空列表报错（一个模型一条线都不支持多半是手滑）。
+    """
+    if isinstance(v, str):
+        raw_items: list[Any] = [v]
+    elif isinstance(v, (list, tuple)):
+        raw_items = list(v)
+    else:
+        raise ConfigError(f"{where} 必须是列表（可选：{'/'.join(PROTOCOLS)}）")
+    out: list[str] = []
+    for item in raw_items:
+        name = str(item or "").strip()
+        if name not in PROTOCOLS:
+            raise ConfigError(f"{where} 里的 {name!r} 不是标准协议名（可选：{'/'.join(PROTOCOLS)}）")
+        if name not in out:
+            out.append(name)
+    if not out:
+        raise ConfigError(f"{where} 不能为空 —— 每个模型至少要声明一条协议线")
+    return out
+
+
+def _default_endpoints_view() -> dict[str, Any]:
+    """供应商没在文件里写 endpoints 时，面板/写盘要用的默认三条线。"""
+    return {name: {"path": ep.path, "auth": ep.auth, "headers": dict(ep.headers or {})}
+            for name, ep in _default_endpoints().items()}
+
+
 def _as_dict(v: Any, field_name: str) -> dict[str, Any]:
     if v is None:
         return {}
@@ -242,6 +278,11 @@ def view_to_raw(cfg: GatewayConfig, raw: dict[str, Any], view: dict[str, Any]) -
                     "type": str(m.get("type") or "text").strip(),
                     "vision": bool(m.get("vision", False)),
                 })
+                # 第二十七轮: 协议线由面板管理（每个模型的格式标签），提交了就以此为准；
+                #   没提交则沿用文件原文里的值（避免旧前端/脚本提交时把 protocols 清空）。
+                if m.get("protocols"):
+                    item["protocols"] = _parse_protocols_view(
+                        m.get("protocols"), f"providers.{key}.models[{i}].protocols")
                 models.append(item)
             providers[key] = {
                 "name": str(pv.get("name") or key).strip(),
@@ -253,6 +294,10 @@ def view_to_raw(cfg: GatewayConfig, raw: dict[str, Any], view: dict[str, Any]) -
                 "extra_headers": _str_map(pv.get("extra_headers"), f"providers.{key}.extra_headers"),
                 "rate_limit_rps": pv.get("rate_limit_rps"),
                 "requires_session_header": bool(pv.get("requires_session_header", False)),
+                # 第二十七轮: 协议线的出站配置（路径/鉴权/固定头）。
+                #   仍然以**文件原文为底**：面板没有这段的编辑器，而它一旦丢失，
+                #   声明了 messages/responses 的模型会直接变成"供应商没配这条线"。
+                "endpoints": base_p.get("endpoints", _default_endpoints_view()),
                 # media 留空 = 该供应商不支持对应媒体（写回时保留原文里的空 {} 语义）
                 "media": {
                     k: (media_in.get(k) if k in media_in else base_media.get(k))
@@ -276,23 +321,6 @@ def view_to_raw(cfg: GatewayConfig, raw: dict[str, Any], view: dict[str, Any]) -
         if "session_ttl_minutes" in av:
             merged["session_ttl_minutes"] = av["session_ttl_minutes"]
         out["auth"] = merged
-
-    # ── routes（整段以面板为准：删掉的路由别名就是删掉）──
-    if "routes" in view:
-        rv = _as_dict(view.get("routes"), "routes")
-        routes: dict[str, Any] = {}
-        for rname, rv1 in rv.items():
-            name = str(rname).strip()
-            if not name:
-                raise ConfigError("路由别名的名字不能为空")
-            rv1 = _as_dict(rv1, f"routes.{name}")
-            routes[name] = {
-                "models": _str_list(rv1.get("models"), f"routes.{name}.models"),
-                "timeout": rv1.get("timeout"),
-                "retry": rv1.get("retry"),
-                "rate_limit_rps": rv1.get("rate_limit_rps"),
-            }
-        out["routes"] = routes
 
     # ── circuit / observability ──
     for sec, keys in (("circuit", _CIRCUIT_KEYS), ("observability", _OBS_KEYS)):
@@ -394,12 +422,6 @@ _SECTION_COMMENTS = {
 #   管理员在「用户管理」建账号，各账号在「设置 → 我的 API Key」自助铸 Key。
 # 本文件里没有任何用户/密钥，只有会话时长这一个开关。
 """,
-    "routes": """\
-# ── 路由别名 + 按优先级 fallback ────────────────────────
-# model 填别名（如 wjd）时按 models 数组顺序逐个尝试：第 1 个失败/超时/重试耗尽 → 第 2 个 …
-# 全失败才 502。timeout = 单模型超时秒（null 用 server.timeout），retry = 切下一个前该模型重试次数。
-# 数组顺序即优先级（第 0 个最高）。可用模型 = 上面 providers 里定义的全部模型 id。
-""",
     "circuit": """\
 # ── 供应商熔断 ──────────────────────────────────────────
 # 某供应商在 window 秒内失败达到 failure_threshold 次就熔断 cooldown 秒，
@@ -424,7 +446,7 @@ _SECTION_COMMENTS = {
 """,
 }
 
-_SECTION_ORDER = ("providers", "server", "circuit", "observability", "pricing", "download", "auth", "routes")
+_SECTION_ORDER = ("providers", "server", "circuit", "observability", "pricing", "download", "auth")
 
 
 def _dump(obj: Any) -> str:

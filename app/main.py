@@ -1,9 +1,10 @@
 """API 网关主入口：FastAPI 应用（v2.4 全功能版）。
 
 特性：
-- 多供应商 OpenAI 兼容 /chat/completions（路由别名按「可用+最快」排序 fallback + 同模型重试 + 熔断）
+- 多供应商 OpenAI 兼容 /chat/completions（同模型重试 + 熔断；第二十七轮起三线直传：
+  /v1/chat/completions、/v1/messages、/v1/responses 各按自家协议原样转发，网关不翻译字段）
 - 图像 /v1/images/generations、视频 /v1/videos（异步 + 等待模式 + Webhook）
-- 客户端 Bearer 鉴权（多用户）+ 全局/路由/供应商级限流
+- 客户端 Bearer 鉴权（多用户）+ 全局/供应商级限流
 - 用量指标 /metrics + Prometheus /metrics/prometheus + 访问日志 /logs
 - 配置热加载、X-Request-ID 贯穿、CORS、gzip、请求体限制
 - OpenAI 兼容错误格式 + /v1/models 标准端点
@@ -40,12 +41,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.adapters import create_adapter
 from app.circuit import CircuitBreakerRegistry
-from app.config import ConfigError, GatewayConfig, RouteInfo, load_config, validate_warnings
+from app.config import (ConfigError, GatewayConfig, load_config, validate_warnings,
+                        PROTOCOL_CHAT, PROTOCOL_MESSAGES, PROTOCOL_RESPONSES, PROTOCOLS)
 from app.metrics import (Metrics, AccessLog, RateLimiter, BODY_BY_RID, _BODY_MAX,
                          video_poll_push, video_polls,
                          ACCOUNT, ROLE)
 from app.models import (ChatRequest, ImageRequest, VideoCreateRequestExtended, BatchRequest,
-                        strip_protected, PROTECTED_VIDEO_KEYS, PROTECTED_IMAGE_KEYS)
+                        strip_protected, PROTECTED_VIDEO_KEYS, PROTECTED_IMAGE_KEYS,
+                        normalize_conversation_id)
 from app.routing import resolve_with_auth, ModelNotFoundError, AuthConfigError
 from app.sessions import SessionStore
 from app.users import UsersStore, UserError, key_limit_for_role
@@ -142,8 +145,6 @@ def _setup_logging() -> None:
     root.addHandler(h)
 
 
-# P0-4: 启动时校验路由模型 ID
-_route_warnings = config.validate_routes()
 # 基础日志先起来，进 lifespan 后按 observability 重配
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 log = logging.getLogger("api-gateway")
@@ -190,10 +191,8 @@ def _warn_security_posture(cfg) -> None:
 async def lifespan(app: FastAPI):
     global config
     _setup_logging()
-    log.info("API Gateway 启动，已加载 %d 供应商 / %d 路由", len(config.providers), len(config.routes))
+    log.info("API Gateway 启动，已加载 %d 供应商", len(config.providers))
     _warn_security_posture(config)
-    for w in _route_warnings:
-        log.warning("路由校验告警: %s", w)
     for w in validate_warnings(config):
         log.warning("配置告警: %s", w)
     # ⚠ 修复（第五轮，P0 级）：这里**绝不能**再注册 SIGTERM/SIGINT 处理器。
@@ -263,14 +262,11 @@ async def _apply_config(new: GatewayConfig, *, source: str = "热重载") -> Non
         except Exception as e:      # 关不掉也要继续换新配置（否则一次异常就卡住整轮）
             log.warning("关闭旧 adapter 失败（忽略）: %s", e)
     _setup_logging()  # Bug 1: 日志级别 / JSON 真正变化
-    # Bug O 修复: 换配置后重新校验路由并打印新告警（新增坏路由不再被静默忽略）
-    for w in new.validate_routes():
-        log.warning("路由配置告警: %s", w)
     for w in validate_warnings(new):
         log.warning("配置告警: %s", w)
     _warn_security_posture(new)
-    log.warning("配置已生效（%s：%d 供应商 / %d 路由 / 熔断=%s）",
-                source, len(new.providers), len(new.routes), new.circuit.enabled)
+    log.warning("配置已生效（%s：%d 供应商 / 熔断=%s）",
+                source, len(new.providers), new.circuit.enabled)
 
 
 async def _hot_reload_loop() -> None:
@@ -279,7 +275,7 @@ async def _hot_reload_loop() -> None:
     Bug 4/E/O 修复：
       - hot_reload_interval 每轮重新读取（改动即时生效，不再只读一次）
       - 保留 metrics / 访问日志 / 限流桶 / 熔断状态（不再整体清空）
-      - 重载后重新计算并打印路由告警
+      - 重载后重新计算并打印配置告警
     第二十三轮：实际切换逻辑抽到 `_apply_config`（与页面保存共用）；
       server.hot_reload 关掉后循环即停手（不再"关了还在后台重载"）；
       注意从"关"改回"开"需要重启进程（任务只在 lifespan 里创建）。
@@ -683,36 +679,28 @@ def _get_adapter(model_id: str, timeout: int | None = None, cfg: GatewayConfig |
     return _state["adapters"][cache_key], pkey, pconfig
 
 
-# ── 鉴权 + 限流（全局 / 路由 / 供应商级） ──
+# ── 鉴权 + 限流（全局 / 供应商级；路由级限流随路由功能一并移除） ──
 _bearer = HTTPBearer(auto_error=False)
 _sess = SessionStore()   # 前端登录会话（/auth/login 换取 sess- token，见 app/sessions.py）
 
 
-def _effective_rps(cfg, route: RouteInfo | None, pkey: str | None) -> float | None:
-    """限流优先级：路由级 > 供应商级 > 全局。"""
-    if route and route.rate_limit_rps:
-        return route.rate_limit_rps
+def _effective_rps(cfg, pkey: str | None) -> float | None:
+    """限流优先级：供应商级 > 全局。"""
     if pkey and cfg.providers.get(pkey) and cfg.providers[pkey].rate_limit_rps:
         return cfg.providers[pkey].rate_limit_rps
     return cfg.server.rate_limit_rps
 
 
-def _enforce_rate_limit(cfg, request, route: RouteInfo | None, pkey: str | None, model_id: str) -> None:
-    """按 路由级 > 供应商级 > 全局 三级限流（Bug 1 修复）。
+def _enforce_rate_limit(cfg, request, pkey: str | None, model_id: str) -> None:
+    """按 供应商级 > 全局 两级限流（Bug 1 修复）。
 
-    不同维度用不同 limiter 桶（scope 前缀），避免互相污染：
-      - 路由级：bucket=route:<name>，限流则 429（整条路由打满）
-      - 供应商级：bucket=prov:<pkey>，限流则 429
-    全局级在 require_auth 里已按 key 处理。
+    供应商级用 bucket=prov:<pkey>（与媒体端点共桶），限流则 429；
+    全局级在 require_auth 里已按 key 处理。路由级限流随路由功能一并移除。
     """
-    rps = _effective_rps(cfg, route, pkey)
+    rps = _effective_rps(cfg, pkey)
     if not rps:
         return
-    # 路由级优先
-    if route and route.rate_limit_rps:
-        if not _limiter.allow(f"route:{route.name}", route.rate_limit_rps):
-            raise HTTPException(429, f"路由 {route.name} 触发限流（{route.rate_limit_rps} rps）")
-    elif pkey and (cfg.providers.get(pkey) or None) and cfg.providers[pkey].rate_limit_rps:
+    if pkey and (cfg.providers.get(pkey) or None) and cfg.providers[pkey].rate_limit_rps:
         if not _limiter.allow(f"prov:{pkey}", cfg.providers[pkey].rate_limit_rps):
             raise HTTPException(429, f"供应商 {pkey} 触发限流（{cfg.providers[pkey].rate_limit_rps} rps）")
 
@@ -944,6 +932,12 @@ async def require_auth(
     cfg = _cfg()
     _set_identity(request, "anonymous", "member")
     key = credentials.credentials if credentials else ""
+    # 第二十七轮（三线直传）: Anthropic 系客户端（Claude Code / anthropic-sdk）默认把
+    #   凭证放在 `x-api-key` 而不是 `Authorization: Bearer` —— 既然网关对外提供
+    #   /v1/messages，就必须认这个头，否则"格式对了但连鉴权都过不去"。
+    #   优先级：Authorization 优先（显式标准头），没有才回落到 x-api-key。
+    if not key:
+        key = (request.headers.get("x-api-key") or "").strip()
     identity = _identity_from_credentials(key)
     if identity is None:
         # 第二十四轮: Key 本身是有效的、只是所属账号被管理员停用 → 回 403 明确告知原因，
@@ -989,60 +983,25 @@ async def require_auth_or_open(
         raise HTTPException(401, "无效或缺失的账号 / API Key", headers={"WWW-Authenticate": "Bearer"})
 
 
-def _model_available_and_speed(cfg: GatewayConfig, model_id: str) -> tuple[bool, float | None]:
-    """该文本模型「当前是否可用」+「最近平均延迟」。
+def _require_protocol_model(cfg: GatewayConfig, model: str, protocol: str) -> str:
+    """校验「模型存在 + 声明了这条协议线」，返回模型 id（第二十七轮三线直传的闸门）。
 
-    可用 = 所属供应商配了凭证 **且** 熔断未处于 OPEN（HALF_OPEN 视为可用，它本就是恢复试探）。
-    延迟取 metrics 里该模型最近若干次的均值；没调用过则 None（上层按「未测速」处理）。
+    路由别名 / fallback 链已在第二十七轮整体移除：入站 model 必须是真实模型 id，
+    网关不再"帮你挑一个"、也不会跨线降级。为什么必须在这里挡：实测（OpenCode Go
+    2026-09-18）把 chat 线的模型打到 /messages 上，上游回的是 **500 Internal server
+    error**；把 messages 线的模型打到 /responses 上，回的是 401 "not supported for
+    format openai"。两种都不像"你选错了格式"，与其让用户对着这种错误猜，不如网关
+    直接 400 说清楚——候选支持哪几条线也一并报出来。
     """
-    found = cfg.find_provider_for_model(model_id)
-    if not found:
-        return (False, None)
-    pkey, pconfig, _minfo = found
-    try:
-        token_ok = bool(pconfig.auth.resolve_token())
-    except Exception:
-        token_ok = False
-    state = _circuits.get(pkey).status().get("state", "closed")
-    return (token_ok and state != "open", _metrics.recent_avg_latency(model_id))
-
-
-def _order_chain_by_speed(cfg: GatewayConfig, chain: list[str]) -> list[str]:
-    """第十一轮 #4：wjd 这类路由**不再按配置优先级**，改为
-
-      ① 先剔除「当前不可用」的模型（供应商没凭证 / 熔断 OPEN）—— 排到最后；
-      ② 可用模型按最近平均延迟升序，最快的先调用；
-      ③ 没测到延迟的可用模型给「探测位」：排在有数据的之后、不可用的之前，
-         这样新模型仍会被轮到去学习它的速度，但不会盖过已知的快模型；
-      ④ 冷启动（整条链都没样本）时**原样返回**，等价于退回配置的优先级顺序。
-    """
-    decorated = []
-    for idx, mid in enumerate(chain):
-        avail, lat = _model_available_and_speed(cfg, mid)
-        decorated.append((mid, avail, lat, idx))
-    if not any(lat is not None for _, _a, lat, _i in decorated):
-        return chain   # 还没任何速度数据 → 保持配置顺序，别乱猜
-    known = [lat for _m, a, lat, _i in decorated if a and lat is not None]
-    probe_rank = (max(known) + 1.0) if known else 0.0
-
-    def _key(item):
-        _mid, avail, lat, idx = item
-        # 可用优先；可用里按速度（未测速的用 probe_rank 兜到已测慢模型之后）；同权重保持原序
-        speed = (probe_rank if lat is None else lat) if avail else 0.0
-        return (0 if avail else 1, speed, idx)
-
-    decorated.sort(key=_key)
-    return [mid for mid, _a, _lat, _i in decorated]
-
-
-def _route_chain(cfg: GatewayConfig, requested: str) -> tuple[list[str], RouteInfo | None]:
-    route = cfg.find_route(requested)
-    chain = list(route.models) if (route and route.models) else [requested]
-    # 第十一轮 #4：路由别名（如 wjd）按「可用 + 速度」动态排序，不再走静态优先级；
-    # 直接填真实模型 id（route is None）时不动，保持单次调用的确定性。
-    if route is not None:
-        chain = _order_chain_by_speed(cfg, chain)
-    return chain, route
+    found = cfg.find_provider_for_model(model)
+    if found is None:
+        raise HTTPException(400, f"未知模型: {model}")
+    if cfg.find_model_for_protocol(model, protocol) is None:
+        raise HTTPException(
+            400,
+            f"模型 {model} 不支持 {protocol} 线（它支持：{'、'.join(found[2].protocols) or '无'}）。"
+            f"网关不做跨格式转换，请改用模型支持的线，或换一个支持 {protocol} 的模型。")
+    return model
 
 
 # ── 第十三轮: 视觉（带图）请求的模型选择 ─────────────────────────
@@ -1068,53 +1027,20 @@ def messages_have_images(messages: list[dict]) -> bool:
     return False
 
 
-def _chain_has_vision(cfg: GatewayConfig, chain: list[str]) -> bool:
-    for mid in chain:
-        found = cfg.find_provider_for_model(mid)
-        if found and found[2].vision:
-            return True
-    return False
-
-
-def _vision_first(cfg: GatewayConfig, chain: list[str]) -> list[str]:
-    """带图请求：把有视觉能力的模型提到链首（保持各自原有相对顺序）。
-
-    背景：路由别名（如 wjd）的链首常是纯文本模型（火山 ark-code）。带图请求打到
-    纯文本模型上，上游要么忽略图片（用户以为"看图了"其实没看），要么直接报参数错误 ——
-    两种情况都很难自查。这里只在**链上确实有视觉模型**时重排；一个都没有就原样返回，
-    让上游如实报错（网关不替用户隐藏能力缺失）。
-    """
-    def _vision(mid: str) -> bool:
-        found = cfg.find_provider_for_model(mid)
-        return bool(found and found[2].vision)
-
-    visual = [m for m in chain if _vision(m)]
-    if not visual:
-        return chain
-    return visual + [m for m in chain if not _vision(m)]
-
-
 def _resolve_media_model(cfg, model: str, media_type: str):
     """Bug 4: 解析媒体模型。
 
     - model 是真实模型 ID 且类型匹配（或 text）→ 直接 resolve
-    - model 是路由别名 → 遍历路由链找第一个 type==media_type 的模型并 resolve
     - 找不到 → 返回 None
+
+    第二十七轮: 路由别名（如 wjd）解析分支已随路由功能整体移除 —— 媒体端点也只认真实模型 id。
     """
     found = cfg.find_provider_for_model(model)
     if found:
         pkey, pconfig, minfo = found
         if minfo.type == media_type or media_type == "text":
             return pkey, pconfig, minfo, pconfig.auth.resolve_token(), model
-    # 当作路由别名解析
-    route = cfg.find_route(model)
-    if route:
-        for mid in route.models:
-            f2 = cfg.find_provider_for_model(mid)
-            if f2 and f2[2].type == media_type:
-                pkey, pconfig, minfo = f2
-                return pkey, pconfig, minfo, pconfig.auth.resolve_token(), mid
-    return None
+
 
 
 def _resp_text(res: dict) -> str:
@@ -1134,6 +1060,27 @@ def _resp_text(res: dict) -> str:
             reasoning = str(msg.get("reasoning_content") or "")
             if reasoning.strip():
                 return "[推理] " + reasoning
+        # 第二十七轮: messages / responses 线的响应结构完全不同（没有 choices）。
+        #   访问日志要能看到"这次到底回了什么"，所以顺手认一下这两家的正文位置
+        #   —— 只影响日志展示，**不改任何响应内容**。
+        #   messages:      content=[{type:text,text:...}]
+        #   responses:     output_text（部分实现直接给）/ output[].content[].text
+        blocks = res.get("content")
+        if isinstance(blocks, list):
+            text = "".join(str(b.get("text") or "") for b in blocks if isinstance(b, dict))
+            if text.strip():
+                return text
+        if isinstance(res.get("output_text"), str) and res["output_text"].strip():
+            return res["output_text"]
+        out = res.get("output")
+        if isinstance(out, list):
+            parts = []
+            for item in out:
+                for b in (item.get("content") or []) if isinstance(item, dict) else []:
+                    if isinstance(b, dict) and b.get("text"):
+                        parts.append(str(b["text"]))
+            if parts:
+                return "".join(parts)
     except Exception:
         pass
     return ""
@@ -1167,16 +1114,15 @@ def _attach_cost(resp: dict, model: str, usage: dict, cfg) -> None:
 def _models_payload():
     cfg = _cfg()
     # 优化: 目录按配置 mtime 缓存（热重载改配置才重建；静默期每次请求直接命中，省掉
-    #   all_models()/all_routes() 的重复遍历与对象构建）。cfg 引用同一 config 对象，
+    #   all_models() 的重复遍历与对象构建）。cfg 引用同一 config 对象，
     #   但在 hot_reload 时 mtime 会变 → 缓存自然失效。
     mtime = _state.get("mtime")
     _cached = _state.get("_models_cache")
     if _cached is not None and _cached[0] == mtime:
         return _cached[1]
-    # 第六轮: 统一 data 里的 object 取值 —— 此前路由别名是 object="route"，严格按
-    #   `object == "model"` 过滤的 OpenAI 客户端会解析出错。路由别名本身是**可调用的 model id**，
-    #   所以保留在 data 里但改用 object="model"（用 type="route" 区分），
-    #   同时补齐 OpenAI 标准的 created / owned_by 字段。
+    # 第六轮: 统一 data 里的 object 取值（一律 "model"），并补齐 OpenAI 标准的
+    #   created / owned_by 字段 —— 严格按 `object == "model"` 过滤的客户端才认。
+    #   第二十七轮: 路由别名（type="route"）条目随路由功能整体移除，这里只剩真实模型。
     created = int(_state.get("mtime") or 0)
     data = []
     for m in cfg.all_models():
@@ -1188,16 +1134,15 @@ def _models_payload():
                      "vision": bool(m.get("vision")),
                      # 第二十五轮: 暴露模型级强制参数（如 {"temperature": 1}）。前端据此标挂锁，
                      #   API 调用方也能提前知道自己传的采样参数会被上游要求覆盖。
-                     "params": dict(m.get("params") or {})})
-    for r in cfg.all_routes():
-        data.append({"id": r["name"], "object": "model", "created": created,
-                     "owned_by": "gateway", "type": "route", "models": r["models"],
-                     # 路由只要链上有任一视觉模型就算 vision：带图请求会被排到那个模型上（见 _vision_first）
-                     "vision": _chain_has_vision(cfg, r["models"])})
+                     "params": dict(m.get("params") or {}),
+                    # 第二十七轮（三线直传）: 该模型能走哪几条协议线
+                    #   （chat/completions | messages | responses）。前端据此打格式标签，
+                    #   调用方据此决定把请求发到 /v1/chat/completions、/v1/messages 还是
+                    #   /v1/responses —— 网关不做任何跨线翻译，写错线直接 400。
+                    "protocols": list(m.get("protocols") or [PROTOCOL_CHAT])})
     payload = {
         "object": "list",
         "data": data,
-        "routes": cfg.all_routes(),
         # 本轮修复: 不再回显 base_url（内部拓扑信息，未开鉴权时会被任意访问者读到）
         "providers": {k: {"name": v.name, "model_count": len(v.models)}
                       for k, v in cfg.providers.items()},
@@ -1216,10 +1161,335 @@ async def v1_models(request: Request, _auth=Depends(require_auth)):
     return _models_payload()
 
 
+# ── 第二十七轮「三线直传」：/v1/messages 与 /v1/responses ──────────────
+# 老板决策：**入站是什么格式，出站就是什么格式**；网关不翻译任何协议内容，只在
+# 「供应商与模型」里声明每个模型能用哪几条协议线（models[].protocols）。
+#
+# 与 /v1/chat/completions 的关系：
+#   chat/completions 线走**专用路径**（ChatRequest 校验 + 适配器按字段组装 payload），
+#   这两条新线走**通用直传**（原始 JSON 原样进去、上游响应原样回来）—— 原因是
+#   这两家协议的结构（内容块、tool 表达、SSE 事件类型）差别很大，重建一遍字段
+#   就是"翻译"，会引入损耗，正好违背老板要的"不转"。
+#
+# 网关在直传里仍然做的（不算转格式，是网关的立身之本）：
+#   ① 挑供应商与协议线：模型不支持这条线 → 400，绝不偷偷翻译；
+#   ② 定点改写 model（别名 → 真实 id）；
+#   ③ 盖模型级强制参数（models[].params，如 kimi-k2.7-code 只接受 temperature=1）；
+#   ④ 注入该线的鉴权头 + x-opencode-session（入站 conversation_id 派生成按账号隔离的会话 id）；
+#   ⑤ 熔断 / 限流 / 记账（usage 三种形状各解析一次，只读）/ 访问日志；
+#   ⑥ 补网关壳字段（served_model/provider/provider_name/protocol/x_request_id）。
+# 明确**不做**：字段改名、内容块互转、工具调用互转、SSE 事件互转、错误文案翻译。
+
+def _protocol_mismatch(minfo, model_id: str, protocol: str) -> str:
+    """模型不支持入站协议线时的 400 文案（说清"它支持什么"，别让用户猜）。"""
+    supported = "、".join(minfo.protocols) or "（未声明）"
+    others = "、".join(p for p in PROTOCOLS if p != protocol)
+    return (f"模型 {model_id} 不支持 {protocol} 格式（它支持：{supported}）。"
+            f"网关不做跨格式转换：请改用 {supported} 对应的端点，或换一个支持 {protocol} 的模型"
+            f"（如 {others} 线的模型）。")
+
+
+def _usage_counts(protocol: str, data: Any) -> dict[str, int]:
+    """把三家协议的 usage 归一成 (prompt_tokens, completion_tokens) 供记账。
+
+    这是**只读解析**：上游响应体原样交给客户端，这里只是为了指标/成本不丢
+    —— chats 用 prompt_tokens/completion_tokens，messages 与 responses 都用
+    input_tokens/output_tokens（不解析的话，两条新线的调用在统计里会全是 0）。
+    """
+    if not isinstance(data, dict):
+        return {"prompt_tokens": 0, "completion_tokens": 0}
+    u = data.get("usage")
+    if not isinstance(u, dict):
+        return {"prompt_tokens": 0, "completion_tokens": 0}
+    if protocol in (PROTOCOL_MESSAGES, PROTOCOL_RESPONSES):
+        return {"prompt_tokens": int(u.get("input_tokens") or 0),
+                "completion_tokens": int(u.get("output_tokens") or 0)}
+    return {"prompt_tokens": int(u.get("prompt_tokens") or 0),
+            "completion_tokens": int(u.get("completion_tokens") or 0)}
+
+
+class _UsageScanner:
+    """流式直传的 usage 扫描器（只读，不改一个字节）。
+
+    流式响应的 usage 藏在 SSE 事件里，且三家位置不同：
+      chat/completions → `data: {"usage": {...}}`（需 include_usage）
+      messages         → event `message_start`（input_tokens）+ `message_delta`（output_tokens）
+      responses        → event `response.completed`（response.usage）
+    这里按行喂入，识别 data: 行里的 JSON，并把常见的三种嵌套位置都看一眼，
+    取到就更新（不依赖事件顺序 —— 两个方向各自覆盖，缺一个也不影响另一个）。
+    """
+
+    def __init__(self, protocol: str):
+        self.protocol = protocol
+        self.prompt = 0
+        self.completion = 0
+        self.seen = False
+        self._buf = ""
+
+    def feed(self, chunk: bytes) -> None:
+        try:
+            text = chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            return          # 跨 chunk 的多字节字符会在下一个 chunk 里补齐（这里丢掉半截即可）
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._line(line.strip())
+
+    def _line(self, line: str) -> None:
+        if not line.startswith("data:"):
+            return
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            return
+        try:
+            obj = json.loads(payload)
+        except (ValueError, json.JSONDecodeError):
+            return
+        if not isinstance(obj, dict):
+            return
+        for cand in (obj, obj.get("message"), obj.get("response")):
+            if not isinstance(cand, dict):
+                continue
+            u = cand.get("usage")
+            if not isinstance(u, dict):
+                continue
+            inp = u.get("input_tokens", u.get("prompt_tokens"))
+            out = u.get("output_tokens", u.get("completion_tokens"))
+            if inp is not None:
+                self.prompt = int(inp)
+                self.seen = True
+            if out is not None:
+                self.completion = int(out)
+                self.seen = True
+
+    def counts(self) -> dict[str, int]:
+        return {"prompt_tokens": self.prompt, "completion_tokens": self.completion}
+
+
+def _resolve_passthrough(cfg: GatewayConfig, body: dict, protocol: str):
+    """直传入口的公共解析：取 model + 校验协议线 + 抽 conversation_id。
+
+    返回 (model_id, pkey, pconfig, minfo, conversation_id, clean_body)；
+    clean_body 已摘掉网关内部字段（conversation_id），其余原样。
+    """
+    model_in = str(body.get("model") or "").strip()
+    if not model_in:
+        raise HTTPException(400, "缺少 model 字段")
+    clean = dict(body)
+    try:
+        conv = normalize_conversation_id(clean.pop("conversation_id", None))
+    except ValueError as e:
+        raise HTTPException(400, f"conversation_id {e}")
+    found = cfg.find_provider_for_model(model_in)
+    if found is None:
+        raise HTTPException(400, f"未知模型: {model_in}")
+    pkey, pconfig, minfo = found
+    if not minfo.supports(protocol):
+        raise HTTPException(400, _protocol_mismatch(minfo, model_in, protocol))
+    if not pconfig.supports_protocol(protocol):
+        raise HTTPException(400, f"供应商 {pconfig.name} 未配置 {protocol} 线")
+    return model_in, pkey, pconfig, minfo, conv, clean
+
+
+async def _passthrough(request: Request, protocol: str):
+    """三线直传的通用实现（当前服务 /v1/messages 与 /v1/responses）。"""
+    cfg = _cfg()
+    rid = getattr(request.state, "rid", "-")
+    caller = getattr(request.state, "caller", "anonymous")
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(400, "请求体为空")
+    try:
+        body = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        raise HTTPException(400, "请求体不是合法 JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "请求体必须是 JSON 对象")
+
+    model_in, pkey, pconfig, _minfo, conv, clean = _resolve_passthrough(cfg, body, protocol)
+    stream = bool(clean.get("stream"))
+
+    try:
+        adapter, pkey, pconfig = _get_adapter(model_in, cfg.server.timeout, cfg)
+    except (ModelNotFoundError, AuthConfigError) as e:
+        raise HTTPException(502, str(e))
+    cb = _circuits.get(pkey)
+    if not cb.allow():
+        raise HTTPException(503, f"供应商 {pconfig.name} 熔断中，请稍后重试")
+    try:
+        _enforce_rate_limit(cfg, request, pkey, model_in)
+    except HTTPException:
+        cb.release_probe()   # 请求没发出去 → 归还半开试探令牌
+        raise
+
+    # 定点改写：model 换成真实 id（别名场景）+ 盖模型级强制参数；其余字段一个不动
+    payload = adapter.prepare_payload(model_in, clean)
+    session = _upstream_session(conv, caller)
+
+    if stream:
+        return await _passthrough_stream(request, rid, caller, protocol, adapter, cb,
+                                         pkey, pconfig, model_in, payload, session, cfg)
+
+    t0 = time.time()
+    try:
+        status, data = await adapter.raw_json(protocol, payload, session)
+    except Exception as e:
+        cb.record(False)
+        _metrics.record_call(model_in, pkey, ok=False)
+        _metrics.record_latency(model_in, time.time() - t0)
+        log.error("[rid=%s] %s 直传失败 [%s]: %s", rid, protocol, model_in, e)
+        raise HTTPException(502, f"上游调用失败: {e}")
+
+    ok = 200 <= status < 300
+    # 熔断口径（与真实链路一致）：4xx 是**客户端 body 的问题**（直传下尤其如此，
+    #   body 就是客户端自己写的），不该把供应商判成坏了；只有 5xx 才算上游故障。
+    if ok or status >= 500:
+        cb.record(ok)
+    else:
+        cb.release_probe()
+    _metrics.record_call(model_in, pkey, ok=ok)
+    _metrics.record_latency(model_in, time.time() - t0)
+    usage = _usage_counts(protocol, data)
+    if ok:
+        _metrics.record_tokens(usage["prompt_tokens"], usage["completion_tokens"])
+    _access.add({"method": "POST", "kind": "chat", "path": f"/v1/{protocol}", "rid": rid,
+                 "model": model_in, "served": model_in, "provider": pkey,
+                 "caller": caller, "ok": ok, "stream": False,
+                 "response": _logsafe(_resp_text(data) if ok else _upstream_detail(
+                     json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else str(data)), 2000)})
+
+    if not ok:
+        # 直传口径：上游的错误体**原样**回给客户端（错误文案也不翻译），只加一个
+        #   网关请求号，方便拿它去日志里对账。
+        content = data if isinstance(data, dict) else {"error": {"message": str(data)[:1000]}}
+        return JSONResponse(status_code=status, content=content,
+                            headers={"x-request-id": rid})
+    if not isinstance(data, dict):
+        return Response(content=str(data), media_type="application/json",
+                        headers={"x-request-id": rid})
+    resp = dict(data)
+    if usage["prompt_tokens"] or usage["completion_tokens"]:
+        _attach_cost(resp, model_in, usage, cfg)
+    resp["served_model"] = model_in
+    resp["provider"] = pkey
+    resp["provider_name"] = pconfig.name
+    resp["protocol"] = protocol
+    resp["x_request_id"] = rid
+    return JSONResponse(status_code=status, content=resp, headers={"x-request-id": rid})
+
+
+async def _passthrough_stream(request, rid, caller, protocol, adapter, cb,
+                              pkey, pconfig, model_in, payload, session, cfg):
+    """直传的流式分支：**原样转发上游 SSE 字节**（不解析事件、不重组帧）。
+
+    为什么要先 `__aenter__` 再建 StreamingResponse：客户端需要拿到**真实状态码**。
+    上游拒绝一个 stream 请求（400/401）时，若把它塞进 200 的 SSE 流里，SDK 会以为
+    请求成功了、只是没内容 —— 这与直传"如实反映上游"的初衷相反。
+    """
+    cm = adapter.raw_stream(protocol, payload, session)
+    resp = await cm.__aenter__()
+    headers = {"x-request-id": rid}
+    if resp.status_code >= 400:
+        raw = await resp.aread()
+        ctype = resp.headers.get("content-type", "application/json")
+        await cm.__aexit__(None, None, None)
+        if resp.status_code >= 500:
+            cb.record(False)
+        else:
+            cb.release_probe()
+        _metrics.record_call(model_in, pkey, ok=False)
+        _access.add({"method": "POST", "kind": "chat", "path": f"/v1/{protocol}", "rid": rid,
+                     "model": model_in, "served": model_in, "provider": pkey, "caller": caller,
+                     "ok": False, "stream": True,
+                     "response": _logsafe(_upstream_detail(raw.decode("utf-8", "replace")), 2000)})
+        return Response(content=raw, status_code=resp.status_code, media_type=ctype, headers=headers)
+
+    scanner = _UsageScanner(protocol)
+    t0 = time.time()
+    media_type = resp.headers.get("content-type", "text/event-stream")
+
+    async def event_stream():
+        ok = True
+        try:
+            async for chunk in resp.aiter_bytes():
+                scanner.feed(chunk)      # 只读扫描 usage；字节原样 YIELD
+                yield chunk
+        except Exception as e:
+            ok = False
+            log.error("[rid=%s] %s 直传流中断 [%s]: %s", rid, protocol, model_in, e)
+            raise
+        finally:
+            await cm.__aexit__(None, None, None)
+            cb.record(ok)
+            _metrics.record_call(model_in, pkey, ok=ok)
+            _metrics.record_latency(model_in, time.time() - t0)
+            counts = scanner.counts()
+            if ok and scanner.seen:
+                _metrics.record_tokens(counts["prompt_tokens"], counts["completion_tokens"])
+            _access.add({"method": "POST", "kind": "chat", "path": f"/v1/{protocol}", "rid": rid,
+                         "model": model_in, "served": model_in, "provider": pkey,
+                         "caller": caller, "ok": ok, "stream": True, "response": ""})
+
+    return StreamingResponse(event_stream(), media_type=media_type, headers=headers)
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(request: Request, _auth=Depends(require_auth)):
+    """Anthropic Messages 线（Claude Code / anthropic-sdk 的默认端点）。
+
+    入站 = 出站 = `messages`：body 原样转发到该供应商的 messages 线（鉴权头按该线
+    配置，OpenCode Go 实测认 `x-api-key` + `anthropic-version`），响应（含 SSE）原样回。
+    鉴权：`Authorization: Bearer <网关 Key>` 与 `x-api-key: <网关 Key>` 都认（见 require_auth）。
+    """
+    return await _passthrough(request, PROTOCOL_MESSAGES)
+
+
+@app.post("/v1/responses")
+async def openai_responses(request: Request, _auth=Depends(require_auth)):
+    """OpenAI Responses 线（Codex / openai-sdk 的 responses 端点）。
+
+    入站 = 出站 = `responses`：body 原样转发到该供应商的 responses 线（Bearer 鉴权），
+    响应（含 SSE）原样回。模型不支持该线时 400（不做跨格式翻译）。
+    """
+    return await _passthrough(request, PROTOCOL_RESPONSES)
+
+
 # ── 一键测速（第二十七轮: 主动探测全部文本模型延迟）───────────────────
 # 复用主调用链的 _get_adapter / adapter.chat（同一适配器、同一供应商 Key），
 # 对每个文本模型发一条 1-token 的 "hi" 探针并计时，返回「延迟升序」结果。
 # 注意：只读展示，不把探针写进 _metrics，避免一条小请求反过来改生产路由排序。
+def _probe_protocol(minfo) -> str:
+    """探针走哪条线：优先 chat/completions，其次 messages，最后 responses。
+
+    第二十七轮: 不是每个模型都能走 chat/completions（实测 grok-4.6 / gpt-5.6-luna
+    只认 responses；minimax-m2.7 只认 messages）。一键测速要对**每个**模型都能出结果，
+    所以按模型自己声明的线挑一条 —— 挑不到就说明配置有问题（返回空串，调用方给文案）。
+    """
+    for p in (PROTOCOL_CHAT, PROTOCOL_MESSAGES, PROTOCOL_RESPONSES):
+        if minfo.supports(p):
+            return p
+    return ""
+
+
+def _probe_payload(protocol: str, model_id: str) -> dict:
+    """探针请求体：每条线一份**最小合法**结构（不翻译，只是各写各的）。
+
+    - chat/completions: messages + max_tokens
+    - messages:         max_tokens 必填 + messages
+    - responses:        input + max_output_tokens
+    max_tokens 固定用 16：部分上游对 max_tokens<=2 回 400（"must be greater than 2"），
+    而 16 足够便宜（探针成本可忽略），也够推理模型吐出一段内容。
+    """
+    if protocol == PROTOCOL_MESSAGES:
+        return {"model": model_id, "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}]}
+    if protocol == PROTOCOL_RESPONSES:
+        return {"model": model_id, "input": "hi", "max_output_tokens": 16}
+    return {"model": model_id, "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 16, "stream": False}
+
+
 @app.post("/v1/models/speedtest")
 async def models_speedtest(request: Request, _auth=Depends(require_auth)):
     cfg = _cfg()
@@ -1243,7 +1513,18 @@ async def models_speedtest(request: Request, _auth=Depends(require_auth)):
         if only and m["id"] != only:
             continue
         row: dict = {"model": m["id"], "display_name": m.get("display_name"),
-                     "provider": m.get("provider_name") or m.get("provider") or "—"}
+                     "provider": m.get("provider_name") or m.get("provider") or "—",
+                     # 第二十七轮: 探针走哪条线也回给前端（模型列表里能对照格式标签）
+                     "protocol": ""}
+        # 第二十七轮: 按模型自己声明的协议线探测 —— 三条线共用同一个探针实现，
+        #   否则 responses-only / messages-only 的模型会被误报成"调用失败"。
+        found = cfg.find_provider_for_model(m["id"])
+        protocol = _probe_protocol(found[2]) if found else ""
+        if not protocol:
+            row.update({"ok": False, "latency_ms": None, "error": "该模型未声明任何协议线"})
+            results.append(row)
+            continue
+        row["protocol"] = protocol
         try:
             adapter, pkey, pconfig = _get_adapter(m["id"], int(probe_timeout), cfg)
         except ModelNotFoundError as e:
@@ -1265,12 +1546,18 @@ async def models_speedtest(request: Request, _auth=Depends(require_auth)):
         #   对 429/5xx 重试（退避同真实链路），4xx/超时不重试。
         for attempt in range(1, 4):   # 最多 3 次（含首次）
             try:
-                await adapter.chat(model=m["id"], messages=[{"role": "user", "content": "hi"}],
-                                   temperature=0, max_tokens=16, stop=None)
-                # max_tokens 固定 >2：部分上游对 max_tokens<=2 回 400（要求 >2），故探针用 16 而不是 1，保证各供应商上游都认。
-                #   （"max_tokens must be greater than 2"）
-                ok = True
-                break
+                # 直传原语：入站 body 原样上去、上游响应原样回来。探针只关心"通不通"，
+                #   所以不解析响应体，只看状态码（4xx/5xx 都算失败并带上游原文）。
+                status, data = await adapter.raw_json(protocol, _probe_payload(protocol, m["id"]))
+                if 200 <= status < 300:
+                    ok = True
+                    break
+                err = _upstream_detail(json.dumps(data, ensure_ascii=False)
+                                       if isinstance(data, dict) else str(data)) or f"上游返回 HTTP {status}"
+                if attempt < 3 and (status == 429 or status >= 500):
+                    await asyncio.sleep(0.3 * attempt)
+                else:
+                    break
             except Exception as e:
                 err = _speedtest_error_text(e, probe_timeout)
                 if attempt < 3 and _speedtest_retryable(e):
@@ -1306,26 +1593,20 @@ async def chat_completions(request: Request, req: ChatRequest, _auth=Depends(req
     messages = [m.to_upstream() for m in req.messages]
     tools = [t.model_dump(exclude_none=True) for t in req.tools] if req.tools else None
 
-    chain, route = _route_chain(cfg, req.model)
-    if not chain:
-        raise HTTPException(400, f"路由 {req.model} 未配置有效模型链")
-    # Bug 15 修复: 未知模型/路由应作为客户端错误 400 直接拒绝，
-    #   而不是等到 fallback 逐个尝试后才以 502（上游错误）误导性地返回。
-    if route is None and cfg.find_provider_for_model(req.model) is None:
-        raise HTTPException(400, f"未知模型或路由: {req.model}")
+    # Bug 15 修复: 未知模型应作为客户端错误 400 直接拒绝，
+    #   而不是等到调用失败后才以 502（上游错误）误导性地返回。
+    # 第二十七轮（三线直传）: 这条入口就是 chat/completions 线 —— 模型必须声明该线，
+    #   否则 400（不把请求发去上游吃 500）。路由别名 / fallback 链已整体移除。
+    model_id = _require_protocol_model(cfg, req.model, PROTOCOL_CHAT)
 
-    # 第十三轮: 带图的视觉请求把有视觉能力的模型排到链首（仅路由别名会重排；
-    #   直接指定真实模型 id 时不改用户的选择，只记一条日志）。
-    with_images = messages_have_images(messages)
-    if with_images and route is not None:
-        reordered = _vision_first(cfg, chain)
-        if reordered != chain:
-            log.info("[rid=%s] 带图请求，链序调整为视觉优先: %s", rid, " → ".join(reordered))
-            chain = reordered
+    # 第十三轮: 带图请求打到没标视觉能力的模型上，上游要么忽略图片、要么报参数错 ——
+    #   记一条日志便于排查。第二十七轮: 不再重排模型（只有一个模型，重排=替用户换模型）。
+    if messages_have_images(messages) and not cfg.find_provider_for_model(model_id)[2].vision:
+        log.info("[rid=%s] 带图请求，但模型 %s 未标记视觉能力", rid, model_id)
 
     if req.stream:
-        return _stream_response(request, req, chain, route, messages, tools)
-    return await _chat_fallback(cfg, rid, caller, request, req, chain, route, messages, tools)
+        return _stream_response(request, req, model_id, messages, tools)
+    return await _chat_once(cfg, rid, caller, request, req, model_id, messages, tools)
 
 
 def _upstream_session(conversation_id: str | None, account: str) -> str | None:
@@ -1347,256 +1628,222 @@ def _upstream_session(conversation_id: str | None, account: str) -> str | None:
     return hashlib.sha256(f"{account}:{conversation_id}".encode("utf-8")).hexdigest()[:32]
 
 
-async def _chat_fallback(cfg, rid, caller, request, req, chain, route, messages, tools):
-    """非流式：按优先级逐个尝试 + 熔断 + 重试。"""
-    errors: list[dict] = []
+async def _chat_once(cfg, rid, caller, request, req, model_id, messages, tools):
+    """非流式：单个模型的调用 + 熔断 + 重试。
+
+    第二十七轮: 路由别名 / fallback 链已整体移除 —— 这里只服务一个模型，失败不再"换一个
+    再试"，而是把上游错误如实报给客户端（同模型重试仍受 server.retry 控制）。
+    """
     tool_choice = req.tool_choice
+    timeout = cfg.server.timeout
+    try:
+        adapter, pkey, pconfig = _get_adapter(model_id, timeout, cfg)
+    except ModelNotFoundError as e:
+        raise HTTPException(400, f"未知模型: {model_id}") from e
+    except AuthConfigError as e:
+        # 供应商没配 Key 是网关侧配置问题：503（别报 502 让用户去查上游）
+        raise HTTPException(503, f"供应商 {e.provider_key} 未配置可用的 API Key（{e.detail}）") from e
 
-    for model_id in chain:
-        # Bug 2 修复: route 存在时整条链（含链首）都用 route.retry，避免链首用全局 retry 的不一致
-        retry = route.retry if route else cfg.server.retry
-        # 配置了 route.timeout 则整条链（含链首）统一用之，否则用 server.timeout
-        timeout = route.timeout if (route and route.timeout) else cfg.server.timeout
-        adapter = pkey = pconfig = None
+    # P0-1: 熔断检查
+    cb = _circuits.get(pkey)
+    if not cb.allow():
+        log.warning("[rid=%s] 供应商 %s 熔断中，拒绝 [%s]", rid, pkey, model_id)
+        raise HTTPException(503, f"供应商 {pconfig.name} 熔断中，请稍后重试")
+
+    # 供应商级/全局级限流（Bug 1；路由级限流随路由功能一并移除）
+    try:
+        _enforce_rate_limit(cfg, request, pkey, model_id)
+    except HTTPException:
+        # 第六轮: 刚才是 cb.allow() 放行的（可能消耗了 HALF_OPEN 试探令牌），
+        #   但请求根本没发出去，必须把令牌还回去，否则该供应商会被半开状态永久拒绝。
+        cb.release_probe()
+        raise
+
+    ok = False
+    result = None
+    last_err = None
+    t0 = time.time()
+    retry = max(1, cfg.server.retry)
+    for attempt in range(1, retry + 1):
         try:
-            adapter, pkey, pconfig = _get_adapter(model_id, timeout, cfg)
-        except ModelNotFoundError as e:
-            errors.append({"model": model_id, "error": str(e)})
-            log.warning("[rid=%s] fallback 跳过 [%s]: %s", rid, model_id, e)
-            continue
-        except AuthConfigError as e:
-            errors.append({"model": model_id, "error": str(e)})
-            continue
+            result = await adapter.chat(
+                model=model_id, messages=messages,
+                temperature=req.temperature, top_p=req.top_p,
+                max_tokens=req.max_tokens, stop=req.stop,
+                tools=tools, tool_choice=tool_choice,
+                extra=req.upstream_extra() or None,
+                session_id=_upstream_session(req.conversation_id, caller),
+            )
+            ok = True
+            break
+        except Exception as e:
+            last_err = e
+            log.error("[rid=%s] 上游失败 [%s] attempt=%d/%d: %s", rid, model_id, attempt, retry, e)
+            if attempt < retry:
+                await asyncio.sleep(0.3 * attempt)
 
-        # P0-1: 熔断检查
-        cb = _circuits.get(pkey)
-        if not cb.allow():
-            errors.append({"model": model_id, "error": f"供应商 {pconfig.name} 熔断中", "circuit": "open"})
-            log.warning("[rid=%s] 供应商 %s 熔断跳过 [%s]", rid, pkey, model_id)
-            continue
+    cb.record(ok)
+    if not ok:
+        _metrics.record_call(model_id, pkey, ok=False)
+        _metrics.record_latency(model_id, time.time() - t0)  # Bug 5: 失败也算耗时
+        # 第六轮: 键名从 `error` 改为 `message` —— OpenAI 规范要求 error.message，
+        #   此前客户端拿到的是 {"error":{"error": ...}}，SDK 解析不到 message。
+        raise HTTPException(502, {"message": f"模型 {model_id} 调用失败",
+                                  "errors": [{"model": model_id, "error": str(last_err)}]})
 
-        # 路由级/供应商级限流（Bug 1）
-        try:
-            _enforce_rate_limit(cfg, request, route, pkey, model_id)
-        except HTTPException as e:
-            # 当前模型所在维度打满 → 切下一个模型（路由内其它模型可继续）
-            # 第六轮: 刚才是 cb.allow() 放行的（可能消耗了 HALF_OPEN 试探令牌），
-            #   但请求根本没发出去，必须把令牌还回去，否则该供应商会被半开状态永久拒绝。
-            cb.release_probe()
-            errors.append({"model": model_id, "error": f"限流: {e.detail}", "rate_limited": True})
-            log.warning("[rid=%s] [%s] 限流，尝试下一个模型", rid, model_id)
-            continue
-
-        ok = False
-        result = None
-        last_err = None
-        t0 = time.time()
-        for attempt in range(1, max(1, retry) + 1):
-            try:
-                result = await adapter.chat(
-                    model=model_id, messages=messages,
-                    temperature=req.temperature, top_p=req.top_p,
-                    max_tokens=req.max_tokens, stop=req.stop,
-                    tools=tools, tool_choice=tool_choice,
-                    extra=req.upstream_extra() or None,
-                    session_id=_upstream_session(req.conversation_id, caller),
-                )
-                ok = True
-                break
-            except Exception as e:
-                last_err = e
-                log.error("[rid=%s] 上游失败 [%s] attempt=%d/%d: %s", rid, model_id, attempt, retry, e)
-                if attempt < retry:
-                    await asyncio.sleep(0.3 * attempt)
-
-        cb.record(ok)
-        if not ok:
-            errors.append({"model": model_id, "error": str(last_err)})
-            _metrics.record_call(model_id, pkey, ok=False, route=route.name if route else None)
-            _metrics.record_latency(model_id, time.time() - t0)  # Bug 5: 失败也算耗时
-            continue
-
-        # 成功
-        usage = result.get("usage") or {}
-        _metrics.record_call(model_id, pkey, ok=True, route=route.name if route else None)
-        _metrics.record_tokens(int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0)))
-        _metrics.record_latency(model_id, time.time() - t0)
-        if model_id != chain[0]:
-            _metrics.record_fallback(route.name if route else None)
-        served_model = model_id
-        _access.add({"method": "POST", "kind": "chat", "path": "/v1/chat/completions", "rid": rid,
-                     "model": req.model, "served": served_model, "provider": pkey,
-                     "caller": caller, "ok": True, "stream": False,
-                     "response": _logsafe(_resp_text(result), 2000)})
-        resp = {
-            "id": result.get("id", "") or f"chatcmpl-{rid}", "object": "chat.completion",
-            "created": int(time.time()), "model": req.model,
-            "system_fingerprint": f"gw-api-{pkey}",
-            "served_model": served_model, "provider": pkey, "provider_name": pconfig.name,
-            "choices": result.get("choices", []), "usage": usage, "x_request_id": rid,
-        }
-        _attach_cost(resp, served_model, usage, cfg)
-        if route:
-            resp["route"] = {"requested": req.model, "served": served_model,
-                             "fallback_used": served_model != chain[0]}
-        return resp
-
-    # Bug 1 修复: 全部模型失败时不再计入 fallback_total（它是"成功降级"计数），
-    #   否则 fallback_total 会被纯失败污染。失败已由各次 record_call(ok=False) 记录。
-    # 第六轮: 键名从 `error` 改为 `message` —— OpenAI 规范要求 error.message，
-    # 此前客户端拿到的是 {"error":{"error": ...}}，SDK 解析不到 message。
-    raise HTTPException(502, {"message": f"路由 {req.model} 全部模型调用失败", "errors": errors})
+    usage = result.get("usage") or {}
+    _metrics.record_call(model_id, pkey, ok=True)
+    _metrics.record_tokens(int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0)))
+    _metrics.record_latency(model_id, time.time() - t0)
+    _access.add({"method": "POST", "kind": "chat", "path": "/v1/chat/completions", "rid": rid,
+                 "model": req.model, "served": model_id, "provider": pkey,
+                 "caller": caller, "ok": True, "stream": False,
+                 "response": _logsafe(_resp_text(result), 2000)})
+    resp = {
+        "id": result.get("id", "") or f"chatcmpl-{rid}", "object": "chat.completion",
+        "created": int(time.time()), "model": req.model,
+        "system_fingerprint": f"gw-api-{pkey}",
+        "served_model": model_id, "provider": pkey, "provider_name": pconfig.name,
+        "choices": result.get("choices", []), "usage": usage, "x_request_id": rid,
+    }
+    _attach_cost(resp, model_id, usage, cfg)
+    return resp
 
 
 # ── 流式 fallback（元信息 + 熔断 + 统一 [DONE]） ──
-def _stream_response(request, req, chain, route, messages, tools):
+def _sse_error(rid, caller, req, model_id, detail, provider=None) -> str:
+    """流式路径的统一错误帧（error 帧 + [DONE] 帧），并按失败记一条访问日志。
+
+    第二十七轮: 不再有"这个模型失败就换下一个"的余地（路由/fallback 链已移除），
+    所以错误帧在这里一次成型，调用方 yield 一下就收尾。
+    """
+    _access.add({"method": "POST", "kind": "chat", "path": "/v1/chat/completions", "rid": rid,
+                 "model": req.model, "served": model_id, "provider": provider,
+                 "caller": caller, "ok": False, "stream": True, "error": str(detail)[:200],
+                 "response": ""})
+    err = {"error": detail, "errors": [{"model": model_id, "error": detail}]}
+    return (f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+            f"data: [DONE]\n\n")
+
+
+def _stream_response(request, req, model_id, messages, tools):
     cfg = _cfg()
     rid = getattr(request.state, "rid", "-")
     caller = getattr(request.state, "caller", "anonymous")
 
     async def event_stream():
-        errors: list[dict] = []
-        served = None
-        # 本轮修复: 日志累加器必须在链循环**外**初始化。此前它写在循环体 try 内，
-        #   如果链上每个模型都在 _get_adapter / 熔断 / 限流阶段被 continue 掉，那次赋值
-        #   永远不会执行 → 全失败分支引用它会 NameError，SSE 变成 500 而不是给客户端错误帧。
+        # 本轮修复: 日志累加器必须在 try 外初始化。此前它写在链循环体 try 内，
+        #   如果模型在 _get_adapter / 熔断 / 限流阶段就被拒，那些赋值永远不会执行 →
+        #   失败分支引用它会 NameError，SSE 变成 500 而不是给客户端错误帧。
         resp_parts: list[str] = []     # 流式输出正文累积（供访问日志）
         reason_parts: list[str] = []   # 流式推理段累积（正文为空时回落，供访问日志）
+        timeout = cfg.server.timeout
         try:
-            for model_id in chain:
-                # #2: 配了 route.timeout 整条链（含链首）统一用之
-                timeout = route.timeout if (route and route.timeout) else cfg.server.timeout
-                try:
-                    adapter, pkey, pconfig = _get_adapter(model_id, timeout, cfg)
-                except (ModelNotFoundError, AuthConfigError) as e:
-                    errors.append({"model": model_id, "error": str(e)})
-                    continue
+            try:
+                adapter, pkey, pconfig = _get_adapter(model_id, timeout, cfg)
+            except ModelNotFoundError as e:
+                yield _sse_error(rid, caller, req, model_id, str(e))
+                return
+            except AuthConfigError as e:
+                yield _sse_error(rid, caller, req, model_id,
+                                 f"供应商 {e.provider_key} 未配置可用的 API Key（{e.detail}）")
+                return
 
-                cb = _circuits.get(pkey)
-                if not cb.allow():
-                    errors.append({"model": model_id, "error": f"供应商 {pconfig.name} 熔断中", "circuit": "open"})
-                    continue
+            cb = _circuits.get(pkey)
+            if not cb.allow():
+                yield _sse_error(rid, caller, req, model_id, f"供应商 {pconfig.name} 熔断中，请稍后重试", pkey)
+                return
 
-                # 路由级/供应商级限流（Bug 1）：流式里用非抛异常方式，打满则跳过该模型
-                try:
-                    _enforce_rate_limit(cfg, request, route, pkey, model_id)
-                except HTTPException as e:
-                    cb.release_probe()   # 第六轮: 归还试探令牌（请求没发出去）
-                    errors.append({"model": model_id, "error": f"限流: {e.detail}", "rate_limited": True})
-                    continue
+            # 供应商级/全局级限流（Bug 1；路由级限流随路由功能一并移除）
+            try:
+                _enforce_rate_limit(cfg, request, pkey, model_id)
+            except HTTPException as e:
+                cb.release_probe()   # 第六轮: 归还试探令牌（请求没发出去）
+                yield _sse_error(rid, caller, req, model_id, f"限流: {e.detail}", pkey)
+                return
 
-                t0 = time.time()
-                stream_gen = None       # 第六轮: 显式持有生成器，收尾时 aclose()
-                try:
-                    committed = False       # 是否已向客户端输出过 content（一旦输出就无法回退模型）
-                    emitted_meta = False
-                    stream_usage: dict = {}
-                    resp_parts.clear()      # 每个模型单独累积，失败回退时不混入上一模型输出
-                    reason_parts.clear()
-                    # 第六轮: 用 stream_gen 承接后再 async for，配合下面的 finally aclose()。
-                    #   上游 chat_stream 内部用 `async with self._lease()` 持有 client 占用，
-                    #   若只 break 不 aclose，生成器要等 GC 才释放 —— 热重载的延迟关闭会
-                    #   一直等不到 _active==0，连接池迟迟不关。
-                    stream_gen = adapter.chat_stream(
-                        model=model_id, messages=messages,
-                        temperature=req.temperature, top_p=req.top_p,
-                        max_tokens=req.max_tokens, stop=req.stop,
-                        tools=tools, tool_choice=req.tool_choice,
-                        extra=req.upstream_extra() or None,
-                        session_id=_upstream_session(req.conversation_id, caller),
-                    )
-                    async for chunk in stream_gen:
-                        if chunk.get("done"):
-                            break
-                        # 功能 8: 累计上游 chunk 的 usage（若有）
-                        if chunk.get("usage"):
-                            u = chunk["usage"]
-                            stream_usage["prompt_tokens"] = stream_usage.get("prompt_tokens", 0) + int(u.get("prompt_tokens", 0))
-                            stream_usage["completion_tokens"] = stream_usage.get("completion_tokens", 0) + int(u.get("completion_tokens", 0))
-                            stream_usage["total_tokens"] = stream_usage.get("total_tokens", 0) + int(u.get("total_tokens", 0))
-                        # Bug 5 修复: meta 延迟到首个 content 到达时才发送 ——
-                        # 若模型在发出 content 前就失败，客户端还没收到任何字节，可安全回退下一个模型。
-                        if chunk.get("choices"):
-                            if not emitted_meta:
-                                # 第六轮: 网关元信息帧此前不是合法 chunk（缺 id/created/choices，
-                                #   object 也写成 chat.completion）→ 严格校验的 SDK 直接报错。
-                                #   现在补齐为合法的 chat.completion.chunk（choices 为空是 OpenAI
-                                #   自己在 usage-only 帧里的既有约定），自定义字段照旧带上。
-                                meta = {"id": f"chatcmpl-{rid}", "object": "chat.completion.chunk",
-                                        "created": int(time.time()), "model": req.model,
-                                        "choices": [],
-                                        "served_model": model_id, "provider": pkey,
-                                        "provider_name": pconfig.name, "x_request_id": rid}
-                                if route and model_id != chain[0]:
-                                    meta["route"] = {"requested": req.model, "served": model_id, "fallback_used": True}
-                                yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
-                                emitted_meta = True
-                            committed = True
-                            served = model_id
-                        # M4: 累积流式输出正文到日志（推理段单独攒，正文为空时才回落）
-                        for _c in chunk.get("choices", []):
-                            _d = _c.get("delta") or {}
-                            if _d.get("content"):
-                                resp_parts.append(_d["content"])
-                            if _d.get("reasoning_content"):
-                                reason_parts.append(_d["reasoning_content"])
-                        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-                    cb.record(True)
-                    if served:
-                        _metrics.record_call(served, pkey, ok=True, route=route.name if route else None)
-                        _metrics.record_latency(served, time.time() - t0)
-                        # 本轮修复: 成功降级才计入 fallback_total（此前的流式路径恰好记反了 ——
-                        #   全失败时计数、成功降级时不计，与非流式语义相反）。
-                        if route and served != chain[0]:
-                            _metrics.record_fallback(route.name)
-                        _access.add({"method": "POST", "kind": "chat", "path": "/v1/chat/completions", "rid": rid,
-                                     "model": req.model, "served": served, "provider": pkey,
-                                     "caller": caller, "ok": True, "stream": True,
-                                     "response": _logsafe(_stream_log_text(resp_parts, reason_parts), 2000)})
-                        # 功能 8: 流式末尾发一个 usage 块（累计自上游 chunks 的 usage，若有）
-                        if stream_usage:
-                            # 第六轮: 同上，末尾 usage 帧也补齐 id/created（object 本就是 chunk）
-                            uf = {'id': f'chatcmpl-{rid}', 'object': 'chat.completion.chunk', 'created': int(time.time()),
-                                  'model': req.model, 'choices': [], 'usage': stream_usage,
-                                  'served_model': served, 'provider': pkey}
-                            # M2: 流式 usage 帧同样带上 token 成本估算，前端能显示费用
-                            _attach_cost(uf, served, stream_usage, cfg)
-                            yield f"data: {json.dumps(uf, ensure_ascii=False)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
-                except Exception as e:
-                    cb.record(False)
-                    _metrics.record_call(model_id, pkey, ok=False, route=route.name if route else None)
-                    _metrics.record_latency(model_id, time.time() - t0)  # Bug 5: 失败也算耗时
-                    if committed:
-                        # 已向客户端输出过 content，无法回退 → 发错误块并结束（避免破坏已输出的 SSE 流）
-                        _access.add({"method": "POST", "kind": "chat", "path": "/v1/chat/completions", "rid": rid,
-                                     "model": req.model, "served": model_id, "provider": pkey,
-                                     "caller": caller, "ok": False, "stream": True, "error": str(e)[:200],
-                                     "response": _logsafe(_stream_log_text(resp_parts, reason_parts), 2000)})
-                        yield f"data: {json.dumps({'error': str(e), 'served_model': model_id}, ensure_ascii=False)}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
-                    # 尚未输出任何 content → 可安全回退到链上下一个模型（Bug 5 修复）
-                    errors.append({"model": model_id, "error": str(e)})
-                    continue
-                finally:
-                    # 第六轮: 无论正常收尾 / break / 异常 / 取消，都立刻关掉上游生成器，
-                    #   让 lease 马上归还（不依赖 GC）。已在结束时 aclose 是幂等的。
-                    if stream_gen is not None:
-                        try:
-                            await stream_gen.aclose()
-                        except Exception:
-                            pass
-
-            # 本轮修复: 全失败**不再**计入 fallback_total（它表示"成功降级"次数）。
-            #   失败已由各自的 record_call(ok=False) 记录；此处此前会污染指标（与非流式修复不一致）。
-            _access.add({"method": "POST", "kind": "chat", "path": "/v1/chat/completions", "rid": rid,
-                         "model": req.model, "served": None, "provider": None,
-                         "caller": caller, "ok": False, "stream": True,
-                         "response": _logsafe(_stream_log_text(resp_parts, reason_parts), 2000), "error": "所有模型调用失败"})
-            yield f"data: {json.dumps({'error': '所有模型调用失败', 'errors': errors}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
+            t0 = time.time()
+            stream_gen = None       # 第六轮: 显式持有生成器，收尾时 aclose()
+            try:
+                emitted_meta = False
+                stream_usage: dict = {}
+                # 第六轮: 用 stream_gen 承接后再 async for，配合下面的 finally aclose()。
+                #   上游 chat_stream 内部用 `async with self._lease()` 持有 client 占用，
+                #   若只 break 不 aclose，生成器要等 GC 才释放 —— 热重载的延迟关闭会
+                #   一直等不到 _active==0，连接池迟迟不关。
+                stream_gen = adapter.chat_stream(
+                    model=model_id, messages=messages,
+                    temperature=req.temperature, top_p=req.top_p,
+                    max_tokens=req.max_tokens, stop=req.stop,
+                    tools=tools, tool_choice=req.tool_choice,
+                    extra=req.upstream_extra() or None,
+                    session_id=_upstream_session(req.conversation_id, caller),
+                )
+                async for chunk in stream_gen:
+                    if chunk.get("done"):
+                        break
+                    # 功能 8: 累计上游 chunk 的 usage（若有）
+                    if chunk.get("usage"):
+                        u = chunk["usage"]
+                        stream_usage["prompt_tokens"] = stream_usage.get("prompt_tokens", 0) + int(u.get("prompt_tokens", 0))
+                        stream_usage["completion_tokens"] = stream_usage.get("completion_tokens", 0) + int(u.get("completion_tokens", 0))
+                        stream_usage["total_tokens"] = stream_usage.get("total_tokens", 0) + int(u.get("total_tokens", 0))
+                    # Bug 5 修复: meta 帧在首个 content 到达时才发送 —— 第六轮补齐为合法 chunk
+                    #   （缺 id/created/choices 的"元信息帧"会被严格校验的 SDK 直接拒掉）。
+                    if chunk.get("choices") and not emitted_meta:
+                        meta = {"id": f"chatcmpl-{rid}", "object": "chat.completion.chunk",
+                                "created": int(time.time()), "model": req.model,
+                                "choices": [],
+                                "served_model": model_id, "provider": pkey,
+                                "provider_name": pconfig.name, "x_request_id": rid}
+                        yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
+                        emitted_meta = True
+                    # M4: 累积流式输出正文到日志（推理段单独攒，正文为空时才回落）
+                    for _c in chunk.get("choices", []):
+                        _d = _c.get("delta") or {}
+                        if _d.get("content"):
+                            resp_parts.append(_d["content"])
+                        if _d.get("reasoning_content"):
+                            reason_parts.append(_d["reasoning_content"])
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                cb.record(True)
+                _metrics.record_call(model_id, pkey, ok=True)
+                _metrics.record_latency(model_id, time.time() - t0)
+                _access.add({"method": "POST", "kind": "chat", "path": "/v1/chat/completions", "rid": rid,
+                             "model": req.model, "served": model_id, "provider": pkey,
+                             "caller": caller, "ok": True, "stream": True,
+                             "response": _logsafe(_stream_log_text(resp_parts, reason_parts), 2000)})
+                # 功能 8: 流式末尾发一个 usage 块（累计自上游 chunks 的 usage，若有）
+                if stream_usage:
+                    uf = {'id': f'chatcmpl-{rid}', 'object': 'chat.completion.chunk', 'created': int(time.time()),
+                          'model': req.model, 'choices': [], 'usage': stream_usage,
+                          'served_model': model_id, 'provider': pkey}
+                    # M2: 流式 usage 帧同样带上 token 成本估算，前端能显示费用
+                    _attach_cost(uf, model_id, stream_usage, cfg)
+                    yield f"data: {json.dumps(uf, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            except Exception as e:
+                cb.record(False)
+                _metrics.record_call(model_id, pkey, ok=False)
+                _metrics.record_latency(model_id, time.time() - t0)  # Bug 5: 失败也算耗时
+                _access.add({"method": "POST", "kind": "chat", "path": "/v1/chat/completions", "rid": rid,
+                             "model": req.model, "served": model_id, "provider": pkey,
+                             "caller": caller, "ok": False, "stream": True, "error": str(e)[:200],
+                             "response": _logsafe(_stream_log_text(resp_parts, reason_parts), 2000)})
+                # 第六轮: 已向客户端输出过 content 时本来就无法回退（第二十七轮起更没有下一个
+                #   模型可退），统一发错误帧 + [DONE] 收尾，避免破坏已输出的 SSE 流。
+                yield f"data: {json.dumps({'error': str(e), 'served_model': model_id}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            finally:
+                # 第六轮: 无论正常收尾 / break / 异常 / 取消，都立刻关掉上游生成器，
+                #   让 lease 马上归还（不依赖 GC）。已在结束时 aclose 是幂等的。
+                if stream_gen is not None:
+                    try:
+                        await stream_gen.aclose()
+                    except Exception:
+                        pass
         finally:
             # 第六轮: in_flight 已改为在 middleware 的 finally 中统一递减（见 in_flight_tracker），
             #   此处不再递减 —— 此前流式请求会被双重递减（详见那边的说明）。
@@ -1616,18 +1863,13 @@ def _stream_response(request, req, chain, route, messages, tools):
 async def chat_batch(request: Request, req: BatchRequest, _auth=Depends(require_auth)):
     cfg = _cfg()
     rid = getattr(request.state, "rid", "-")
-    # Bug 15: 批量入口同样对未知模型/路由直接 400
-    if cfg.find_route(req.model) is None and cfg.find_provider_for_model(req.model) is None:
-        raise HTTPException(400, f"未知模型或路由: {req.model}")
+    # Bug 15: 批量入口同样对未知模型直接 400（第二十七轮: 这条入口也是 chat/completions 线）
+    model_id = _require_protocol_model(cfg, req.model, PROTOCOL_CHAT)
     # 本轮修复: 批量条数上限（此前只受请求体 2MB 限制，可一次塞进上千条 → 自伤型 DoS）
     if not req.items:
         raise HTTPException(400, "items 不能为空")
     if len(req.items) > cfg.server.batch_max_items:
         raise HTTPException(400, f"items 数量 {len(req.items)} 超过上限 {cfg.server.batch_max_items}")
-    # 本轮优化: 模型链只解析一次（此前每个 item 都在并发协程里重算一遍）
-    chain, route = _route_chain(cfg, req.model)
-    if not chain:
-        raise HTTPException(400, f"路由 {req.model} 未配置有效模型链")
     # 本轮修复: 并发上限钳制（此前完全由客户端 max_concurrency 决定，可传 1e5 打爆上游/自身）
     limit = min(max(1, req.max_concurrency), cfg.server.batch_max_concurrency)
     sem = asyncio.Semaphore(limit)
@@ -1644,7 +1886,7 @@ async def chat_batch(request: Request, req: BatchRequest, _auth=Depends(require_
                     max_tokens=item.max_tokens, stream=False,
                     extra=passthrough,
                 )
-                r = await _chat_fallback(cfg, rid, "batch", request, sub, chain, route, messages, None)
+                r = await _chat_once(cfg, rid, "batch", request, sub, model_id, messages, None)
                 return {"index": i, "label": item.label, "ok": True, "result": r}
             except HTTPException as e:
                 # 第六轮: detail 是结构化 dict（如全部模型失败）时，str() 会产出 Python repr，
@@ -1674,10 +1916,9 @@ async def images_generations(request: Request, req: ImageRequest, _auth=Depends(
     cfg = _cfg()
     rid = getattr(request.state, "rid", "-")
     caller = getattr(request.state, "caller", "anonymous")
-    # Bug 4: 支持路由别名（如 wjd）→ 解析到第一个 type==image 的模型
     resolved = _resolve_media_model(cfg, req.model, "image")
     if resolved is None:
-        raise HTTPException(404, f"未知图像模型/路由: {req.model}（没有可用的 image 类型模型）")
+        raise HTTPException(404, f"未知图像模型: {req.model}（没有可用的 image 类型模型）")
     pkey, pconfig, minfo, token, real_model = resolved
     # 顺序修复（本轮）：先做能力检查（501）、再限流 —— 否则"不支持图像的供应商"也会白扣一个限流 token。
     if not pconfig.media.supports_image:
@@ -1921,10 +2162,9 @@ async def videos_create(request: Request, req: VideoCreateRequestExtended, _auth
     rid = getattr(request.state, "rid", "-")
     caller = getattr(request.state, "caller", "anonymous")
     _validate_video_request(req)          # 第十一轮 #3：入站按 Agnes 契约校验 mode/媒体/时长
-    # Bug 4: 支持路由别名（如 wjd）→ 解析到第一个 type==video 的模型
     resolved = _resolve_media_model(cfg, req.model, "video")
     if resolved is None:
-        raise HTTPException(404, f"未知视频模型/路由: {req.model}（没有可用的 video 类型模型）")
+        raise HTTPException(404, f"未知视频模型: {req.model}（没有可用的 video 类型模型）")
     pkey, pconfig, minfo, token, real_model = resolved
     # 顺序修复（本轮）：先能力检查（501），再校验回调地址（400），最后限流 —— 避免无效请求白扣 token。
     if not pconfig.media.supports_video:
@@ -2055,12 +2295,12 @@ async def videos_poll(request: Request, video_id: str, model: str = "", wait: bo
 
     # 本轮重写：供应商定位不再"盲猜"。
     #   视频任务 ID 是**供应商私有**的，查错供应商必然 404/502，且静默误导。
-    #   策略：给了 model/路由别名 → 用与创建端点相同的解析逻辑（_resolve_media_model）；
+    #   策略：给了 model → 用与创建端点相同的解析逻辑（_resolve_media_model）；
     #         没给 model → 仅当全站只有一家支持视频的供应商时才推断，否则要求显式指定。
     if model:
         resolved = _resolve_media_model(cfg, model, "video")
         if resolved is None:
-            raise HTTPException(404, f"未知视频模型/路由: {model}（没有可用的 video 类型模型）")
+            raise HTTPException(404, f"未知视频模型: {model}（没有可用的 video 类型模型）")
         pkey, pconfig, _minfo, _token, pmodel_id = resolved
     else:
         video_providers = [k for k, v in cfg.providers.items() if v.media.supports_video]
@@ -2422,7 +2662,8 @@ async def metrics_prometheus(request: Request, _auth=Depends(require_auth)):
     lines = [
         "# API Gateway Prometheus 指标",
         f'api_gateway_uptime_seconds {snap["uptime_seconds"]}',
-        f'api_gateway_fallback_total {snap["fallback_total"]}',
+        # 第二十七轮: api_gateway_fallback_total 随「路由别名 / fallback 链」一起删除 ——
+        #   快照里已没有 fallback_total 字段，这里再读就是 KeyError（曾被 live_check 抓到 500）。
         f'api_gateway_tokens_prompt_total {snap["tokens"]["prompt"]}',
         f'api_gateway_tokens_completion_total {snap["tokens"]["completion"]}',
         # 功能 11: 在途请求 gauge
@@ -2445,11 +2686,12 @@ async def metrics_prometheus(request: Request, _auth=Depends(require_auth)):
         lines.append(f'api_gateway_circuit_state{{provider="{pl}"}} {state_val}')
         lines.append(f'api_gateway_circuit_recent_failures{{provider="{pl}"}} {c["recent_failures"]}')
     # 第六轮: 补 HELP/TYPE（promtool / Grafana 的规范要求；此前只有裸指标行）
+    # 第二十七轮: fallback_total 的 HELP/TYPE 已随路由/fallback 链删除（连同上面的指标行）。
+    #   注意别把"已删除"写成裸注释行塞进导出的正文里：正文里只放真正存在的指标的
+    #   HELP/TYPE，说明留在代码注释里（测试会校验声明与导出的一一对应）。
     help_lines = [
         "# HELP api_gateway_uptime_seconds 网关运行时长（秒）",
         "# TYPE api_gateway_uptime_seconds gauge",
-        "# HELP api_gateway_fallback_total 成功降级到备选模型的次数（纯失败不计）",
-        "# TYPE api_gateway_fallback_total counter",
         "# HELP api_gateway_tokens_prompt_total 上游 prompt token 累计",
         "# TYPE api_gateway_tokens_prompt_total counter",
         "# HELP api_gateway_tokens_completion_total 上游 completion token 累计",
@@ -2514,7 +2756,7 @@ async def logs(request: Request, n: int = 100, _auth=Depends(require_auth)):
 # ─────────────────────────────────────
 @app.get("/", include_in_schema=False)
 async def root(request: Request, _auth=Depends(require_auth_or_open)):
-    # 第六轮: / 也纳入 health_auth 保护（会列出供应商/路由/端点清单）；_auth 未使用。
+    # 第六轮: / 也纳入 health_auth 保护（会列出供应商/端点清单）；_auth 未使用。
     if "text/html" in (request.headers.get("accept") or ""):
         # 浏览器访问根路径 → 前端登录页；API 调用（Accept 不含 text/html）仍返回 JSON 导航
         return RedirectResponse("/web/")
@@ -2523,7 +2765,11 @@ async def root(request: Request, _auth=Depends(require_auth_or_open)):
         "name": "API Gateway",
         "version": VERSION,
         "endpoints": {
-            "chat": "POST /v1/chat/completions（支持路由别名 wjd / 流式 / fallback / 熔断）",
+            "chat": "POST /v1/chat/completions（OpenAI Chat Completions 线）",
+            # 第二十七轮「三线直传」: 入站是什么格式，出站就是什么格式 —— 网关不翻译协议，
+            #   只在模型声明支持该线时原样转发（不支持则 400 说清它支持哪几条线）。
+            "messages": "POST /v1/messages（Anthropic Messages 线，鉴权也认 x-api-key）",
+            "responses": "POST /v1/responses（OpenAI Responses 线）",
             "batch": "POST /v1/chat/completions/batch（并发多 prompt）",
             "images": "POST /v1/images/generations",
             "videos_create": "POST /v1/videos（异步，?wait 或 callback_url）",
@@ -2535,7 +2781,6 @@ async def root(request: Request, _auth=Depends(require_auth_or_open)):
             "docs": "GET /docs（Swagger UI）",
         },
         "providers": list(cfg.providers.keys()),
-        "routes": list(cfg.routes.keys()),
     }
 
 
@@ -3074,9 +3319,9 @@ async def config_get(request: Request, _auth=Depends(require_auth)):
 
     - `config`：面板表单用的值（结构与 gateway.yaml 一一对应；密钥只回报"配没配"）
     - `yaml`：**文件当前原文**（页面上可展开看，不做二次加工 —— 你看到的就是盘上的）
-    - `warnings`：配置体检结论（通配 CORS、缺 Key、路由引用了不存在的模型 …）
+    - `warnings`：配置体检结论（通配 CORS、缺 Key 等）
     - `restart_keys`：改了必须重启进程才生效的键（页面按此在输入框旁标注）
-    - `model_ids` / `route_names`：给路由、定价的下拉用（不用前端再猜）
+    - `model_ids`：给模型、定价的下拉用（不用前端再猜）
     """
     _require_admin(request)
     cfg = _cfg()
@@ -3093,9 +3338,7 @@ async def config_get(request: Request, _auth=Depends(require_auth)):
             "path": str(CONFIG_PATH),
             "restart_keys": list(gw_settings.RESTART_KEYS),
             "warnings": validate_warnings(cfg),
-            "route_warnings": cfg.validate_routes(),
             "model_ids": [m["id"] for m in cfg.all_models()],
-            "route_names": list(cfg.routes.keys()),
             "model_types": list(gw_settings.MODEL_TYPES),
             "media_keys": list(gw_settings.MEDIA_KEYS),
             "mtime": _config_mtime(),
@@ -3138,8 +3381,8 @@ async def config_put(request: Request, _auth=Depends(require_auth)):
         restart = gw_settings.restart_keys_changed(old_cfg, new_cfg)
         await _apply_config(new_cfg, source=f"页面保存YAML（{request.state.account}）")
         _state["mtime"] = _config_mtime()
-        log.warning("配置已由 %s 通过管理页面以 YAML 原文保存并生效（%d 供应商 / %d 路由）",
-                    request.state.account, len(new_cfg.providers), len(new_cfg.routes))
+        log.warning("配置已由 %s 通过管理页面以 YAML 原文保存并生效（%d 供应商）",
+                    request.state.account, len(new_cfg.providers))
         return {"status": "ok", "applied": True, "restart_required": restart,
                 "warnings": warns, "path": info.get("path", str(CONFIG_PATH)),
                 "backup": info.get("backup", ""), "yaml": text, "mtime": _state["mtime"]}
@@ -3158,8 +3401,8 @@ async def config_put(request: Request, _auth=Depends(require_auth)):
     restart = gw_settings.restart_keys_changed(old_cfg, new_cfg)
     await _apply_config(new_cfg, source=f"页面保存（{request.state.account}）")
     _state["mtime"] = _config_mtime()
-    log.warning("配置已由 %s 通过管理页面保存并生效（%d 供应商 / %d 路由 / %d 字节）",
-                request.state.account, len(new_cfg.providers), len(new_cfg.routes), info.get("bytes", 0))
+    log.warning("配置已由 %s 通过管理页面保存并生效（%d 供应商 / %d 字节）",
+                request.state.account, len(new_cfg.providers), info.get("bytes", 0))
     return {
         "status": "ok",
         "applied": True,
@@ -3199,7 +3442,7 @@ async def health(request: Request, _auth=Depends(require_auth_or_open)):
         "uptime_seconds": snap.get("uptime_seconds"),
         "in_flight": snap.get("in_flight", 0),
         "in_flight_peak": snap.get("in_flight_peak", 0),
-        "fallback_total": snap.get("fallback_total", 0),
+        # 第二十七轮: fallback_total 已随路由/fallback 链删除（这里原本恒为 0 的死字段）
         "tokens": snap.get("tokens", {}),
         "providers": {
             pkey: {
@@ -3213,7 +3456,6 @@ async def health(request: Request, _auth=Depends(require_auth_or_open)):
             }
             for pkey, pconfig in cfg.providers.items()
         },
-        "routes": list(cfg.routes.keys()),
         "models": model_health,
     }
 

@@ -104,15 +104,12 @@
             </div>
 
             <div v-for="msg in messages" :key="msg.id" class="msg" :class="msg.role === 'user' ? 'me' : 'ai'">
-              <!-- 助手：降级/服务信息 -->
+              <!-- 助手：服务信息（第二十七轮起没有"降级"这回事 —— 路由别名已删除） -->
               <div v-if="msg.role === 'assistant' && msg.meta" class="resp-meta">
-                <el-tag size="small" :type="msg.meta.fallback ? 'warning' : 'success'" effect="light">
-                  <template v-if="msg.meta.fallback">{{ t('chat.fallback', { provider: msg.meta.provider }) }}</template><template v-else>{{ t('chat.servedBy', { provider: msg.meta.provider }) }}</template>
+                <el-tag size="small" type="success" effect="light">
+                  {{ t('chat.servedBy', { provider: msg.meta.provider }) }}
                 </el-tag>
-                <span class="meta-txt">
-                  <template v-if="msg.meta.fallback">{{ t('chat.requestedTo', { req: msg.meta.requested, served: msg.meta.served }) }}</template>
-                  <template v-else>{{ msg.meta.served }}</template>
-                </span>
+                <span class="meta-txt">{{ msg.meta.served }}</span>
                 <span v-if="msg.usage || msg.cost != null" class="meta-txt">
                   · {{ msg.cost != null ? `¥${msg.cost}` : '' }}
                   <template v-if="msg.usage">{{ tokensText(msg.usage) }}</template>
@@ -199,15 +196,7 @@
             </el-tooltip>
             <input ref="fileEl" type="file" accept="image/*" multiple class="hide-file" @change="onFiles" />
 
-            <el-select v-model="params.model" class="model-sel" size="small" :disabled="streaming" filterable :placeholder="t('chat.routeGroup')">
-              <el-option-group :label="t('chat.routeGroup')">
-                <el-option v-for="r in routes" :key="r.id" :value="r.id" :label="chainLabel(r)">
-                  <span class="opt">
-                    <span>{{ chainLabel(r) }}</span>
-                    <Icon v-if="r.vision" name="eye" :size="13" />
-                  </span>
-                </el-option>
-              </el-option-group>
+            <el-select v-model="params.model" class="model-sel" size="small" :disabled="streaming" filterable :placeholder="t('chat.pickModel')">
               <el-option-group :label="t('chat.textModels')">
                 <el-option v-for="m in textModels" :key="m.id" :value="m.id" :label="modelLabel(m)">
                   <span class="opt">
@@ -289,36 +278,36 @@ const router = useRouter()
 const { t } = useI18n()
 
 // ── 模型选项 ──
-const routes = ref<any[]>([])
+// 第二十七轮: 路由别名（wjd）功能已整体删除 —— /v1/models 里只剩真实模型，
+//   调用方选哪个模型就是哪个（网关不再"自动挑最快模型"）。
 const textModels = ref<any[]>([])
 async function loadModels() {
   try {
     const j = await api('/v1/models')
     const data: any[] = j.data || []
-    routes.value = data.filter((x) => x.type === 'route')
-    textModels.value = data.filter((x) => x.type !== 'route')
+    textModels.value = data.filter((x) => x.type !== 'image' && x.type !== 'video')
+    // 默认模型：优先 agnes-3.0-flash（旗舰），否则用列表第一个。
+    //   同时兜住"本地存着旧模型 id（比如已删除的 wjd）"的情况 —— 认不出来就换默认，
+    //   免得下拉框空着、发出去却被网关 400。
+    if (!textModels.value.some((m) => m.id === params.model)) {
+      const def = textModels.value.find((m) => m.id === 'agnes-3.0-flash')
+      params.model = def ? def.id : (textModels.value[0]?.id || '')
+    }
   } catch (e: any) {
     if (e && e.status === 401) { router.push('/login'); return }
     ElMessage.error(t('chat.loadModelsErr', { msg: (e && e.message) || e }))
   }
 }
-function chainLabel(r: any) {
-  const chain = (r.models || []).join(' → ')
-  // 括号样式（全角/半角）也交给 i18n：英文里用半角更自然
-  return t('chat.chainLabel', { id: r.id, chain: chain || t('chat.emptyChain') })
-}
 
 // ── 视觉能力（第十三轮）──
 // 网关 /v1/models 会回 vision 字段（Agnes 3.0 Flash = true，其余文本模型默认 false）。
-// 带图请求走路由别名时网关会把视觉模型排到链首；选了**不支持视觉的真实模型**时
-// 这里提前告警并提供一键切换，避免"发了图但模型根本没看"。
+// 第二十七轮: 路由链删除后网关不再"把视觉模型排到链首" —— 选了不支持视觉的模型时，
+//   这里提前告警并提供一键切换，避免"发了图但模型根本没看"。
 const visionModels = computed(() =>
   textModels.value.filter((m) => m.vision).map((m) => m.id))
 const visionOk = computed(() => {
-  const m = routes.value.find((r) => r.id === params.model)
-  if (m) return !!m.vision || !!(m.models || []).some((id: string) => visionModels.value.includes(id))
-  const t2 = textModels.value.find((x) => x.id === params.model)
-  return !!t2?.vision
+  const m = textModels.value.find((x) => x.id === params.model)
+  return !!m?.vision
 })
 const firstVisionModel = computed(() => visionModels.value[0] || '')
 function useVisionModel() {
@@ -330,7 +319,8 @@ function modelLabel(m: any) {
 
 // ── 参数与状态 ──
 const params = reactive({
-  model: 'wjd',
+  // 空串 = 还没拿到模型列表；loadModels() 里填入默认模型（第二十七轮: 不再默认 wjd）
+  model: '',
   temperature: 0.7,
   top_p: 1,
   max_tokens: null as number | null,
@@ -654,12 +644,11 @@ async function runOnce(input: string) {
     }
     reply.usage = j?.usage || undefined
     reply.cost = j?.estimated_cost_cny ?? undefined
-    if (j?.route || j?.provider) {
+    if (j?.provider || j?.served_model) {
       reply.meta = {
         served: j.served_model || j.model || params.model,
         provider: j.provider_name || j.provider,
         requested: j.model || params.model,
-        fallback: !!(j.route && j.route.fallback_used),
       }
     }
   } catch (e: any) {
@@ -687,7 +676,6 @@ async function runStream(_input: string) {
         served: chunk.served_model || chunk.model || params.model,
         provider: chunk.provider_name || chunk.provider,
         requested: chunk.model || params.model,
-        fallback: !!(chunk.route && chunk.route.fallback_used),
       }
     }
     if (chunk.usage && !chunk.choices?.length) {

@@ -85,7 +85,6 @@ def _login_admin_session(client=None):
     return r.json()["access_token"]
 
 
-
 # ── 配置加载 ──
 def test_load_config_providers():
     cfg = load_config(CONFIG)
@@ -95,25 +94,19 @@ def test_load_config_providers():
 
 
 def test_load_config_routes():
+    """第二十七轮（老板 2026-09-18 决策）: **路由别名 / fallback 链功能已整体删除**。
+
+    为什么删：三线直传落地后「入站格式 = 出站格式」，模型 id 必须与协议线一一对应；
+    再套一层"自动挑最快模型"的别名，会把调用方选定的格式/能力（视觉、工具、协议线）
+    悄悄换掉。现在调用方直接填真实模型 id，网关不再替谁做主。
+    这里同时证明：配置对象上已经没有路由引擎的任何入口，旧配置里的 routes 段会被忽略
+    （见 test_legacy_routes_section_is_ignored）。
+    """
     cfg = load_config(CONFIG)
-    assert "wjd" in cfg.routes
-    # wjd 链路 = 全部文本模型（20 个：火山 + Agnes×2 + OpenCode Go×17）
-    assert len(cfg.routes["wjd"].models) == 20
-    assert cfg.routes["wjd"].timeout == 60
-    assert cfg.routes["wjd"].retry == 1
+    for attr in ("routes", "find_route", "all_routes", "validate_routes"):
+        assert not hasattr(cfg, attr), f"路由引擎已删除，配置对象不该再有 {attr}"
 
 
-def test_validate_routes_all_valid():
-    cfg = load_config(CONFIG)
-    assert cfg.validate_routes() == []  # 全部模型 ID 都存在
-
-
-def test_validate_routes_detects_missing():
-    cfg = load_config(CONFIG)
-    from app.config import RouteInfo
-    cfg.routes["bad"] = RouteInfo(name="bad", models=["no-such-model"])
-    warnings = cfg.validate_routes()
-    assert any("bad" in w for w in warnings)
 
 
 def test_pricing_estimate():
@@ -238,12 +231,18 @@ def test_app_endpoints():
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
-    assert "wjd" in r.json().get("routes", [])
+    # 第二十七轮: 路由功能整体删除 → / 里不再有 routes 字段（不是"空列表"）
+    assert "routes" not in r.json(), r.json()
 
     r2 = client.get("/v1/models")
     assert r2.status_code == 200
     ids = [x["id"] for x in r2.json()["data"]]
-    assert "wjd" in ids
+    assert "wjd" not in ids
+    assert "hy3" in ids
+    # 每个模型都带 protocols（三线直传的能力声明）
+    byid2 = {x["id"]: x for x in r2.json()["data"]}
+    assert byid2["hy3"]["protocols"] == ["chat/completions"]
+    assert byid2["grok-4.6"]["protocols"] == ["responses"]
 
 
 # ── 根路径导航 ──
@@ -255,7 +254,10 @@ def test_root_navigation():
     assert r.status_code == 200
     j = r.json()
     assert "endpoints" in j and "chat" in j["endpoints"]
-    assert "wjd" in j.get("routes", [])
+    # 第二十七轮: 路由功能整体删除 → 不再有 routes 字段；三条协议线出现在 endpoints 里
+    assert "routes" not in j, j
+    # endpoints 的键是端点名（值为"POST /v1/messages（…）"这类说明），不是路径
+    assert "messages" in j["endpoints"] and "responses" in j["endpoints"]
 
 
 # ── 根路径浏览器跳转 + CSP 放行同源前端 ──
@@ -293,7 +295,8 @@ def test_health_board():
     assert r.status_code == 200
     j = r.json()
     # 看板字段
-    assert "providers" in j and "routes" in j and "models" in j
+    assert "providers" in j and "models" in j
+    assert "routes" not in j, "路由功能已删除，/health 不该再有 routes"  # 第二十七轮
     assert "circuit" in j["providers"]["agnes"]
 
 
@@ -306,39 +309,32 @@ def test_resolve_media_model_direct():
     assert res is not None and res[4] == "agnes-image-2.5-flash"
 
 
-def test_resolve_media_model_via_route_alias():
+def test_resolve_media_model_rejects_alias():
+    """第二十七轮: 路由别名已删除 —— 媒体端点只认真实模型 id，别名一律解析不到。"""
     import app.main as m
     cfg = m._cfg()
-    # wjd 路由链里第 2 个是 agnes-3.0-flash(text)，但 image 模型不在这条链 → 走别名找不到 image
-    # 单独构造一条指向 image 的路由来验证别名解析逻辑
-    from app.config import RouteInfo
-    cfg.routes["img"] = RouteInfo(name="img", models=["agnes-3.0-flash", "agnes-image-2.5-flash"])
-    res = m._resolve_media_model(cfg, "img", "image")
-    assert res is not None and res[4] == "agnes-image-2.5-flash"
+    assert m._resolve_media_model(cfg, "agnes-image-2.5-flash", "image") is not None
+    for alias in ("img", "wjd", "any-alias"):
+        assert m._resolve_media_model(cfg, alias, "image") is None, alias
+
+
 
 
 # ── Bug 1: 三级限流助手（路由级 > 供应商级 > 全局） ──
 def test_effective_rps_priority():
+    """Bug 1（第二十七轮调整）: 限流优先级 = 供应商级 > 全局（路由级随路由功能移除）。"""
     import app.main as m
-    from app.config import RouteInfo
     cfg = m._cfg()
-    # 还原陷阱（新增 OpenCode 供应商后暴露）：这里直接改的是共享 m._cfg() 的
-    # provider，必须用 finally 还原，否则 agnes 限流=9 会污染后续所有真实调用测试
-    # （chat_unknown / batch / streaming fallback 会因 agnes 被限流 9rps 而异常 502）。
-    saved_agnes_rps = cfg.providers["agnes"].rate_limit_rps
-    route = RouteInfo(name="r", rate_limit_rps=5)
+    old = cfg.providers["agnes"].rate_limit_rps
+    cfg.providers["agnes"].rate_limit_rps = 5
     try:
-        # 路由级优先
-        assert m._effective_rps(cfg, route, "agnes") == 5
-        # 无路由 → 全局
-        assert m._effective_rps(cfg, None, "agnes") == cfg.server.rate_limit_rps
-        # 供应商级：给 provider 配 rps
-        cfg.providers["agnes"].rate_limit_rps = 9
-        assert m._effective_rps(cfg, None, "agnes") == 9
-        # 路由级仍优先于供应商级
-        assert m._effective_rps(cfg, route, "agnes") == 5
+        assert m._effective_rps(cfg, "agnes") == 5, "供应商级应优先于全局"
+        assert m._effective_rps(cfg, None) == cfg.server.rate_limit_rps
+        assert m._effective_rps(cfg, "no-such-provider") == cfg.server.rate_limit_rps
     finally:
-        cfg.providers["agnes"].rate_limit_rps = saved_agnes_rps
+        cfg.providers["agnes"].rate_limit_rps = old
+
+
 
 
 # ── Bug 2: 限流桶 LRU 清理 ──
@@ -365,20 +361,6 @@ def test_circuit_window_by_count():
     cb.record(False)  # 窗口内失败 3 次 → 达阈值
     assert cb.status()["state"] == "open"
     assert cb.status()["window_size"] == 5  # status 暴露窗口大小
-
-
-# ── Bug 2: route.timeout 对链首也生效 ──
-def test_route_timeout_applies_to_first():
-    import app.main as m
-    from app.config import RouteInfo
-    cfg = m._cfg()
-    # 构造一条 timeout=5 的路由，验证 _get_adapter 对链首用的 timeout 是 5 而非 server.timeout
-    cfg.routes["to"] = RouteInfo(name="to", models=["agnes-3.0-flash"], timeout=5)
-    chain, route = m._route_chain(cfg, "to")
-    # 复现 main 里的超时选择逻辑（链首）
-    assert chain[0]
-    timeout = route.timeout if (route and route.timeout) else cfg.server.timeout
-    assert timeout == 5, f"链首应使用 route.timeout=5，实际 {timeout}"
 
 
 # ── Bug 1: 并发 get_client 只建一个 client ──
@@ -425,15 +407,19 @@ def test_adapter_image_default_size():
 
 # ── 第二轮修复：验证新增/修复行为 ──────────────────────
 
-def test_record_call_updates_route_metrics():
-    """Bug 8: route 维度的 ok/fail 现在会被记录（此前恒为 0）。"""
+def test_record_call_buckets():
+    """Bug 8 → 第二十七轮调整: 指标只按 模型/供应商 记账（路由维度随路由功能删除）。"""
     from app.metrics import Metrics
     mtr = Metrics()
-    mtr.record_call("modelX", "provX", ok=True, route="routeX")
-    mtr.record_call("modelX", "provX", ok=False, route="routeX")
+    mtr.record_call("modelX", "provX", ok=True)
+    mtr.record_call("modelX", "provX", ok=False)
     snap = mtr.snapshot()
-    assert snap["routes"]["routeX"]["ok"] == 1
-    assert snap["routes"]["routeX"]["fail"] == 1
+    assert snap["calls"]["modelX"] == {"ok": 1, "fail": 1}
+    assert snap["providers"]["provX"] == {"ok": 1, "fail": 1}
+    assert "routes" not in snap and "fallback_total" not in snap, snap
+    assert not hasattr(mtr, "record_fallback"), "fallback 计数随路由功能删除"
+
+
 
 
 def test_snapshot_no_lock_escape():
@@ -520,7 +506,8 @@ def test_body_size_limit_413():
     try:
         client = TestClient(m.app)
         r = client.post("/v1/chat/completions",
-                        json={"model": "wjd", "messages": [{"role": "user", "content": "hello world"}]})
+                        json={"model": "agnes-3.0-flash",
+                              "messages": [{"role": "user", "content": "hello world"}]})
         assert r.status_code == 413, f"期望 413，实际 {r.status_code}"
     finally:
         cfg.server.max_body_size = old
@@ -738,11 +725,12 @@ def test_log_response_falls_back_to_reasoning():
     assert m._stream_log_text([], []) == ""
 
 
-def test_streaming_all_models_unresolvable_returns_error_frame():
-    """本轮回归: 链上模型全部在 _get_adapter 阶段失败时，流式仍要正常收尾发错误帧。
+def test_streaming_unresolvable_model_sends_error_frame():
+    """回归: 模型在 _get_adapter 阶段就被拒时，流式仍要正常收尾发错误帧（不是 500）。
 
     累加器 resp_parts/reason_parts 若只在循环体内 try 里初始化，这条路径会 NameError
-    → SSE 变 500，客户端拿不到 {"error": ...} 帧。
+    → SSE 变 500，客户端拿不到 {"error": ...} 帧。第二十七轮: 只剩一个模型，没有
+    "换下一个" 的余地，错误帧就是最终答复。
     """
     from fastapi.testclient import TestClient
     from app.routing import ModelNotFoundError
@@ -758,14 +746,16 @@ def test_streaming_all_models_unresolvable_returns_error_frame():
         client = TestClient(m.app)
         r = client.post("/v1/chat/completions", json={
             "model": "agnes-3.0-flash",
-            "messages": [{"role": "user", "content": "全失败流式"}],
+            "messages": [{"role": "user", "content": "解析失败流式"}],
             "stream": True,
         })
         assert r.status_code == 200, r.status_code
-        assert "所有模型调用失败" in r.text, r.text
+        assert "未知模型" in r.text, r.text
         assert "[DONE]" in r.text, r.text
     finally:
         m._get_adapter = orig
+
+
 
 
 def test_batch_endpoint_concurrent():
@@ -788,7 +778,7 @@ def test_batch_endpoint_concurrent():
     try:
         client = TestClient(m.app)
         r = client.post("/v1/chat/completions/batch", json={
-            "model": "wjd",
+            "model": "agnes-3.0-flash",
             "items": [
                 {"messages": [{"role": "user", "content": "a"}]},
                 {"messages": [{"role": "user", "content": "b"}]},
@@ -905,7 +895,7 @@ def test_validation_error_openai_format():
     from fastapi.testclient import TestClient
     import app.main as m
     c = TestClient(m.app)
-    r = c.post("/v1/chat/completions", json={"model": "wjd"})  # 缺 messages
+    r = c.post("/v1/chat/completions", json={"model": "agnes-3.0-flash"})  # 缺 messages
     assert r.status_code == 422, r.status_code
     body = r.json()
     assert "error" in body, body
@@ -968,7 +958,6 @@ def test_circuit_reset_when_disabled_on_reload():
     assert cb.allow() is True
 
 
-
 # ═════════════════════════════════════════════════════════════
 # 第四轮修复的回归测试
 # ═════════════════════════════════════════════════════════════
@@ -992,54 +981,41 @@ class _Isolated:
         return False
 
 
-def test_streaming_fallback_metric_semantics():
-    """流式：全失败不计 fallback_total；成功降级才计（此前恰好记反）。"""
+def test_streaming_failure_metrics_and_no_fallback_counter():
+    """第二十七轮: 流式失败如实记 ok=False + 耗时，且不再有 fallback 计数（路由已删）。
+
+    旧语义（成功降级才计 fallback_total）随路由链一起消失：链没了，"降级"这个动作不存在。
+    """
     from fastapi.testclient import TestClient
     import app.main as m
 
-    # 隔离块里 metrics 被重置（无延迟样本）→ 路由按「配置顺序」生效（第十一轮 #4 的
-    # 速度排序在无数据时是 no-op）。这里取配置顺序，与处理器实际尝试顺序一致。
-    chain = list(m._cfg().find_route("wjd").models)
-    assert len(chain) >= 2, chain
-
-    class FailFirst:
-        def __init__(self, fail_models):
-            self.fail_models = fail_models
-
+    class FailStream:
         async def chat_stream(self, model=None, messages=None, **kw):
-            if model in self.fail_models:
-                raise RuntimeError("upstream boom")
-            yield {"id": "c1", "choices": [{"index": 0, "delta": {"content": "ok"}}]}
-            yield {"choices": [], "done": True}
+            raise RuntimeError("upstream boom")
+            yield  # pragma: no cover — 让它是个生成器
 
     orig = m._get_adapter
     try:
-        client = TestClient(m.app)
-
-        # ① 全部失败 → fallback_total 不应变化
         with _Isolated() as mm:
             mm._get_adapter = lambda model_id, timeout=None, cfg=None: (
-                FailFirst(set(chain)), "agnes", mm._cfg().providers["agnes"])
-            with client.stream("POST", "/v1/chat/completions", json={
-                    "model": "wjd", "messages": [{"role": "user", "content": "hi"}],
-                    "stream": True}) as r:
-                "".join(r.iter_text())
-            assert mm._metrics.snapshot()["fallback_total"] == 0, "全失败不应计入 fallback_total"
-
-        # ② 首个模型失败、后续成功 → fallback_total +1
-        with _Isolated() as mm:
-            mm._get_adapter = lambda model_id, timeout=None, cfg=None: (
-                FailFirst({chain[0]}), "agnes", mm._cfg().providers["agnes"])
-            with client.stream("POST", "/v1/chat/completions", json={
-                    "model": "wjd", "messages": [{"role": "user", "content": "hi"}],
-                    "stream": True}) as r:
-                body = "".join(r.iter_text())
+                FailStream(), "agnes", mm._cfg().providers["agnes"])
+            client = TestClient(mm.app)
+            r = client.post("/v1/chat/completions", json={
+                "model": "agnes-3.0-flash",
+                "messages": [{"role": "user", "content": "流式失败"}],
+                "stream": True,
+            })
+            assert r.status_code == 200, r.text
+            assert "upstream boom" in r.text, r.text
+            assert "[DONE]" in r.text, r.text
             snap = mm._metrics.snapshot()
-            assert snap["fallback_total"] == 1, snap["fallback_total"]
-            assert snap["routes"]["wjd"]["fallback"] == 1, snap["routes"]
-            assert chain[1] in body, body
+            assert snap["calls"]["agnes-3.0-flash"]["fail"] == 1, snap["calls"]
+            assert "fallback_total" not in snap and "routes" not in snap, snap
+            assert snap["latency"].get("agnes-3.0-flash"), "失败也要记耗时（Bug 5）"
     finally:
         m._get_adapter = orig
+
+
 
 
 def test_chat_unknown_and_standard_params_passthrough():
@@ -1097,7 +1073,7 @@ def test_batch_extra_and_limits():
                 Capture(), "agnes", mm._cfg().providers["agnes"])
             cap = mm._cfg().server.batch_max_items
             r = client.post("/v1/chat/completions/batch", json={
-                "model": "wjd",
+                "model": "agnes-3.0-flash",
                 "items": [{"messages": [{"role": "user", "content": "a"}]}],
                 "extra": {"chat_template_kwargs": {"enable_thinking": False}},
                 "max_concurrency": 9999,
@@ -1107,7 +1083,7 @@ def test_batch_extra_and_limits():
             assert seen and seen[0]["chat_template_kwargs"] == {"enable_thinking": False}, seen
 
             r2 = client.post("/v1/chat/completions/batch", json={
-                "model": "wjd",
+                "model": "agnes-3.0-flash",
                 "items": [{"messages": [{"role": "user", "content": "a"}]}] * (cap + 1),
             })
             assert r2.status_code == 400, r2.text
@@ -1298,25 +1274,21 @@ def test_validate_warnings_duplicate_model_ids():
     assert any("agnes-3.0-flash" in w for w in warns), warns
 
 
-def test_validate_warnings_missing_key_bad_route():
-    """新增启动告警：缺 Key 供应商、路由引用未定义模型（鉴权已页面化，无弱 key 告警）。"""
-    from app.config import (validate_warnings, ProviderConfig, ModelInfo, AuthConfig, RouteInfo)
+def test_validate_warnings_missing_key():
+    """启动告警：缺 Key 供应商（鉴权已页面化 → 无弱 key 告警；路由相关告警随路由功能删除）。"""
+    from app.config import validate_warnings, ProviderConfig, ModelInfo, AuthConfig
     cfg = load_config(CONFIG)
-    # 1) 供应商无 Key → 告警
     cfg.providers["nokey"] = ProviderConfig(
         key="nokey", name="N", base_url="http://x", auth=AuthConfig(),
         models=[ModelInfo(id="nokey-m", type="text")])
-    # 2) 路由引用不存在模型 → 告警
-    cfg.routes["typo"] = RouteInfo(name="typo", models=["no-such-model"])
     warns = validate_warnings(cfg)
     assert any("nokey" in w and "API Key" in w for w in warns), warns
-    assert any("no-such-model" in w and "未定义" in w for w in warns), warns
     # 修好后不再报（避免长鸣）
     cfg.providers["nokey"].auth.token = "some-valid-token"
-    cfg.routes.pop("typo")
     warns2 = validate_warnings(cfg)
     assert not any("API Key" in w and "nokey" in w for w in warns2), warns2
-    assert not any("未定义" in w for w in warns2), warns2
+
+
 
 
 def test_prometheus_label_escaping_and_p95():
@@ -1489,7 +1461,7 @@ def test_extra_cannot_override_core_payload_keys():
     from app.adapters.openai_compat import OpenAICompatAdapter
 
     req = ChatRequest.model_validate({
-        "model": "wjd",
+        "model": "agnes-3.0-flash",
         "messages": [{"role": "user", "content": "hi"}],
         "stream": False,
         "extra": {"model": "EVIL-EXPENSIVE", "messages": [], "stream": True, "top_k": 7},
@@ -1629,8 +1601,11 @@ def test_callback_url_private_rejected_but_public_ok():
     assert r.status_code == 400 and "内网" in r.json()["error"]["message"], r.text
 
 
-def test_all_failed_route_error_has_message_key():
-    """P1: 全失败 502 的错误体必须是 error.message（此前是 error.error）。"""
+def test_all_failed_model_error_has_message_key():
+    """P1: 调用失败 502 的错误体必须是 error.message（此前是 error.error）。
+
+    第二十七轮: 路由/fallback 链删除后，这里就是单模型失败的形状。
+    """
     from fastapi.testclient import TestClient
     import app.main as m
 
@@ -1649,13 +1624,17 @@ def test_all_failed_route_error_has_message_key():
                                   "messages": [{"role": "user", "content": "x"}]})
             assert r.status_code == 502, r.text
             err = r.json()["error"]
-            assert err.get("message") and "全部模型调用失败" in err["message"], err
+            assert err.get("message") and "调用失败" in err["message"], err
+            assert err["errors"] == [{"model": "agnes-3.0-flash",
+                                      "error": "upstream down"}], err
     finally:
         m._get_adapter = orig
 
 
+
+
 def test_models_endpoint_objects_are_all_model():
-    """P2: /v1/models 的 data 里 object 必须统一为 "model"（此前混入 object="route"）。"""
+    """P2: /v1/models 的 data 里 object 必须统一为 "model"（第二十七轮: route 条目已删除）。"""
     from fastapi.testclient import TestClient
     import app.main as m
     client = TestClient(m.app)
@@ -1804,37 +1783,34 @@ def test_video_poll_404_does_not_open_media_circuit():
         m._get_adapter = orig
 
 
-def test_route_without_timeout_loads_and_negative_rejected():
-    """回归（第七轮自查：修复自身的自伤 bug）：路由未写 timeout 必须能正常加载。"""
-    import tempfile, os, re
-    from app.config import ConfigError as CE
-    base = open(CONFIG, encoding='utf-8').read()
-    # 去掉 routes 段里可能存在的 timeout 行
-    stripped = re.sub(r"^(\s*)timeout:\s*\d+\s*$", r"\1", base, flags=re.M)
-    for text, should_fail in [(stripped, False), (stripped + "\n", False)]:
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as f:
-            f.write(text); p = f.name
-        try:
-            try:
-                cfg = load_config(p); ok = True
-            except CE as e:
-                ok = False; err = e
-            assert ok == (not should_fail), f"{err if not ok else ''}"
-            if ok:
-                assert cfg.all_routes(), "路由应已加载"
-        finally:
-            os.unlink(p)
-    # 负数 timeout 仍应报错
-    bad = re.sub(r"^(\s*)timeout:\s*\d+\s*$", r"\g<1>timeout: -5", base, flags=re.M)
+def test_legacy_routes_section_is_ignored():
+    """第二十七轮: 老配置里残留的 routes 段不再解析 —— 不报错、正常加载、直接忽略。
+
+    为什么"忽略"而不是"报 ConfigError"：路由功能是**整体删除**，旧配置（备份恢复、
+    别的机器上的 gateway.yaml）不该因为带了一段历史配置就起不来。日志里有 warning 可查。
+    """
+    import tempfile
+    import os
+    base = open(CONFIG, encoding="utf-8").read()
+    legacy = base + """
+routes:
+  wjd:
+    models: [agnes-3.0-flash, hy3]
+    timeout: 60
+    retry: 2
+    rate_limit_rps: 5
+"""
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as f:
-        f.write(bad); p = f.name
+        f.write(legacy)
+        p = f.name
     try:
-        try:
-            load_config(p); raise AssertionError("负数 timeout 应报 ConfigError")
-        except CE:
-            pass
+        cfg = load_config(p)
+        assert not hasattr(cfg, "routes"), "routes 段应被忽略，不再进配置对象"
+        assert cfg.providers and cfg.server, "其余配置照常加载"
     finally:
         os.unlink(p)
+
+
 
 
 # ═══════════ 第七轮（回归审计发现）═══════════
@@ -1846,7 +1822,7 @@ def test_standard_passthrough_params_reach_final_payload():
     keys = ("n", "seed", "user", "response_format", "presence_penalty",
             "frequency_penalty", "logprobs", "top_logprobs", "parallel_tool_calls")
     req = ChatRequest.model_validate({
-        "model": "wjd", "messages": [{"role": "user", "content": "x"}],
+        "model": "agnes-3.0-flash", "messages": [{"role": "user", "content": "x"}],
         "n": 2, "seed": 42, "user": "u1", "response_format": {"type": "json_object"},
         "presence_penalty": 0.5, "frequency_penalty": 0.2, "logprobs": True,
         "top_logprobs": 3, "parallel_tool_calls": False,
@@ -2020,10 +1996,9 @@ def test_auth_fail_401_then_429_rate_limited():
         m._cfg().server.auth_fail_limit_per_min = old_limit
         m._AUTH_FAILS.clear()
 
-def test_retry_direct_model_uses_server_retry_route_uses_own():
-    """直接模型 id 重试用 server.retry；路由别名用自身的 route.retry（互不影响）。"""
+def test_retry_uses_server_retry():
+    """直接模型 id 的重试次数 = server.retry（第二十七轮: 路由别名已删，无 route.retry）。"""
     from fastapi.testclient import TestClient
-    from app.config import RouteInfo
     import app.main as m
     cfg = m._cfg()
     calls = []
@@ -2037,28 +2012,18 @@ def test_retry_direct_model_uses_server_retry_route_uses_own():
     m._get_adapter = lambda model_id, timeout=None, cfg=None: (
         CountingAdapter(), "agnes", cfg.providers["agnes"])
     old_srv = cfg.server.retry
-    had = "r3_test" in cfg.routes
-    cfg.routes["r3_test"] = RouteInfo(name="r3_test", retry=2, models=["agnes-3.0-flash"])
     cfg.server.retry = 3
     try:
         client = TestClient(m.app)
-        # 直接模型 → server.retry=3
-        calls.clear()
         r = client.post("/v1/chat/completions", json={
             "model": "agnes-3.0-flash", "messages": [{"role": "user", "content": "x"}]})
         assert r.status_code == 502, r.status_code
-        assert len(calls) == 3, f"直接模型应重试 server.retry=3 次, 实际 {len(calls)}: {calls}"
-        # 路由别名 → 自身 route.retry=2
-        calls.clear()
-        r2 = client.post("/v1/chat/completions", json={
-            "model": "r3_test", "messages": [{"role": "user", "content": "x"}]})
-        assert r2.status_code == 502, r2.status_code
-        assert len(calls) == 2, f"路由应重试 route.retry=2 次, 实际 {len(calls)}: {calls}"
+        assert len(calls) == 3, f"应重试 server.retry=3 次, 实际 {len(calls)}: {calls}"
     finally:
         m._get_adapter = orig
         cfg.server.retry = old_srv
-        if not had:
-            cfg.routes.pop("r3_test", None)
+
+
 
 # ═══════════ 前端登录会话（M1）═══════════
 def test_auth_login_account_password():
@@ -2297,48 +2262,6 @@ def test_logs_own_only_and_admin_per_user_view():
     client.delete("/auth/users/bob2", headers=ah)
 
 
-def test_wjd_route_orders_by_availability_and_speed():
-    """第十一轮 #4：路由别名按「可用 + 速度」排序，不再走静态优先级。"""
-    import os
-    from app.config import RouteInfo
-    from app.circuit import CircuitBreakerRegistry
-    import app.main as m
-    saved = {k: os.environ.get(k) for k in ("AGNES_API_KEY", "VOLC_API_KEY")}
-    for k in saved:
-        os.environ[k] = "test-token"
-    orig_m, orig_c = m._metrics, m._circuits
-    m._metrics = m.Metrics(enabled=True)
-    m._circuits = CircuitBreakerRegistry({"enabled": True, "failure_threshold": 3,
-                                          "cooldown": 60, "window": 10})
-    cfg = m._cfg()
-    cfg.routes["wjd_speedtest"] = RouteInfo(
-        name="wjd_speedtest",
-        models=["ark-code-latest", "agnes-3.0-flash"],   # 配置优先级 volc>agnes
-        retry=1)
-    try:
-        # 冷启动：没有任何延迟样本 → 保持配置顺序
-        assert m._route_chain(cfg, "wjd_speedtest")[0] == [
-            "ark-code-latest", "agnes-3.0-flash"]
-        # 喂速度：agnes 快、volc 慢 → 完全重排
-        m._metrics.record_latency("agnes-3.0-flash", 0.5)
-        m._metrics.record_latency("ark-code-latest", 4.0)
-        assert m._route_chain(cfg, "wjd_speedtest")[0] == [
-            "agnes-3.0-flash", "ark-code-latest"]
-        # 最快那个供应商熔断开 → 排到最后，次快上位（未测速的可用模型才用探测位兜底）
-        m._circuits.get("agnes")._state = "open"
-        chain2 = m._route_chain(cfg, "wjd_speedtest")[0]
-        assert chain2[0] == "ark-code-latest", chain2
-        assert chain2[-1] == "agnes-3.0-flash", chain2
-    finally:
-        m._metrics, m._circuits = orig_m, orig_c
-        cfg.routes.pop("wjd_speedtest", None)
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-
-
 def test_users_file_saved_private():
     """users.json 里是密码/Key 哈希 → 落盘权限必须是 600（不进 git 也只是第一道）。"""
     import os
@@ -2533,16 +2456,12 @@ def test_models_expose_vision_capability():
     assert byid["agnes-3.0-flash"]["vision"] is True, "Agnes 3.0 Flash 文档写了图像输入"
     assert byid["agnes-image-2.5-flash"]["vision"] is False
     assert byid["ark-code-latest"]["vision"] is False
-    assert byid["wjd"]["vision"] is True, "路由链上有视觉模型就该标 true"
-
-
-def test_vision_first_reorders_only_when_vision_exists():
-    """带图请求：链上有视觉模型才重排（提到最前），一个都没有就别动（不掩盖能力缺失）。"""
-    import app.main as m
-    cfg = load_config(CONFIG)
-    assert m._vision_first(cfg, ["ark-code-latest", "agnes-3.0-flash"]) == \
-        ["agnes-3.0-flash", "ark-code-latest"], "视觉模型提到最前，其余保持相对顺序"
-    assert m._vision_first(cfg, ["ark-code-latest"]) == ["ark-code-latest"]
+    # 第二十七轮: 路由别名已撤（/v1/models 不再有 type=route 的 wjd 条目），
+    #   改为断言每个模型的**协议线**标签（调用方据此决定发到哪条线）
+    assert "wjd" not in byid, "撤掉的路由别名不该还出现在模型列表里"
+    assert byid["hy3"]["protocols"] == ["chat/completions"]
+    assert byid["grok-4.6"]["protocols"] == ["responses"]
+    assert byid["deepseek-v4.1-flash"]["protocols"] == ["chat/completions", "messages", "responses"]
 
 
 def test_messages_have_images_detects_vision_blocks():
@@ -2555,43 +2474,6 @@ def test_messages_have_images_detects_vision_blocks():
         {"type": "text", "text": "看图"},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
     ]}]) is True
-
-
-def test_chat_with_images_puts_vision_model_first_on_route():
-    """带图走路由别名 wjd：第一个被尝试的应是视觉模型（否则图被纯文本模型忽略/报错都难自查）。"""
-    from fastapi.testclient import TestClient
-    import app.main as m
-
-    tried: list[str] = []
-
-    class Rec:
-        async def chat(self, model=None, messages=None, **kw):
-            tried.append(model)
-            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
-
-    orig = m._get_adapter
-    try:
-        with _Isolated() as mm:      # 隔离 metrics：没有延迟样本 → 路由按配置顺序（链首 ark-code-latest）
-            mm._get_adapter = lambda model_id, timeout=None, cfg=None: (
-                Rec(), "agnes", mm._cfg().providers["agnes"])
-            client = TestClient(mm.app)
-            # ① 纯文本请求先打（此时 metrics 还是冷的）→ 不该被重排，仍按配置顺序
-            r2 = client.post("/v1/chat/completions", json={
-                "model": "wjd", "messages": [{"role": "user", "content": "hi"}]})
-            assert r2.status_code == 200, r2.text
-            assert tried and tried[0] == "ark-code-latest", f"纯文本不应重排，实际 {tried}"
-            # ② 带图请求 → 视觉模型（agnes-3.0-flash）提到链首，压过配置顺序
-            tried.clear()
-            r = client.post("/v1/chat/completions", json={
-                "model": "wjd",
-                "messages": [{"role": "user", "content": [
-                    {"type": "text", "text": "这张图里是什么"},
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
-                ]}]})
-            assert r.status_code == 200, r.text
-            assert tried and tried[0] == "agnes-3.0-flash", f"带图应先试视觉模型，实际 {tried}"
-    finally:
-        m._get_adapter = orig
 
 
 def test_image_n_gt_1_rejected_without_calling_upstream():
@@ -3418,15 +3300,19 @@ def test_config_view_masks_secrets_and_roundtrips():
     from app import settings as S
     cfg = load_config(CONFIG)
     view = S.config_to_view(cfg)
-    assert set(view) == {"providers", "server", "auth", "routes", "circuit",
+    assert set(view) == {"providers", "server", "auth", "circuit",
                          "observability", "pricing", "download"}, set(view)
     # 面板能改的 server 键 = 文件里 server 段的键（少一个都算"配置项漏搬"）
     raw_file = S.read_raw(CONFIG)
     assert set(view["server"]) == set(S._SERVER_KEYS) == set(raw_file["server"]), "server 段有键没搬上面板"
     assert set(view["circuit"]) == set(raw_file["circuit"])
     assert set(view["observability"]) == set(raw_file["observability"])
-    # 路由/供应商：文件里的键面板都得管到（面板允许比文件多带字段，反之不行）
-    assert set(raw_file["routes"]["wjd"]) <= set(view["routes"]["wjd"])
+    # 第二十七轮: 路由功能整体删除 → 面板视图与文件都不该再有 routes 段
+    assert "routes" not in view and "routes" not in raw_file, (view.keys(), raw_file.keys())
+    assert set(view["providers"]["opencode"]["endpoints"]) == set(
+        raw_file["providers"]["opencode"]["endpoints"]), "endpoints 必须一路带到面板"
+    assert view["providers"]["opencode"]["models"][0]["protocols"] == \
+        raw_file["providers"]["opencode"]["models"][0]["protocols"], "protocols 必须带到面板"
     assert set(raw_file["providers"]["agnes"]) <= set(view["providers"]["agnes"])
     assert set(raw_file["providers"]["agnes"]["media"]) <= set(view["providers"]["agnes"]["media"])
     # 密钥：只回报"配没配"，绝不回显内容（面板/浏览器都不该拿到明文）
@@ -3544,11 +3430,13 @@ def test_config_save_applies_without_restart():
         assert body["yaml"].strip(), "应回显文件原文，供页面核对"
         view = body["config"]
 
-        # ① 改一串"每请求读配置"的值：超时/重试/访问日志容量/路由顺序/新增模型
+        # ① 改一串"每请求读配置"的值：超时/重试/访问日志容量/模型协议线/新增模型
+        #   （第二十七轮: 路由别名已撤，改用"模型协议线"验证"改配置立刻生效"）
         view["server"]["timeout"] = 95
         view["server"]["retry"] = 2
         view["observability"]["access_log_maxlen"] = 777
-        view["routes"]["wjd"]["models"] = ["agnes-3.0-flash", "ark-code-latest"]
+        _hy3 = next(x for x in view["providers"]["opencode"]["models"] if x["id"] == "hy3")
+        _hy3["protocols"] = ["chat/completions", "messages"]
         view["providers"]["volc_engine"]["models"].append(
             {"id": "ark-code-mini", "display_name": "迷你", "type": "text", "vision": False})
         view["pricing"]["per_model"]["ark-code-mini"] = {"input": 0.1, "output": 0.2}
@@ -3562,17 +3450,21 @@ def test_config_save_applies_without_restart():
         assert m.config.server.timeout == 95
         assert m.config.server.retry == 2
         assert m.config.observability.access_log_maxlen == 777
-        assert m.config.routes["wjd"].models == ["agnes-3.0-flash", "ark-code-latest"]
+        assert next(x for x in m.config.providers["opencode"].models
+                    if x.id == "hy3").protocols == ["chat/completions", "messages"], \
+            "协议线改动应就地生效（无需重启）"
         assert m.config.find_provider_for_model("ark-code-mini")[0] == "volc_engine"
         assert m._access._max == 777, "访问日志容量应就地调整"
         # 盘上也变了，且旧文件有备份
         on_disk = _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
         assert on_disk["server"]["timeout"] == 95
-        assert on_disk["routes"]["wjd"]["models"] == ["agnes-3.0-flash", "ark-code-latest"]
+        assert next(x for x in on_disk["providers"]["opencode"]["models"]
+                    if x["id"] == "hy3")["protocols"] == ["chat/completions", "messages"]
         assert (P(tmp.name) / "gateway.yaml.bak").exists(), "保存前应备份原文件"
-        # 路由链顺序变更后，/v1/models 立刻跟着变（页面/调用方看到的就是新顺序）
+        # 协议线变更后，/v1/models 立刻跟着变（调用方看到的就是最新能力声明）
         lm = client.get("/v1/models", headers=ah).json()
-        assert [x for x in lm["data"] if x["type"] == "route"][0]["models"][:2] == ["agnes-3.0-flash", "ark-code-latest"]
+        assert next(x for x in lm["data"] if x["id"] == "hy3")["protocols"] == \
+            ["chat/completions", "messages"]
 
         # ② 改"需重启"的键：能保存，但要明确回提示（不能假装已生效）
         assert _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["server"]["port"] == 8808
@@ -3587,8 +3479,10 @@ def test_config_save_applies_without_restart():
         r3 = client.put("/config", headers=ah, json={"config": v3})
         assert r3.status_code == 400 and "server.timeout" in r3.text, r3.text
         v4 = client.get("/config", headers=ah).json()["config"]
-        v4["routes"]["wjd"]["models"] = []
-        assert client.put("/config", headers=ah, json={"config": v4}).status_code == 400, "空模型链应被拦住"
+        # 第二十七轮: 非法协议名必须在写盘前被拦住（否则运行时该模型永远 400）
+        v4["providers"]["opencode"]["models"][0]["protocols"] = ["bogus-format"]
+        assert client.put("/config", headers=ah, json={"config": v4}).status_code == 400, \
+            "非法协议名应被拦住"
         assert _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["server"]["port"] == 8809, "坏值不应写盘"
         assert m.config.server.port == 8809 and m.config.server.timeout == 95, "坏值不应动运行态"
         # ④ 空字符串的 rate_limit 仍解析为"不限"
@@ -3750,13 +3644,13 @@ def test_admin_disabled_flag_in_file_is_autohealed():
 def test_chat_conversation_id_is_internal_not_upstream():
     """方案 A：conversation_id 是网关内部字段，绝不能透传给上游。"""
     from app.models import ChatRequest
-    req = ChatRequest(model="wjd", messages=[{"role": "user", "content": "hi"}],
+    req = ChatRequest(model="agnes-3.0-flash", messages=[{"role": "user", "content": "hi"}],
                       conversation_id="conv-123")
     assert req.conversation_id == "conv-123"
     assert "conversation_id" not in req.upstream_extra(), "内部字段不应透传上游"
     assert "conversation_id" not in req.unknown_fields()
     # 未带时为 None，且同样不透传
-    req2 = ChatRequest(model="wjd", messages=[{"role": "user", "content": "hi"}])
+    req2 = ChatRequest(model="agnes-3.0-flash", messages=[{"role": "user", "content": "hi"}])
     assert req2.conversation_id is None
     assert "conversation_id" not in req2.upstream_extra()
 
@@ -4131,7 +4025,361 @@ def test_settings_panel_preserves_model_params():
         out["providers"]["p"]["models"][0]
 
 
-# 直接运行（非 pytest）
+# 注意：`if __name__ == "__main__"` 运行块**必须留在文件最末尾**（见文件底部）。
+#   第二十七轮收尾时它被夹在文件中间，导致定义在它之后的测试在脚本模式下根本不会被收集
+#   （test_image_request_goes_to_requested_model 就这么白写了一轮）。运行器读的是执行到
+#   该行时已存在的 globals，所以它之前的所有 def 才算数。
+#   同时：pytest 模式不受影响（它自己收集全文件），因此这个坑只在 `python tests/test_gateway.py`
+#   （Makefile 的 make test 走的就是这条）下暴露 —— 两种入口的行为必须一致。
+
+
+def test_image_request_goes_to_requested_model():
+    """第二十七轮: 带图请求不再被重排到"链上的视觉模型" —— 原样打到用户选的模型。
+
+    视觉优先重排随路由链一起删除：只有一个模型时，"重排"等于替用户换模型。
+    这里特意用**没标视觉能力**的模型（deepseek-v4-pro），证明网关不做小动作。
+    """
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    seen = []
+
+    class Cap:
+        async def chat(self, model=None, messages=None, **kw):
+            seen.append(model)
+            return {"id": "x", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    orig = m._get_adapter
+    try:
+        with _Isolated() as mm:
+            mm._get_adapter = lambda model_id, timeout=None, cfg=None: (
+                Cap(), "opencode", mm._cfg().providers["opencode"])
+            client = TestClient(mm.app)
+            r = client.post("/v1/chat/completions", json={
+                "model": "deepseek-v4-pro",
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "看图"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}]}]})
+            assert r.status_code == 200, r.text
+            assert seen == ["deepseek-v4-pro"], seen
+    finally:
+        m._get_adapter = orig
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 三线直传：真发请求的回归测试（2026-09-18 上线后补）
+# ══════════════════════════════════════════════════════════════════════
+# 为什么现在才补：第二十七轮把「三线直传」做成了核心功能，但改动后**没有任何一条单测
+# 真发过 /v1/messages 或 /v1/responses 请求**（只覆盖了配置解析、/v1/models 列表、
+# 跨线文案），于是两处 500 一路溜到了生产：
+#   ① `_enforce_rate_limit(cfg, request, None, pkey, model_in)` 多传一个参数
+#      → 每一次直传都是 `TypeError` → 500「网关内部错误」；
+#   ② `/metrics/prometheus` 还在读已被删除的 `snapshot["fallback_total"]` → KeyError → 500。
+# 两条都属于「改了一处、漏了另一处」：所以这里的测试刻意**走完整 HTTP 路径**，
+# 而不是直接调内部函数 —— 只有真发请求才能把这类接线错误照出来。
+# 另一层原因见上面运行块旁注：运行器原来夹在文件中间，文件尾部的测试根本没跑。
+
+try:
+    from contextlib import asynccontextmanager as _asynccontextmanager
+except Exception:  # pragma: no cover
+    _asynccontextmanager = None
+
+
+class _FakeStreamResp:
+    """假的流式上游响应（直传只用到 status_code / headers / aread / aiter_bytes）。"""
+
+    def __init__(self, status, headers, chunks):
+        self.status_code = status
+        self.headers = headers
+        self._chunks = list(chunks)
+
+    async def aread(self):
+        return b"".join(self._chunks)
+
+    async def aiter_bytes(self):
+        for c in self._chunks:
+            yield c
+
+
+class _PassthroughAdapter:
+    """直传用的假适配器：只实现直传需要的三个原语，并记录出站参数。"""
+
+    def __init__(self, status=200, body=None, stream_status=200, stream_chunks=None,
+                 stream_ctype="text/event-stream"):
+        self.status = status
+        self.body = {"ok": True} if body is None else body
+        self.stream_status = stream_status
+        self.stream_chunks = list(stream_chunks or [b""])
+        self.stream_ctype = stream_ctype
+        self.json_calls = []      # (protocol, payload, session)
+        self.stream_calls = []
+
+    def prepare_payload(self, model, payload):
+        """与真实适配器同口径：只定点改 model（强制参数已在别处单独测）。"""
+        out = dict(payload)
+        out["model"] = model
+        return out
+
+    async def raw_json(self, protocol, payload, session_id=None):
+        self.json_calls.append((protocol, payload, session_id))
+        return self.status, self.body
+
+    def raw_stream(self, protocol, payload, session_id=None):
+        self.stream_calls.append((protocol, payload, session_id))
+        adapter = self
+
+        @_asynccontextmanager
+        async def _cm():
+            yield _FakeStreamResp(adapter.stream_status,
+                                  {"content-type": adapter.stream_ctype},
+                                  adapter.stream_chunks)
+        return _cm()
+
+
+def _bind_passthrough(m, adapter):
+    """把假适配器接到 _get_adapter 上（供应商固定用 opencode：它三条线都配了）。"""
+    m._get_adapter = lambda model_id, timeout=None, cfg=None: (
+        adapter, "opencode", m._cfg().providers["opencode"])
+
+
+def test_passthrough_messages_line_round_trip():
+    """POST /v1/messages：入站 messages → 出站 messages → 上游字段原样回。
+
+    这条路径此前**零覆盖**，而它正是本轮功能本身。
+    """
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    fake = _PassthroughAdapter(body={
+        "id": "msg_1", "type": "message", "role": "assistant",
+        "content": [{"type": "text", "text": "OK"}],
+        "usage": {"input_tokens": 7, "output_tokens": 3}})
+    orig = m._get_adapter
+    try:
+        with _Isolated() as mm:
+            _bind_passthrough(mm, fake)
+            r = TestClient(mm.app).post("/v1/messages", json={
+                "model": "deepseek-v4.1-flash", "max_tokens": 16,
+                "messages": [{"role": "user", "content": "回复：OK"}],
+                "conversation_id": "conv-abc"})
+            assert r.status_code == 200, r.text
+            protocol, payload, session = fake.json_calls[-1]
+            assert protocol == m.PROTOCOL_MESSAGES, protocol
+            assert payload["model"] == "deepseek-v4.1-flash", payload
+            assert payload["messages"] == [{"role": "user", "content": "回复：OK"}], payload
+            # conversation_id 是网关内部字段（不透传上游），上游只看到按账号派生的 32 位哈希
+            assert "conversation_id" not in payload, payload
+            assert session and len(session) == 32, session
+            j = r.json()
+            assert j["content"][0]["text"] == "OK", j            # 上游正文原样
+            assert j["served_model"] == "deepseek-v4.1-flash", j  # 不再有 fallback 换模型
+            assert j["protocol"] == "messages" and j["provider"] == "opencode", j
+            assert r.headers.get("x-request-id"), dict(r.headers)
+            snap = mm._metrics.snapshot()
+            assert snap["calls"]["deepseek-v4.1-flash"]["ok"] == 1, snap["calls"]
+            # messages 线的 usage 字段名不同（input/output_tokens），也必须记进 token 账
+            assert (snap["tokens"]["prompt"], snap["tokens"]["completion"]) == (7, 3), snap["tokens"]
+    finally:
+        m._get_adapter = orig
+
+
+def test_passthrough_responses_line_and_cross_line_gate():
+    """POST /v1/responses 直传 + 跨线闸门：模型不支持的线必须在**入口** 400（不打扰上游）。"""
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    fake = _PassthroughAdapter(body={
+        "id": "resp_1", "object": "response", "status": "completed",
+        "usage": {"input_tokens": 4, "output_tokens": 2}})
+    orig = m._get_adapter
+    try:
+        with _Isolated() as mm:
+            _bind_passthrough(mm, fake)
+            c = TestClient(mm.app)
+            # grok-4.6 实测只认 responses 线
+            r = c.post("/v1/responses", json={"model": "grok-4.6", "input": "hi", "max_tokens": 16})
+            assert r.status_code == 200, r.text
+            assert fake.json_calls[-1][0] == m.PROTOCOL_RESPONSES
+            assert r.json()["protocol"] == "responses", r.json()
+            # 跨线：agnes 只声明 chat/completions → messages / responses 都必须 400 并点出支持的线
+            for path, proto in (("/v1/messages", "messages"), ("/v1/responses", "responses")):
+                r = c.post(path, json={"model": "agnes-3.0-flash", "max_tokens": 16,
+                                       "messages": [{"role": "user", "content": "x"}]})
+                assert r.status_code == 400, (path, r.status_code, r.text)
+                assert proto in r.text and "chat/completions" in r.text, (path, r.text)
+            assert len(fake.json_calls) == 1, fake.json_calls  # 被挡下的请求一次都没打到上游
+    finally:
+        m._get_adapter = orig
+
+
+def test_passthrough_enforces_provider_rate_limit():
+    """直传也必须走供应商级限流（这里正是 TypeError 的现场：多传了一个参数）。"""
+    import time as _time
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    fake = _PassthroughAdapter()
+    orig_get, limiter = m._get_adapter, m._limiter
+    pconf = m._cfg().providers["opencode"]
+    saved_rps = pconf.rate_limit_rps
+    body = {"model": "deepseek-v4.1-flash", "max_tokens": 16,
+            "messages": [{"role": "user", "content": "x"}]}
+    try:
+        with _Isolated() as mm:
+            _bind_passthrough(mm, fake)
+            pconf.rate_limit_rps = 0.001
+            # 把该供应商的桶清空 → 下一次请求必然被限流（不靠 sleep 抢时序）
+            limiter._buckets["prov:opencode"] = [0.0, _time.monotonic()]
+            c = TestClient(mm.app)
+            r = c.post("/v1/messages", json=body)
+            assert r.status_code == 429, r.text
+            assert "限流" in r.text, r.text
+            assert not fake.json_calls, "被限流的请求不该打到上游"
+            # 不限流时同一端点必须 200（若再出现 TypeError，这里就红）
+            pconf.rate_limit_rps = None
+            r = c.post("/v1/messages", json=body)
+            assert r.status_code == 200, r.text
+    finally:
+        pconf.rate_limit_rps = saved_rps
+        limiter._buckets.pop("prov:opencode", None)
+        m._get_adapter = orig_get
+
+
+def test_passthrough_upstream_error_verbatim_and_no_breaker_on_4xx():
+    """上游 4xx 原样回（状态码 + 正文都不改）；且 4xx 是调用方 body 的问题，不该计熔断。"""
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    up_body = {"error": {"type": "authentication_error", "message": "invalid api key"}}
+    fake = _PassthroughAdapter(status=401, body=up_body)
+    orig = m._get_adapter
+    try:
+        with _Isolated() as mm:
+            _bind_passthrough(mm, fake)
+            r = TestClient(mm.app).post("/v1/messages", json={
+                "model": "deepseek-v4.1-flash", "max_tokens": 16,
+                "messages": [{"role": "user", "content": "x"}]})
+            assert r.status_code == 401, r.text
+            assert r.json()["error"]["message"] == "invalid api key", r.json()
+            snap = mm._metrics.snapshot()
+            assert snap["calls"]["deepseek-v4.1-flash"]["fail"] == 1, snap["calls"]
+            cb = next(x for x in mm._circuits.statuses() if x["provider"] == "opencode")
+            assert cb["recent_failures"] == 0, cb
+    finally:
+        m._get_adapter = orig
+
+
+def test_passthrough_stream_forwards_bytes_and_real_status():
+    """流式直传：字节原样转发（不重编帧）+ 池外只读扫 usage；上游 4xx 要如实给状态码。
+
+    「不把上游 400 塞进 200 的 SSE 流」是这块代码的明确设计（否则 SDK 会以为请求成功了）。
+    """
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    sse = (b'event: message_start\n'
+           b'data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":0}}}\n\n'
+           b'event: message_delta\n'
+           b'data: {"type":"message_delta","usage":{"output_tokens":2}}\n\n'
+           b'event: message_stop\ndata: {"type":"message_stop"}\n\n')
+    fake = _PassthroughAdapter(stream_chunks=[sse[:40], sse[40:]])
+    body = {"model": "deepseek-v4.1-flash", "max_tokens": 16, "stream": True,
+            "messages": [{"role": "user", "content": "x"}]}
+    orig = m._get_adapter
+    try:
+        with _Isolated() as mm:
+            _bind_passthrough(mm, fake)
+            c = TestClient(mm.app)
+            r = c.post("/v1/messages", json=body)
+            assert r.status_code == 200, r.text
+            assert r.content == sse, (r.content[:200], sse[:200])   # 分块被拼接，但字节没被改写
+            assert fake.stream_calls[-1][0] == m.PROTOCOL_MESSAGES
+            snap = mm._metrics.snapshot()
+            assert snap["calls"]["deepseek-v4.1-flash"]["ok"] == 1, snap["calls"]
+            assert (snap["tokens"]["prompt"], snap["tokens"]["completion"]) == (5, 2), snap["tokens"]
+
+            # 上游流式返回 400：状态码与正文都要如实回，而不是包成 200 的空流
+            fake.stream_status, fake.stream_chunks = 400, [b'{"error":{"message":"bad request"}}']
+            fake.stream_ctype = "application/json"
+            r = c.post("/v1/messages", json=body)
+            assert r.status_code == 400, r.text
+            assert "bad request" in r.text, r.text
+            assert not r.text.startswith("event:"), r.text
+    finally:
+        m._get_adapter = orig
+
+
+def test_prometheus_export_ok_and_dropped_metrics_removed():
+    """GET /metrics/prometheus 必须 200，且不再导出已删除的 fallback_total。
+
+    线上 500 的真因：导出器还在 `snap["fallback_total"]`（该字段随路由/fallback 链一起删了）。
+    这里顺带校验「HELP/TYPE 声明」与「实际导出的指标名」一一对应 —— 声明的指标没有导出
+    （或反之）都说明导出器接线断了，Grafana 会看到空图。
+    """
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    with _Isolated() as mm:
+        r = TestClient(mm.app).get("/metrics/prometheus")
+        assert r.status_code == 200, r.text
+        text = r.text
+        assert "api_gateway_uptime_seconds" in text, text
+        # 只在「指标行 + HELP/TYPE 声明」里查，不在注释行里查：说明性注释提到旧指标名是
+        #   允许的（正文注释不参与抓取），导出器真把旧指标名写进声明/指标行才算坏。
+        scraped = [ln for ln in text.splitlines()
+                   if ln and (not ln.startswith("#") or ln.startswith(("# HELP ", "# TYPE ")))]
+        assert not any("fallback_total" in ln for ln in scraped), scraped
+        declared = {ln.split()[2] for ln in text.splitlines() if ln.startswith("# HELP ")}
+        exported = {ln.split("{")[0].split()[0] for ln in text.splitlines() if ln and not ln.startswith("#")}
+        # 方向只要一边：**导出的指标必须都有 HELP 声明**（缺声明 = 接线断了，Grafana 里是空图）。
+        #   反过来「声明了但没有样本」是正常的（这一刻没有该模型的调用 / 没有熔断器实例），
+        #   Prometheus 允许 HELP/TYPE 先于样本出现。
+        assert not (exported - declared), sorted(exported - declared)
+
+
+def test_media_requests_carry_bearer_token():
+    """第二十七轮回归：图像/视频的**三个**调用点也必须带鉴权头。
+
+    媒体端点不属于「三条协议线」，走的是静态 headers。第二十七轮把鉴权头改成
+    「在 _req_headers 里按协议线组装」后，create_adapter 不再往静态头里塞 Authorization，
+    而这三个调用点还在用 self._headers ⇒ 出站请求**一个鉴权头都没有**。真机表现：
+    `POST /v1/images/generations` 上游 401「未提供令牌」（同一个 key 直接 curl 同地址是 200）。
+    """
+    from app.adapters import create_adapter
+
+    cfg = load_config(CONFIG)
+    pconfig = cfg.providers["agnes"]
+    pconfig.base_url = "http://mock.test/v1"
+    seen = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req)
+        if req.url.path.endswith("/images/generations"):
+            return httpx.Response(200, json={"data": [{"url": "http://mock.test/i.png"}]})
+        if req.url.path.endswith("/videos"):
+            return httpx.Response(200, json={"video_id": "mock-video-001", "id": "task-mock"})
+        return httpx.Response(200, json={"status": "SUCCESS"})
+
+    adapter = create_adapter(pconfig, "test-token-123", timeout=10)
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                                        base_url=pconfig.base_url)
+
+    async def run():
+        await adapter.generate_image("agnes-image-2.5-flash", "a plain red square")
+        await adapter.create_video("agnes-video-2.5-flash", "a cat")
+        await adapter.poll_video("mock-video-001")
+        await adapter.close()
+
+    asyncio.run(run())
+    assert len(seen) == 3, [r.url.path for r in seen]   # 三个调用点都被真的发出去了
+    for req in seen:
+        assert req.headers.get("authorization") == "Bearer test-token-123", \
+            (req.url.path, dict(req.headers))
+
+
+# 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`
+# 之前的旁注：运行器只会收集执行到这一行时已经存在的 globals。
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
     passed = failed = 0

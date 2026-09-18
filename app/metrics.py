@@ -56,15 +56,13 @@ _BODY_MAX = 2000
 
 # ── 用量指标 ──────────────────────────────────────────
 class Metrics:
-    """按 模型/供应商/路由 维度统计调用次数、fallback、token、耗时。"""
+    """按 模型/供应商 维度统计调用次数、token、耗时。"""
 
     def __init__(self, enabled: bool = True, started_at: float | None = None):
         self.enabled = enabled
         self._lock = threading.Lock()
         self.calls: dict[str, dict[str, int]] = {}          # model -> {ok, fail}
         self.providers: dict[str, dict[str, int]] = {}      # provider -> {ok, fail}
-        self.routes: dict[str, dict[str, int]] = {}         # route -> {ok, fallback}
-        self.fallback_total: int = 0
         self.tokens_prompt: int = 0
         self.tokens_completion: int = 0
         self.latency_samples: dict[str, deque[float]] = {}  # model -> 最近 N 次耗时
@@ -72,7 +70,7 @@ class Metrics:
         self.in_flight: int = 0
         self.in_flight_peak: int = 0
         # M5+: 按账号维度的聚合（普通账号只看到自己的调用；admin 看全局）。
-        #   结构：account -> {"calls","providers","routes","tokens","latency","fallback"}
+        #   结构：account -> {"calls","providers","tokens","latency"}
         self.by_account: dict[str, dict[str, Any]] = {}
         # Bug 4: 热重载时保留 started_at，uptime 不因重载清零
         self.started_at: float = started_at if started_at is not None else time.time()
@@ -82,9 +80,9 @@ class Metrics:
         acc = self.by_account.get(account)
         if acc is None:
             acc = {
-                "calls": {}, "providers": {}, "routes": {},
+                "calls": {}, "providers": {},
                 "tokens": {"prompt": 0, "completion": 0},
-                "latency": {}, "fallback": 0,
+                "latency": {},
             }
             self.by_account[account] = acc
         return acc
@@ -109,11 +107,10 @@ class Metrics:
     def _bucket(d: dict, k: str) -> dict[str, int]:
         return d.setdefault(k, {"ok": 0, "fail": 0})
 
-    def record_call(self, model: str, provider: str | None, ok: bool, route: str | None = None,
+    def record_call(self, model: str, provider: str | None, ok: bool,
                     account: str | None = None) -> None:
         """记录一次调用结果。
 
-        route 维度（Bug 8 修复）：传入 route 时同时累加 routes 的 ok/fail。
         account（M5+）：未显式传入时取请求级 ACCOUNT 上下文；非 anonymous 时额外累加
         到该账号自己的聚合桶，供「只看本人的指标」使用。
         """
@@ -124,31 +121,12 @@ class Metrics:
             self._bucket(self.calls, model)["ok" if ok else "fail"] += 1
             if provider:
                 self._bucket(self.providers, provider)["ok" if ok else "fail"] += 1
-            if route:
-                self._bucket(self.routes, route)["ok" if ok else "fail"] += 1
             if a and a != "anonymous":
                 acc = self._acc(a)
                 self._bucket(acc["calls"], model)["ok" if ok else "fail"] += 1
                 if provider:
                     self._bucket(acc["providers"], provider)["ok" if ok else "fail"] += 1
-                if route:
-                    self._bucket(acc["routes"], route)["ok" if ok else "fail"] += 1
 
-    def record_fallback(self, route: str | None, account: str | None = None) -> None:
-        if not self.enabled:
-            return
-        a = account or ACCOUNT.get()
-        with self._lock:
-            self.fallback_total += 1
-            if route:
-                self._bucket(self.routes, route).setdefault("fallback", 0)
-                self.routes[route]["fallback"] += 1
-            if a and a != "anonymous":
-                acc = self._acc(a)
-                acc["fallback"] += 1
-                if route:
-                    b = self._bucket(acc["routes"], route)
-                    b["fallback"] = b.get("fallback", 0) + 1
 
     def record_tokens(self, prompt: int, completion: int, account: str | None = None) -> None:
         if not self.enabled:
@@ -198,7 +176,7 @@ class Metrics:
                 if not acc:
                     return dict(uptime_seconds=round(time.time() - self.started_at, 1),
                                 in_flight=self.in_flight, in_flight_peak=self.in_flight_peak,
-                                calls={}, providers={}, routes={}, fallback_total=0,
+                                calls={}, providers={},
                                 tokens={"prompt": 0, "completion": 0}, latency={})
                 lat = {}
                 for m, dq in acc["latency"].items():
@@ -210,8 +188,6 @@ class Metrics:
                     "in_flight_peak": self.in_flight_peak,
                     "calls": {k: dict(v) for k, v in acc["calls"].items()},
                     "providers": {k: dict(v) for k, v in acc["providers"].items()},
-                    "routes": {k: dict(v) for k, v in acc["routes"].items()},
-                    "fallback_total": acc["fallback"],
                     "tokens": dict(acc["tokens"]),
                     "latency": lat,
                 }
@@ -231,8 +207,6 @@ class Metrics:
                 "in_flight_peak": self.in_flight_peak,
                 "calls": {k: dict(v) for k, v in self.calls.items()},
                 "providers": {k: dict(v) for k, v in self.providers.items()},
-                "routes": {k: dict(v) for k, v in self.routes.items()},
-                "fallback_total": self.fallback_total,
                 "tokens": {"prompt": self.tokens_prompt, "completion": self.tokens_completion},
                 "latency": latency_out,
             }

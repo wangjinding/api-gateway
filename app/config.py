@@ -1,13 +1,16 @@
-"""配置加载模块：从 YAML 文件读取供应商、模型、路由、鉴权、运维配置。"""
+"""配置加载模块：从 YAML 文件读取供应商、模型、鉴权、运维配置。"""
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+log = logging.getLogger("gateway.config")
 
 
 class ConfigError(ValueError):
@@ -28,6 +31,65 @@ MODEL_PARAM_KEYS: frozenset[str] = frozenset({
 })
 
 
+# ── 协议线（方言）标准名（第二十七轮「三线直传」） ──────────────
+# 老板决策：**入站是什么格式，出站就是什么格式**；网关不做任何跨格式翻译，
+# 只在「供应商与模型」里声明每个模型能用哪几条线。
+#
+# 这里直接用各家文档 / SDK 里的**端点名**当协议名（"标准的来"）：
+#   chat/completions —— OpenAI Chat Completions（POST {base}/chat/completions）
+#   messages         —— Anthropic Messages（POST {base}/messages，认 x-api-key）
+#   responses        —— OpenAI Responses（POST {base}/responses，认 Bearer）
+# 好处：配置、日志、前端标签、上游文档四处用的是同一个词，不用查对照表。
+#
+# 纯透传的边界：
+#   - 同一格（入站 = 出站）→ 原样转发，只定点改写 model + 盖模型级强制参数；
+#   - 不同格（如用 messages 打一个只支持 chat/completions 的模型）→ 入站直接 400
+#     报「该模型不支持 messages 线」，**绝不偷偷翻译**（翻译出来的东西一定有损，
+#     而且失败现场离用户十万八千里）。
+PROTOCOL_CHAT = "chat/completions"
+PROTOCOL_MESSAGES = "messages"
+PROTOCOL_RESPONSES = "responses"
+PROTOCOLS: tuple[str, ...] = (PROTOCOL_CHAT, PROTOCOL_MESSAGES, PROTOCOL_RESPONSES)
+# 模型没写 protocols 时的默认值：只认 chat/completions。
+#   为什么要默认而不是"全支持"：老配置（Agnes / 火山）从未声明过协议，
+#   默认全支持等于把「没实测过的线」当成可用，用户打过去只会收到上游 500。
+DEFAULT_PROTOCOLS: tuple[str, ...] = (PROTOCOL_CHAT,)
+
+# 出站鉴权方式：bearer（Authorization: Bearer xxx）/ x-api-key（Anthropic 系）/ none
+AUTH_STYLES: frozenset[str] = frozenset({"bearer", "x-api-key", "none"})
+
+
+@dataclass
+class EndpointSpec:
+    """某供应商在**一条协议线**上的出站配置（providers.<key>.endpoints.<protocol>）。
+
+    为什么放在供应商级而不是模型级：同一条线在同一个供应商下永远是同一个地址与同一套
+    鉴权头（OpenCode Go 三条线共用 https://opencode.ai/zen/go/v1，只是路径和鉴权头不同），
+    模型之间只有"能不能走"的差别 —— 那是 models[].protocols 的事。
+    """
+
+    path: str = ""                                  # 相对 base_url 的路径，如 /chat/completions
+    auth: str = "bearer"                            # bearer | x-api-key | none
+    headers: dict[str, str] = field(default_factory=dict)  # 该线固定附加头（如 anthropic-version）
+
+
+def _default_endpoints() -> dict[str, EndpointSpec]:
+    """三条标准线的默认出站配置（未写 providers.*.endpoints 时用）。
+
+    默认值就是三家协议的标准形态，写出来只是为了让"默认"可见：
+      chat/completions → /chat/completions + Bearer
+      messages         → /messages + x-api-key + anthropic-version
+      responses        → /responses + Bearer
+    """
+    return {
+        PROTOCOL_CHAT: EndpointSpec(path="/chat/completions", auth="bearer"),
+        PROTOCOL_MESSAGES: EndpointSpec(
+            path="/messages", auth="x-api-key",
+            headers={"anthropic-version": "2023-06-01"}),
+        PROTOCOL_RESPONSES: EndpointSpec(path="/responses", auth="bearer"),
+    }
+
+
 @dataclass
 class ModelInfo:
     id: str
@@ -36,7 +98,7 @@ class ModelInfo:
     # 第十三轮: 是否支持「图像输入」（多模态 / 视觉）。
     #   Agnes 3.0 Flash 文档明确「输入模态：文本、图像 URL」，实测 data:image/png;base64 也能识别；
     # 其余文本模型（ark-code 等）文档未声明图像输入 → 默认 False。
-    #   用途：① /v1/models 暴露给前端标注/告警；② 带图请求走路由别名时把有视觉能力的模型排到前面。
+    #   用途：① /v1/models 暴露给前端标注/告警；② 前端据此提示「换个支持视觉的模型」力的模型排到前面。
     vision: bool = False
     # 第二十五轮（模型参数硬约束）: 该模型**必须用**的上游参数，发送前强制覆盖客户端传值。
     #   背景：OpenCode Go 的 kimi-k2.7-code 只接受 temperature=1，客户端传 0（含一键测速的
@@ -46,6 +108,17 @@ class ModelInfo:
     #   拉到 0 也不会再 400（值被网关改成上游唯一允许的那个）。
     #   键必须在 MODEL_PARAM_KEYS 白名单内，否则 validate_config 直接报错（不静默失效）。
     params: dict[str, Any] = field(default_factory=dict)
+    # 第二十七轮（三线直传）: 该模型**能用哪几条协议线**（取值见 PROTOCOLS）。
+    #   语义是「入站也用这条线」—— 入站 /v1/messages 打到只声明了 chat/completions 的模型
+    #   时，网关直接 400，不替用户翻译（详见 PROTOCOLS 的说明）。
+    #   不写 = 默认 ["chat/completions"]（老配置行为完全不变）。
+    #   实测口径（OpenCode Go 2026-09-18）：**文档标注的线一定可用；有些模型实测能走多条线**
+    #   （如 kimi-k3 / qwen 系列 chat + messages 都 200，deepseek 四个模型三线全通），
+    #   这类按实测把两条线都写上 —— 但只写实测 200 过的，猜测的线不写。
+    protocols: list[str] = field(default_factory=lambda: list(DEFAULT_PROTOCOLS))
+
+    def supports(self, protocol: str) -> bool:
+        return protocol in self.protocols
 
 
 @dataclass
@@ -97,6 +170,17 @@ class ProviderConfig:
     media: MediaConfig = field(default_factory=MediaConfig)
     rate_limit_rps: float | None = None  # 该供应商全局 QPS 上限（可选）
     requires_session_header: bool = False  # OpenCode Go 等要求每请求动态会话头（x-opencode-session）
+    # 第二十七轮（三线直传）: 该供应商**每条协议线**的出站地址与鉴权头。
+    #   未配置时用 _default_endpoints()（三条标准线 + 标准鉴权）—— 所以 Agnes / 火山这类
+    #   只走 chat/completions 的供应商一个字段都不用加，行为与以前完全一致。
+    endpoints: dict[str, EndpointSpec] = field(default_factory=_default_endpoints)
+
+    def endpoint(self, protocol: str) -> EndpointSpec | None:
+        """取某条线的出站配置（没有该线 → None，调用方按"供应商不支持这条线"处理）。"""
+        return self.endpoints.get(protocol)
+
+    def supports_protocol(self, protocol: str) -> bool:
+        return protocol in self.endpoints
 
 
 # ── 网关入口鉴权 ──
@@ -105,24 +189,6 @@ class ProviderConfig:
 @dataclass
 class AuthGate:
     session_ttl_minutes: int = 1440   # 前端 /auth/login 签发的 session 有效时长（分钟，默认 24h）
-
-
-# ── 路由别名 + 优先级 fallback ──
-@dataclass
-class RouteInfo:
-    """路由别名 → 按优先级排列的 fallback 模型链。
-
-    models: 第 0 个为最高优先级，调用失败/超时依次切换。
-    timeout: 单个模型尝试的超时（秒），None 用 server.timeout。
-    retry:   切到下一个模型前，同一模型的重试次数（含首次）。
-    rate_limit_rps: 该路由别名整体 QPS 上限（None=不限）。
-    """
-
-    name: str
-    models: list[str] = field(default_factory=list)
-    timeout: int | None = None
-    retry: int = 1
-    rate_limit_rps: float | None = None
 
 
 @dataclass
@@ -199,7 +265,6 @@ class GatewayConfig:
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     server: ServerConfig = field(default_factory=ServerConfig)
     auth: AuthGate = field(default_factory=AuthGate)
-    routes: dict[str, RouteInfo] = field(default_factory=dict)
     circuit: CircuitConfig = field(default_factory=CircuitConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     pricing: Pricing = field(default_factory=Pricing)
@@ -222,18 +287,29 @@ class GatewayConfig:
     def find_provider_for_model(self, model_id: str) -> tuple[str, ProviderConfig, ModelInfo] | None:
         return self._model_index.get(model_id)
 
-    def find_route(self, model_id: str) -> RouteInfo | None:
-        return self.routes.get(model_id)
+    def find_model_for_protocol(
+        self, model_id: str, protocol: str
+    ) -> tuple[str, ProviderConfig, ModelInfo] | None:
+        """按「模型 + 入站协议线」查供应商；模型不存在或该线不支持 → None。
 
-    def validate_routes(self) -> list[str]:
-        """启动校验：路由里的 model ID 是否都存在。返回告警列表（空=全合法）。"""
-        known = {m["id"] for m in self.all_models()}
-        warnings: list[str] = []
-        for rname, route in self.routes.items():
-            for mid in route.models:
-                if mid not in known:
-                    warnings.append(f"路由 {rname} 引用了未知模型 '{mid}'")
-        return warnings
+        三线直传的核心闸门：入站是哪条线，就必须在这条线上找到模型，否则 400 ——
+        **不做任何跨线翻译**（老板决策）。返回 None 的两种情况（未知模型 / 不支持该线）
+        由调用方分别给不同文案，别混成一句"模型不存在"。
+        """
+        found = self._model_index.get(model_id)
+        if found is None:
+            return None
+        pkey, pconfig, minfo = found
+        if not minfo.supports(protocol):
+            return None
+        if not pconfig.supports_protocol(protocol):
+            return None
+        return found
+
+    def models_with_protocol(self, protocol: str) -> list[ModelInfo]:
+        """能走某条线的全部模型（/v1/models 与前端标签用）。"""
+        return [m for p in self.providers.values() for m in p.models if m.supports(protocol)]
+
 
     def all_models(self) -> list[dict[str, Any]]:
         result = []
@@ -250,19 +326,12 @@ class GatewayConfig:
                     #   前端据此标注「该模型温度已由网关固定」，API 调用方也能提前知道
                     #   自己传的采样参数会被上游要求覆盖，省掉一轮「传了没生效」的困惑。
                     "params": dict(m.params or {}),
+                    # 第二十七轮: 暴露该模型能走哪几条协议线（取值见 PROTOCOLS）。
+                    #   前端「供应商与模型」页据此打格式标签；API 调用方也能提前知道自己
+                    #   该把请求发到 /v1/chat/completions、/v1/messages 还是 /v1/responses。
+                    "protocols": list(m.protocols),
                 })
         return result
-
-    def all_routes(self) -> list[dict[str, Any]]:
-        out = []
-        for rname, r in self.routes.items():
-            out.append({
-                "name": rname,
-                "models": r.models,
-                "timeout": r.timeout,
-                "retry": r.retry,
-            })
-        return out
 
 
 def _opt_float(v: Any, field_name: str = "rate_limit_rps") -> float | None:
@@ -355,6 +424,82 @@ def _parse_model_params(v: Any, where: str) -> dict[str, Any]:
     return out
 
 
+def _parse_protocols(v: Any, where: str) -> list[str]:
+    """解析模型级 `protocols`（第二十七轮三线直传）。
+
+    容错口径（宁可报错，不可静默失效 —— 写错协议名是最容易发生的配置失误，
+    而它的表现是"调用该模型永远 400"，静默接受等于让用户自己 debug 配置）：
+      - 缺失 / None → 默认 ["chat/completions"]（老配置行为不变）；
+      - 字符串 → 当作单元素列表（写 `protocols: messages` 也认）；
+      - 列表 → 逐项校验，必须是 PROTOCOLS 里的标准名；
+      - 去重保序；空列表 → ConfigError（"一个模型一条线都不支持"多半是手滑）。
+    """
+    if v is None:
+        return list(DEFAULT_PROTOCOLS)
+    if isinstance(v, str):
+        raw_items: list[Any] = [v]
+    elif isinstance(v, (list, tuple)):
+        raw_items = list(v)
+    else:
+        raise ConfigError(
+            f"{where} 必须是字符串或列表（可选值：{', '.join(PROTOCOLS)}），得到 {type(v).__name__}: {v!r}")
+    out: list[str] = []
+    for item in raw_items:
+        name = str(item or "").strip()
+        if not name:
+            raise ConfigError(f"{where} 出现空的协议名")
+        if name not in PROTOCOLS:
+            raise ConfigError(
+                f"{where} 里的 '{name}' 不是标准协议名（允许：{', '.join(PROTOCOLS)}）")
+        if name not in out:
+            out.append(name)
+    if not out:
+        raise ConfigError(f"{where} 为空列表 —— 每个模型至少要声明一条协议线")
+    return out
+
+
+def _parse_endpoints(pval: dict[str, Any], pkey: str) -> dict[str, EndpointSpec]:
+    """解析供应商级 `endpoints`（每条协议线的出站路径 / 鉴权 / 固定头）。
+
+    未配置 → 三条标准线的默认值（见 _default_endpoints）。配置了就**只认配的那些线**：
+    "没写这条线" 有语义 —— 该供应商没有这条线，模型声明了也没用（调用会明确报错，
+    而不是发到一个猜出来的地址上收 404）。
+
+    形如：
+        endpoints:
+          messages:
+            path: "/messages"
+            auth: "x-api-key"
+            headers: {anthropic-version: "2023-06-01"}
+    """
+    raw = pval.get("endpoints")
+    if raw is None:
+        return _default_endpoints()
+    if not isinstance(raw, dict):
+        raise ConfigError(f"providers.{pkey}.endpoints 必须是映射，得到 {type(raw).__name__}")
+    out: dict[str, EndpointSpec] = {}
+    for pname, spec in raw.items():
+        name = str(pname or "").strip()
+        where = f"providers.{pkey}.endpoints.{name}"
+        if name not in PROTOCOLS:
+            raise ConfigError(f"{where} 不是标准协议名（允许：{', '.join(PROTOCOLS)}）")
+        if not isinstance(spec, dict):
+            raise ConfigError(f"{where} 必须是映射（path/auth/headers），得到 {type(spec).__name__}")
+        path = str(spec.get("path") or "").strip()
+        if not path:
+            raise ConfigError(f"{where}.path 不能为空（相对 base_url 的路径，如 /messages）")
+        auth = str(spec.get("auth") or "bearer").strip()
+        if auth not in AUTH_STYLES:
+            raise ConfigError(
+                f"{where}.auth 只能是 {'/'.join(sorted(AUTH_STYLES))}，得到 {auth!r}")
+        headers = spec.get("headers") or {}
+        if not isinstance(headers, dict):
+            raise ConfigError(f"{where}.headers 必须是映射（如 anthropic-version）")
+        out[name] = EndpointSpec(path=path, auth=auth,
+                                 headers={str(k): str(v) for k, v in headers.items()})
+    return out
+
+
 def _parse_media(pval: dict[str, Any]) -> MediaConfig:
     m = pval.get("media", {}) or {}
     return MediaConfig(
@@ -394,7 +539,7 @@ def _parse_download(pval: dict[str, Any]) -> DownloadConfig:
 def validate_config(cfg: GatewayConfig) -> list[str]:
     """结构性校验（Bug 12 修复）：返回问题列表，空 = 通过。
 
-    校验供应商必填项与路由链，给出可读的中文说明（而非运行到一半才崩）。
+    校验供应商必填项与模型字段，给出可读的中文说明（而非运行到一半才崩）。
     """
     issues: list[str] = []
     if not cfg.providers:
@@ -407,9 +552,13 @@ def validate_config(cfg: GatewayConfig) -> list[str]:
         for idx, m in enumerate(p.models):
             if not m.id:
                 issues.append(f"供应商 '{pkey}' 的第 {idx + 1} 个模型缺少 id")
-    for rname, r in cfg.routes.items():
-        if not r.models:
-            issues.append(f"路由 '{rname}' 的模型链为空")
+            # 第二十七轮: 模型声明了某条线，但供应商根本没配这条线的出站地址 ——
+            #   这种配置下调用必然失败（而且会失败在"拼 URL"那一步），必须启动就拦住。
+            for proto in m.protocols:
+                if not p.supports_protocol(proto):
+                    issues.append(
+                        f"供应商 '{pkey}' 的模型 '{m.id}' 声明了协议线 '{proto}'，"
+                        f"但该供应商的 endpoints 里没有这条线")
     # 账号体系已由页面管理（data/users.json，见 app/users.py），配置文件不再承载鉴权。
     #   首次启动会创建 admin/admin，不存在「自锁」场景。
     return issues
@@ -437,24 +586,18 @@ def validate_warnings(cfg: GatewayConfig) -> list[str]:
     # 供应商缺 Key / 缺模型：上线前就点出来，而不是调用时才 503 / fallback 悄悄失效
     for pkey, p in cfg.providers.items():
         if not p.models:
-            warns.append(f"供应商 '{pkey}' 没有任何模型 —— 路由链里指向它的 fallback 项永远不可用")
+            warns.append(f"供应商 '{pkey}' 没有任何模型 —— 它不会出现在任何一条协议线上，永远不可用")
         if not p.auth.token and not (p.auth.token_env and os.environ.get(p.auth.token_env)):
             warns.append(f"供应商 '{pkey}' 未配置 API Key（token 与 token_env 均空/环境变量未设置）"
                          f" —— 调用该供应商的任何模型都会 503")
     # （账号/密码/API Key 已改由页面管理，弱凭证检查不再适用于配置文件。）
-    # 路由引用了不存在的模型 id → 该 fallback 项永远不可用（多半是打错字）
-    known = {m["id"] for m in cfg.all_models()}
-    for r in cfg.all_routes():
-        miss = [mid for mid in r["models"] if mid not in known]
-        if miss:
-            warns.append(f"路由 '{r['name']}' 引用了未定义的模型 {miss} —— 这些 fallback 项永远不可用")
     return warns
 
 
 def load_config(path: str | Path) -> GatewayConfig:
     """从 YAML 文件加载完整网关配置。
 
-    结构性错误（缺供应商/缺 base_url/空模型链等）抛 ConfigError，带友好说明。
+    结构性错误（缺供应商/缺 base_url/模型缺 id 等）抛 ConfigError，带友好说明。
     """
     path = Path(path)
     if not path.exists():
@@ -484,7 +627,9 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
             ModelInfo(id=m.get("id", ""), display_name=m.get("display_name", ""),
                       type=m.get("type", "text"), vision=_opt_bool(m.get("vision"), "providers.*.models.*.vision", False),
                       params=_parse_model_params(
-                          m.get("params"), f"providers.{pkey}.models[{idx}].params"))
+                          m.get("params"), f"providers.{pkey}.models[{idx}].params"),
+                      protocols=_parse_protocols(
+                          m.get("protocols"), f"providers.{pkey}.models[{idx}].protocols"))
             for idx, m in enumerate(pval.get("models", []))
         ]
         providers[pkey] = ProviderConfig(
@@ -498,6 +643,7 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
             rate_limit_rps=_opt_float(pval.get("rate_limit_rps")),
             requires_session_header=_opt_bool(
                 pval.get("requires_session_header"), "providers.*.requires_session_header", False),
+            endpoints=_parse_endpoints(pval, pkey),
         )
 
     srv_raw = raw.get("server", {}) or {}
@@ -535,30 +681,10 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
     auth = AuthGate(session_ttl_minutes=_opt_int(auth_raw.get("session_ttl_minutes"),
                                                   "auth.session_ttl_minutes", 1440, minimum=1))
 
-    # 路由别名 → 优先级 fallback 链（支持 list 或 dict 两种写法）
-    routes_raw = raw.get("routes", {}) or {}
-    routes: dict[str, RouteInfo] = {}
-    for rname, rval in routes_raw.items():
-        if isinstance(rval, dict):
-            chain: list[str] = []
-            for item in (rval.get("models", []) or []):
-                if isinstance(item, str):
-                    chain.append(item)
-                elif isinstance(item, dict) and item.get("model"):
-                    chain.append(item["model"])
-            routes[rname] = RouteInfo(
-                name=rname,
-                models=chain,
-                # 注意 minimum=0：缺省值是 0（=未设置，下面 `or None` 转 None）。
-                # 若写 minimum=1，会让"路由没写 timeout"的配置直接报 ConfigError —— 这正是
-                # 第七轮自查抓到的一个自伤 bug（之前只有在配置恰好写了 timeout 时才不炸）。
-                timeout=(_opt_int(rval.get("timeout"), f"routes.{rname}.timeout", 0, minimum=0) or None),
-                retry=_opt_int(rval.get("retry"), f"routes.{rname}.retry", 1, minimum=1),
-                rate_limit_rps=_opt_float(rval.get("rate_limit_rps")),
-            )
-        else:
-            chain = [x for x in (rval or []) if isinstance(x, str)]
-            routes[rname] = RouteInfo(name=rname, models=chain)
+    # 第二十七轮: 「路由别名 / fallback 链」功能已整体移除。
+    #   老配置里残留的 routes 段不再解析，只在日志里提醒一声（不报错，免得旧配置起不来）。
+    if raw.get("routes"):
+        log.warning("配置里的 'routes' 段已废弃（路由别名功能已移除），本次加载忽略该段")
 
     # 熔断器
     c_raw = raw.get("circuit", {}) or {}
@@ -588,7 +714,7 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
     pricing = Pricing(per_model=per_model)
 
     cfg = GatewayConfig(
-        providers=providers, server=server, auth=auth, routes=routes,
+        providers=providers, server=server, auth=auth,
         circuit=circuit, observability=observability, pricing=pricing,
         download=_parse_download(raw),
     )

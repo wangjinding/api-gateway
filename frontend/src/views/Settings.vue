@@ -67,7 +67,7 @@
         <div class="set-row">
           <div class="lb">{{ t('settings.defaultModel') }}</div>
           <div class="rt">
-            <el-select v-model="defs.model" size="small" clearable :placeholder="t('chat.routeGroup')" style="width: 210px">
+            <el-select v-model="defs.model" size="small" clearable :placeholder="t('chat.pickModel')" style="width: 210px">
               <el-option v-for="m in textModels" :key="m" :label="m" :value="m" />
             </el-select>
           </div>
@@ -179,10 +179,6 @@
           <div class="lb">{{ t('dashboard.inflight') }}</div>
           <div class="rt">{{ health.in_flight ?? '-' }} / {{ health.in_flight_peak ?? '-' }}</div>
         </div>
-        <div class="set-row">
-          <div class="lb">{{ t('dashboard.fallback') }}</div>
-          <div class="rt">{{ health.fallback_total ?? 0 }}</div>
-        </div>
         <div class="set-row" style="align-items: flex-start">
           <div class="lb">{{ t('settings.providerStatus') }}</div>
           <div class="rt" style="flex-wrap: wrap; justify-content: flex-end">
@@ -228,8 +224,8 @@ const err = ref('')
 const { t, locale } = useI18n()
 const { theme, followSystem, setTheme, setFollowSystem } = useTheme()
 
-// 对话默认模型下拉（老板决策：wjd 链路 = 全部文本模型；这里同样覆盖全部文本模型）
-const TEXT_MODELS = ['wjd',
+// 对话默认模型下拉（覆盖全部文本模型；第二十七轮: wjd 路由别名已删除，不再有"别名"选项）
+const TEXT_MODELS = [
   'agnes-3.0-flash', 'agnes-2.5-flash', 'ark-code-latest',
   // OpenCode Go（订阅编程模型，17 个文本模型）
   'glm-5.3-flash', 'glm-5.3', 'glm-5.2', 'glm-5.1',
@@ -252,7 +248,9 @@ const savingDefs = ref(false)
 
 function loadDefs() {
   const d = getChatDefaults()
-  defs.model = d.model ?? 'wjd'
+  // 第二十七轮: 默认模型不再回落到 wjd（该别名已删除）—— 认不出就留空串，
+  //   Settings 的模型下拉在 onMounted 里会用真实模型列表兜底。
+  defs.model = d.model ?? ''
   defs.temperature = d.temperature ?? 0.7
   defs.top_p = d.top_p ?? 1
   defs.max_tokens = d.max_tokens ?? null
@@ -315,8 +313,8 @@ onMounted(async () => {
     // 默认模型下拉用真实模型列表（拿不到就退回内置候选）
     try {
       const um = await api('/v1/models')
-      const list = (um.data || []).filter((x: any) => x.type !== 'route').map((x: any) => x.id)
-      if (list.length) textModels.value = ['wjd', ...list]
+      const list = (um.data || []).filter((x: any) => x.type !== 'image' && x.type !== 'video').map((x: any) => x.id)
+      if (list.length) textModels.value = list
     } catch { /* 模型列表可选 */ }
   } catch (e: any) {
     if (e && e.status === 401) { router.push('/login'); return }

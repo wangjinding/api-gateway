@@ -4,11 +4,12 @@
 
 ## 特性
 
-- ✅ 多供应商统一路由（`model` 字段自动分发）
-- ✅ 路由别名 `wjd`：运行时挑「当前可用 + 最近最快」的文本模型优先调用，其余按速度顺序 fallback + 熔断
-- ✅ 同模型重试 + 路由级超时 + **供应商熔断器**（chat 与媒体各自独立桶）
+- ✅ 多供应商统一分发（`model` 决定供应商）
+- ✅ **三线直传**：`/v1/chat/completions`（OpenAI）· `/v1/messages`（Anthropic）· `/v1/responses`（Responses）三条线各按**自家协议原样转发**，网关不翻译字段；
+  模型支持哪几条线由 `models[].protocols` 声明，选错线**直接 400**并列出支持的线
+- ✅ 同模型重试 + **供应商熔断器**（chat 与媒体各自独立桶）
 - ✅ 图像 `/v1/images/generations` + 视频 `/v1/videos`（异步 + 等待模式 + Webhook）
-- ✅ 页面账号体系鉴权（账号密码登录 + 每账号自建 API Key，三级限流**全局/路由/供应商**）
+- ✅ 页面账号体系鉴权（账号密码登录 + 每账号自建 API Key，两级限流**全局/供应商**）
 - ✅ 用量指标 `/metrics` + **Prometheus** `/metrics/prometheus` + 访问日志 `/logs`
 - ✅ **Token 成本估算**（响应带 `estimated_cost_cny`）
 - ✅ **Batch 并发调用** `/v1/chat/completions/batch`
@@ -23,9 +24,9 @@
 api-gateway/
 ├── data/gateway.yaml       # 默认运行时配置（run.py 读取，hot_reload 开）
 ├── app/
-│   ├── config.py           # YAML 加载 → dataclass（供应商/路由/鉴权/熔断/可观测/定价）
+│   ├── config.py           # YAML 加载 → dataclass（供应商/模型/协议线/鉴权/熔断/可观测/定价）
 │   ├── models.py           # Pydantic 请求/响应模型（chat/image/video/batch）
-│   ├── routing.py          # model_id → 供应商路由 + 认证解析
+│   ├── routing.py          # model_id → 供应商解析 + 认证解析（名字沿用；与「路由别名」无关）
 │   ├── metrics.py          # 用量指标 + 访问日志 + 限流（无外部依赖）
 │   ├── circuit.py          # 供应商熔断器（CLOSED/OPEN/HALF_OPEN）
 │   ├── main.py             # FastAPI 主入口（全部端点 + 中间件）
@@ -115,29 +116,43 @@ providers:
 
 此外还有一层运行时兜底：上游若回 400 说某参数"只允许 X"（`invalid temperature: only 1 is allowed for this model`）或"必须大于 N"，网关会自动按上游要求修正并**重发一次**，并把这个值记在适配器实例上（后续请求不再多跑一轮）；日志会提示建议把它写进 `params`。管理员已写死的值不会被自动改掉（冲突时只记日志）。
 
-### 路由别名 + 按「可用 + 速度」动态排序 + 熔断
-（第十一轮 #4：`wjd` 不再按配置里的数组优先级，改为运行时挑可用且最快的文本模型先调用；详见下方路由说明）
+### 三线直传（chat/completions · messages · responses）+ 熔断
+
+三条协议线各有自己的入口，**入站格式 = 出站格式**：网关只做四件事 —— 鉴权、挑供应商、
+定点改 `model` 与强制参数、把响应（含 SSE）原样推回并读 usage 记账。**不做跨格式翻译**：
+把 chat 线的模型打到 `/messages` 上，上游回的是 `500 Internal server error`；把 messages
+线的模型打到 `/responses` 上回的是 `401 not supported for format` —— 两种都不像"格式选错"，
+所以网关**在入口直接 400** 并列出该模型实际支持哪些线，不让这种事拖成半天排查。
+
+| 线 | 入站端点 | 出站鉴权 |
+|---|---|---|
+| `chat/completions` | `POST /v1/chat/completions` | `Authorization: Bearer` |
+| `messages` | `POST /v1/messages` | `x-api-key` + `anthropic-version` |
+| `responses` | `POST /v1/responses` | `Authorization: Bearer` |
+
+模型支持哪几条线写在各供应商的 `models[].protocols`；**不声明 = 只认 `chat/completions`**
+（Agnes / 火山方舟即如此，行为与改造前完全一致）。OpenCode Go 的 29 个文档模型按**实测**逐一
+标线（`deepseek-v4.1-flash` / `deepseek-v4-pro` / `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`
+三线全通）。`GET /v1/models` 会回 `protocols`，前端据此标格式。
+
+**路由别名 `wjd` 已于第二十七轮（2026-09-18）整体删除**：不再有 `routes` 配置段、不再有
+多模型 fallback、`/v1/models` 里也没有 `type: "route"` 条目。理由：三线直传下模型 id 必须与
+协议线一一对应，再套一层"自动挑最快模型"的别名，会把调用方选定的格式与能力（视觉 / 工具 /
+协议线）悄悄换掉。**要换模型就换 model id。** 老配置里残留的 `routes` 段会被忽略（日志一条
+warning），不会让进程起不来。限流因此变成**两级：供应商 > 全局**。
 
 ```yaml
-routes:
-  wjd:
-    timeout: 60         # 单模型 60s 没出结果就切下一个（避免 20×120s 挂死）
-    retry: 1           # 每个模型试 1 次，失败立即切下一个
-    # wjd 链路 = 全部文本模型（新增/现有文本模型都必须加入）
-    models:
-      - "ark-code-latest"     # 1) 火山方舟（最高优先级）
-      - "agnes-3.0-flash"     # 2) Agnes 3.0
-      - "agnes-2.5-flash"     # 3) Agnes 2.5
-      # ── 4-20) OpenCode Go 17 个文本模型（glm-5.3-flash…hy3，
-      #          完整列表见 data/gateway.yaml routes 段）──
-
 circuit:                 # 供应商熔断
   enabled: true
   failure_threshold: 3   # 窗口内失败 ≥3 次即熔断
   cooldown: 30           # 熔断持续 30 秒
-  window: 10            # 滑动窗口 = 最近 N 次调用（按次数，非按时间）
+  window: 10             # 滑动窗口 = 最近 N 次调用（按次数，非按时间）
 ```
 
+> **第二十七轮（2026-09-18）：路由别名已整体删除** —— 下面这些路由相关修复
+> （`fallback_total`、`route.retry`、`routes` 维度指标、路由级限流/超时、路由告警）
+> 随之一起移除，保留为历史记录。
+>
 > v2.3：`window` 现在真正按**最近 N 次调用**生效（之前是写死 60 秒、配置无效）。判定 = 最近 `window` 次里失败数 ≥ `failure_threshold`。
 >
 > **修复（v2.5）**：
@@ -209,12 +224,30 @@ circuit:                 # 供应商熔断
 > - **无可达风险（已加约束说明）**：`release_probe()` 不校验令牌归属，理论上可能误还并发请求的探测令牌；逐一核对全部调用点后**当前不可达**（同 tick 或 except 分支内无抛错源），已在 docstring 写明"仅令牌持有者、且放行与归还间不得有 await"的前置条件，并给出后续放宽方案（probe token 归属校验）。
 > - 审计同时确认**无新问题**：`json_or_raise()` 空/非 JSON body 映射、`Message.to_upstream()` 多轮 function calling、`stream` 严格校验、`unhandled_error_guard` 位于最外层且 500 带 CORS、`release_probe` 常规路径与 `probe_timeout` 自愈、`videos_poll` 404 归还不计失败、`_get_adapter` 移入 try 后的 503/404 映射、`_spawn_bg` 强引用与 lifespan 等待、`_opt_int` 的 `default>=minimum` 逐处正确。测试数 78 → 84（补 4 项回归：标准参数最终 payload、图像额外参数、流式 `in_flight` 时机、`base_url` 缓存 key）。
 
-调用时 `model` 填 `wjd`，网关按顺序尝试；某供应商连续失败会被熔断，期间快速跳过，让健康供应商顶上。
+> **修复（v2.11 · 第二十七轮上线后复验）**：老板批准重启上线后，用真机活体检查（`live_check.py` + 真实 key）复验，
+> 抓到 **3 个本轮新引入的缺陷**（其中 2 个是"改了 A 处、漏了 B 处"的接线漏改），已全部修复并补测试：
+> - **【P0】三线直传入门即 500**：`_passthrough()` 里调用 `_enforce_rate_limit()` 时多传了一个参数（5 参 vs 函数 4 参），
+>   于是**每一次** `POST /v1/messages` / `POST /v1/responses` 都以 `TypeError` → 500「网关内部错误」结束 ——
+>   正好是本轮的核心功能。真机表现为两条线全灭（chat/completions 线不受影响）。
+> - **【P0】`GET /metrics/prometheus` 500**：导出器还在读 `snapshot["fallback_total"]`，而该字段已随路由/fallback 链删除
+>   → `KeyError`。Prometheus 抓取全断（`/metrics` JSON 不受影响）。已连同它的 HELP/TYPE 声明一起清掉，
+>   并加断言：**导出的指标必须有 HELP 声明**（防"声明与导出脱节"）。
+> - **【P0】图像 / 视频的 token 全部没发出去**：本轮把鉴权头改成"按协议线在 `_req_headers` 里组装"后，
+>   `create_adapter` 不再往静态 headers 里塞 `Authorization`，而媒体三个调用点（图像生成 / 视频创建 / 视频轮询）
+>   仍在用 `self._headers` ⇒ 出站请求一个鉴权头都没有。真机表现：`POST /v1/images/generations` 上游
+>   401「未提供令牌」（同一个 key 直接 curl 同一个地址是 **200**）。已加 `_media_headers()` 统一补回。
+> - **测试基建（本轮漏检的根因之一）**：`tests/test_gateway.py` 的 `if __name__ == "__main__"` 运行块被夹在
+>   **文件中间**，运行器只收集"执行到该行时已存在"的 globals ⇒ 定义在它之后的测试在 `make test`（脚本模式）下
+>   根本不会跑（`test_image_request_goes_to_requested_model` 白写了一轮）。已把运行块移到文件末尾，
+>   并补齐 /v1/messages、/v1/responses 的**真发请求**测试（此前零覆盖）。测试数 **165 → 173**，全部通过。
+> - 复验结论：`live_check.py` **19 PASS / 0 FAIL / 0 WARN**（含三线直传真实 200、跨线 400、图像生成 200、
+>   Prometheus 200）；图像下载 `/v1/media/download` 实测 560KB PNG 落地正常。
 
 ### 鉴权（页面账号体系 + 每账号 API Key）
 
 鉴权**不写在配置文件里**：账号、密码、API Key 全部由管理台页面维护，持久化在 `data/users.json`
-（密码 PBKDF2 哈希、Key SHA-256 哈希，均不落明文；文件权限 600 且已加入 `.gitignore`）。
+（密码只存 PBKDF2 哈希；Key 存 SHA-256 哈希用于鉴权，**另存一份明文**以便页面随时再复制 —— 取舍见下方
+「Key 明文回显」；文件权限 600 且已加入 `.gitignore`）。
 `data/gateway.yaml` 只剩 `auth.session_ttl_minutes`（会话时长，默认 1440 分钟）一项。
 
 ```yaml
@@ -356,11 +389,13 @@ python run.py           # 启动时自动读取 .env
 | `GET` | `/` | 否 | 端点导航 |
 | `GET` | `/health` | 否（可开） | 运维看板：uptime/失败率/耗时/熔断状态 |
 | `GET` | `/health/{provider}` | 否（可开） | 供应商探活 |
-| `GET` | `/models` / `/v1/models` | 是 | 全部模型 + 路由别名 + 供应商 |
-| `POST` | `/v1/chat/completions` | 是 | 主接口（fallback + 流式 + 熔断 + 三级限流 + 成本） |
+| `GET` | `/models` / `/v1/models` | 是 | 全部模型（含视觉位与支持的协议线）+ 供应商 |
+| `POST` | `/v1/chat/completions` | 是 | 主接口（chat/completions 线：流式 + 熔断 + 两级限流 + 成本） |
+| `POST` | `/v1/messages` | 是 | Anthropic `messages` 线直传（同方协议原样进出） |
+| `POST` | `/v1/responses` | 是 | OpenAI `responses` 线直传 |
 | `POST` | `/v1/chat/completions/batch` | 是 | 并发多 prompt |
-| `POST` | `/v1/images/generations` | 是 | 图像生成（支持路由别名） |
-| `POST` | `/v1/videos` | 是 | 视频创建（`wait`/`callback_url`，支持路由别名） |
+| `POST` | `/v1/images/generations` | 是 | 图像生成（`model` 填真实模型 id） |
+| `POST` | `/v1/videos` | 是 | 视频创建（`wait`/`callback_url`） |
 | `GET` | `/v1/videos/{id}` | 是 | 视频轮询（`?wait=true`） |
 | `GET` | `/metrics` | 是 | 用量统计（JSON，含熔断状态） |
 | `GET` | `/metrics/prometheus` | 是 | Prometheus 文本格式 |
@@ -384,19 +419,19 @@ python run.py           # 启动时自动读取 .env
 
 > 「仅会话」= 只接受账号密码登录换来的 `sess-` token，用 API Key 调用返回 403（见上文吊销语义）。
 
-> 媒体端点的 `model` 可以填**路由别名**（如 `wjd`）：网关会自动解析到该路由链里第一个 `type==image/video` 的模型，找不到才 404。
+> 媒体端点的 `model` 必须是**真实模型 id**（第二十七轮起路由别名已删除，不再有别名解析）。
 
 ## 关键行为说明（v2.4）
 
-- **三级限流**：路由级 `routes.<name>.rate_limit_rps` > 供应商级 `providers.<key>.rate_limit_rps` > 全局 `server.rate_limit_rps`。路由/供应商级按独立桶分桶，打满则 429；chat 接口下打满会切下一个模型而不是直接 429。
+- **两级限流**：供应商级 `providers.<key>.rate_limit_rps` > 全局 `server.rate_limit_rps`。供应商级按独立桶分桶，打满则 429（chat / 媒体共用 `prov:<pkey>` 桶）；路由级限流随路由功能删除。
 - **媒体端点也限流**（v2.3 / v2.6 修正）：`/v1/images`、`/v1/videos` 按 `providers.<key>.rate_limit_rps` 的**供应商桶**限流，与 chat 共用同一个 `prov:<pkey>` 桶（v2.6 起媒体不再另起 `media:prov:<key>` 独立桶 —— 那样实际放行量会翻倍、与文档不符）。高成本资源不再裸奔。
-- **route.timeout 全链生效**（v2.3）：配了 `routes.<name>.timeout` 后，**整条链（含链首最高优先级模型）统一用这个超时**；之前只对兜底模型生效、链首仍用 `server.timeout`。
+- **协议线闸门**（第二十七轮）：`POST /v1/messages`、`/v1/responses` 只放行声明了对应线的模型，否则 400 并列出该模型支持的线；网关不做跨格式翻译。
 - **熔断按次数窗口**（v2.3）：`circuit.window` 现在真正按"最近 N 次调用"滑动（之前写死 60 秒、配置无效）。判定 = 最近 window 次里失败 ≥ failure_threshold。
 - **失败也算耗时**：`/metrics` 的 P50/P95 包含失败请求的等待时间。
 - **in_flight 精确统计**（v2.4）：按响应**实际类型**（`StreamingResponse`）判断流式，非流式/413/502 在中间件减计数，SSE 流式在生成器收尾减计数。修复了"3MB 的流式 POST 被 413 后 in_flight 永久 +1"的泄漏。
 - **适配器 client 并发安全**（v2.4）：`get_client()` 加 `asyncio.Lock`，并发下只建一个 client（之前竞态建多个泄漏 fd）；`close()` 幂等可重入（之前并发 double-close 抛 `Event loop is closed`）。
 - **图像 size 缺省 1K**（v2.4）：`/v1/images/generations` 不传 size 时默认最低档 `1K`，避免 Agnes 因缺 size 返回 400；`n=1` 时省略该字段（Agnes 一次一张）。
-- **热重载真正生效**：改 `circuit` / `observability` / `metrics` / `auth` / `routes` / `pricing` 即时重建运行时对象；日志级别/JSON 格式热改也真能生效；`uptime_seconds` 因热重载不会清零。
+- **热重载真正生效**：改 `circuit` / `observability` / `metrics` / `auth` / `pricing` / 模型与协议线即时重建运行时对象；日志级别/JSON 格式热改也真能生效；`uptime_seconds` 因热重载不会清零。
 - **优雅关闭**：`server.graceful_shutdown` 传给 uvicorn `timeout_graceful_shutdown`，收到停止信号时先排空在途请求再退出。**（v2.8 重要修复）**：lifespan 里曾用 `loop.add_signal_handler` 注册自己的 SIGTERM/SIGINT 处理器，把 **uvicorn 自己的处理器覆盖掉了**，导致 `SIGTERM`/`SIGINT` 完全无法停服（实测发信号后 10s+ 仍存活，只能 `kill -9`）。现已移除该注册，交给 uvicorn 处理；实测 SIGTERM 后 0.5s 内完成 `Shutting down → 应用收尾 → Finished`。
 - **OpenAI 全兼容**（v2.2）：响应带 `created` / `system_fingerprint`，流式末尾带 `usage` 块，错误为 `{"error":{message,type,code}}`，`/v1/models` 标准端点——OpenAI 官方 SDK 零适配直连。
 
@@ -411,10 +446,15 @@ curl -X POST http://localhost:8808/v1/chat/completions \
   -H "$AUTH" -H "Content-Type: application/json" \
   -d '{"model":"agnes-3.0-flash","messages":[{"role":"user","content":"你好"}],"max_tokens":256}'
 
-# 路由别名 wjd（运行时挑可用 + 最快文本模型优先，其余按速度顺序 fallback + 熔断）
+# 换模型 = 换 model id（第二十七轮起没有路由别名，网关不会替你挑模型）
 curl -X POST http://localhost:8808/v1/chat/completions \
   -H "$AUTH" -H "Content-Type: application/json" \
-  -d '{"model":"wjd","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
+
+# Anthropic messages 线（同方协议直传，鉴权头换成 x-api-key）
+curl -X POST http://localhost:8808/v1/messages \
+  -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4.1-flash","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
 
 # 并发多 prompt（batch）
 curl -X POST http://localhost:8808/v1/chat/completions/batch \
@@ -451,10 +491,10 @@ curl "http://localhost:8808/v1/videos/<video_id>?model=agnes-video-2.5-flash&wai
 - 里程碑：**M1** 登录 + 网关托管 + 去掉批量页（构建栈 Vue 3 + Vite + TS + Element Plus +
   ECharts + Pinia + Vue Router + marked）。JS 主包约 1.2MB，分包/按需引入留给 M5。
 - 里程碑：**M2** 对话 Playground（`/web/#/chat`）：流式/非流式对话（fetch 直连
-  `/v1/chat/completions` 解析 SSE）、模型/路由选择（路由显示完整降级链）、参数面板
+  `/v1/chat/completions` 解析 SSE）、模型选择（第二十七轮起是模型 + 协议线，不再有路由别名）、参数面板
   （temperature / top_p / max_tokens / 流式开关 / 系统提示词）、Markdown+代码高亮渲染
   （marked + highlight.js + DOMPurify 消毒）、推理折叠（`reasoning_content` 单独折叠）、
-  降级可视化（meta 帧的 served/provider/fallback_used 徽标）、token/成本展示（流式 usage
+  服务信息徽标（meta 帧的 served/provider；`fallback_used` 随路由功能删除）、token/成本展示（流式 usage
   帧现也带 `estimated_cost_cny`）、会话历史 sessionStorage 持久、Enter 发送/Shift+Enter 换行。
 - 里程碑：**M3** 图像页面（`/web/#/images`）+ 视频页面（`/web/#/videos`）：
   图像生成网格（`/v1/images/generations`，url/base64 均可显示、el-image 大图预览、耗时/供应商标注、
@@ -467,7 +507,7 @@ curl "http://localhost:8808/v1/videos/<video_id>?model=agnes-video-2.5-flash&wai
 - 里程碑：**M4** 仪表盘图表打磨 + 指标页 + 日志页（引入 ECharts，`src/components/EChart.vue`
   封装 + `src/lib/echarts.ts` tree-shake 按需注册）：
   仪表盘新增供应商份额饼图 + 模型延迟 P50/P95 柱图；指标页（`/web/#/metrics`）含指标卡
-  （已运行/在途/降级/双 token/调用比）+ 各模型 ok/fail 堆叠柱图 + 供应商份额 + 路由 vs 供应商
+  （已运行/在途/双 token/调用比）+ 各模型 ok/fail 堆叠柱图 + 供应商份额 + 按供应商成功/失败
   堆叠 + 延迟 P50/P95 + 熔断器状态表（自动刷新 8s）；日志页（`/web/#/logs`）展示最近 200 条
   `/logs` 访问日志（方法/路径/供应商/实际模型/OK-FAIL/SSE/调用方/rid/错误），支持方法、结果、
   关键字筛选与自动刷新 5s。EChart 共享分包约 594kB。
@@ -628,7 +668,7 @@ curl "http://localhost:8808/v1/videos/<video_id>?model=agnes-video-2.5-flash&wai
 - **图表文字挤压修复**：ECharts 6 把 legend 默认位置从 top 改为 bottom，导致图例压在
   x 轴标签上。新增 `src/lib/charts.ts` 统一 `legend(top:0)` / 类目轴截断+倾斜+hideOverlap /
   `grid.containLabel` 留白，仪表盘与指标页 4 类图全部接入。
-- **模型与供应商页**（`/web/#/models`）：指标卡（模型/文本/图像/视频/路由/供应商）+ 路由别名表
+- **模型与供应商页**（`/web/#/models`）：指标卡（模型/文本/图像/视频/供应商）+ 模型清单（ID/类型/供应商/视觉/延迟，一键测速按模型自己的协议线探测），数据来自 `/v1/models` + `/health`。（第二十七轮：路由别名表已随功能删除）
   （降级链逐 tag 展示、供应商数）+ 模型清单（ID/类型/供应商/Key 已配），数据来自 `/v1/models` + `/health`。
 - **多语言（M5+）**：Vue I18n + `src/locales/zh|en.ts`，全站中英可切换；语言按钮在头部与登录页、设置页
   （`settings.language`），存 `localStorage.gw_locale`、默认中文；Element Plus 语言包经
@@ -745,7 +785,7 @@ curl "http://localhost:8808/v1/videos/<video_id>?model=agnes-video-2.5-flash&wai
 > - **清空/清除类操作补二次确认**：视频页「清除已完成」、图像页「清空历史」都是**服务端真删且不可逆**
 >   （不是只清本地视图），原先点一下就没了。现在弹确认框并写明条数与后果（另：视频页没东西可清时按钮置灰）。
 > - **设置 → 关于去掉文档外链**（不再往外部站点跳），同时删掉对应 i18n 键。
-> - **API 密钥页新增「API 调用说明」**：接口地址（复制按钮）· 鉴权头 · 模型选择（`wjd` 路由别名 vs 真实模型 id）·
+> - **API 密钥页新增「API 调用说明」**：接口地址（复制按钮）· 鉴权头 · 模型选择（填真实模型 id；路由别名已于第二十七轮删除）·
 >   请求格式 · 常用端点表（与 `app/main.py` 的真实路由一一对应）· 四段可直接复制的示例
 >   （对话 / 图像 / 视频提交+轮询 / Python OpenAI SDK）· 七条注意事项（n=1、seconds 4–12、
 >   轮询别快于 5s、素材可用 data URI 但请求体 <2MB、Key 调管理接口 403、Key 泄漏处置、审计归属）。
@@ -782,8 +822,8 @@ curl "http://localhost:8808/v1/videos/<video_id>?model=agnes-video-2.5-flash&wai
 >   熔断桶与调用指标都不动，前端按退避继续轮（页面轮询间隔保持 5s，不按文档建议的 1~2s，正是为了不撞限流）。
 > - **视觉能力位**：`/v1/models` 新增 `vision`（`agnes-3.0-flash` = true，即文档里的"输入模态：文本、图像 URL"；
 >   OpenCode Go 侧 `deepseek-v4.1-flash` 与 `deepseek-v4-flash-vision-exp` 实测同为 true）；
->   **带图请求走路由别名 `wjd` 时把视觉模型排到链首**（否则链首的纯文本模型要么忽略图片、要么报参数错误，
->   两种都极难自查）；直接指定真实模型时不改用户选择。
+>   **带图请求不再重排模型**（第二十七轮：路由链已整体删除，网关不替用户换模型）——选了不支持视觉
+>   的模型就照原样发上去，前端提前给告警条并提供一键切换，网关侧只记一条日志。
 > - 回归测试新增 6 组（vision 暴露 / 视觉优先重排 / 带图块识别 / 图像 n 拦截 / 图像 4xx·5xx 分流 /
 >   视频 videos·size·aspect·n 校验 / 轮询 429），单测 **124 passed / 0 failed**、pyflakes 0；
 >   前端 `npm run typecheck`（vue-tsc）**0 error** —— 顺手补了 element-plus 语言包的模块声明、
@@ -1191,7 +1231,7 @@ curl "http://localhost:8808/v1/videos/<video_id>?model=agnes-video-2.5-flash&wai
 ## 测试
 
 ```bash
-# 单元测试（mock 供应商，不依赖真实网络，覆盖配置/路由/熔断/适配器/端点）
+# 单元测试（mock 供应商，不依赖真实网络，覆盖配置/协议线/熔断/适配器/端点）
 python tests/test_gateway.py
 # 或
 pytest tests/ -q
@@ -1203,12 +1243,12 @@ pytest tests/ -q
 # 冒烟：健康 / 模型列表 / chat / batch / 错误格式（网关未起或无 key 时优雅 SKIP）
 python smoke_test.py --url http://127.0.0.1:8808
 
-# 活体检查：真实上游（Agnes / 火山方舟）跑 14 项端到端行为校验，含路由 fallback、
+# 活体检查：真实上游（Agnes / 火山方舟 / OpenCode Go）端到端行为校验，含三线直传与跨线 400、
 # 流式 SSE、413、CORS 预检、图像生成等
 python live_check.py --url http://127.0.0.1:8808
 ```
 
-> 当前状态：单元测试 **168 passed / 0 failed**（`python tests/test_gateway.py`，不需要 pytest）；冒烟 5/5 PASS；活体检查 14 PASS / 0 FAIL / 0 WARN。
+> 当前状态：单元测试 **165 passed / 0 failed**（`python tests/test_gateway.py`，不需要 pytest）；冒烟 5/5 PASS；活体检查 14 PASS / 0 FAIL / 0 WARN。
 
 ## 备注
 

@@ -77,6 +77,9 @@
         </div>
         <div><b>{{ t('apidoc.auth') }}</b> <span class="code">{{ t('apidoc.authVal') }}</span></div>
         <div><b>{{ t('apidoc.modelPick') }}</b> <span>{{ t('apidoc.modelPickVal') }}</span></div>
+        <!-- 第二十七轮：三条协议线各自的请求格式不同，先在这里点明「去哪看支持哪些线」，
+             免得用户点了 400 才知道格式选错（400 文案也会列出该模型支持的线）。 -->
+        <div><b>{{ t('apidoc.formats') }}</b> <span>{{ t('apidoc.formatsVal') }}</span></div>
         <div><b>{{ t('apidoc.ctype') }}</b> <span>{{ t('apidoc.ctypeVal') }}</span></div>
       </div>
 
@@ -141,12 +144,19 @@ const limit = ref<number | null>(null)   // null = 不限（admin）
 const base = window.location.origin
 
 // 端点表：与 app/main.py 的真实路由一一对应（别写成 README 里才有的东西）
+// 第二十七轮：三条协议线并排 —— chat/completions（OpenAI 兼容，走专用路径）、
+//   messages（Anthropic）、responses（OpenAI Responses）。后两条是「直传」：原始 JSON 进、
+//   上游响应原样出，网关不翻译字段；某个模型能不能用这条线，看「供应商与模型」页的
+//   「支持的格式」列（用错线会在入口 400 并列出该模型支持哪些线）。
 const endpoints = computed(() => [
   { method: 'GET', path: '/v1/models', desc: t('apidoc.epModels') },
   { method: 'POST', path: '/v1/chat/completions', desc: t('apidoc.epChat') },
+  { method: 'POST', path: '/v1/messages', desc: t('apidoc.epMessages') },
+  { method: 'POST', path: '/v1/responses', desc: t('apidoc.epResponses') },
   { method: 'POST', path: '/v1/images/generations', desc: t('apidoc.epImages') },
   { method: 'POST', path: '/v1/videos', desc: t('apidoc.epVideoCreate') },
   { method: 'GET', path: '/v1/videos/{video_id}?model=...', desc: t('apidoc.epVideoPoll') },
+  { method: 'GET', path: '/v1/media/download?url=...', desc: t('apidoc.epDownload') },
   { method: 'GET', path: '/history/{kind}', desc: t('apidoc.epHistory') },
   { method: 'GET', path: '/logs', desc: t('apidoc.epLogs') },
   { method: 'GET', path: '/metrics', desc: t('apidoc.epMetrics') },
@@ -154,8 +164,9 @@ const endpoints = computed(() => [
 ])
 
 const notes = computed(() => [
-  t('apidoc.noteVision'), t('apidoc.noteN1'), t('apidoc.noteVideo'),
-  t('apidoc.notePoll'), t('apidoc.noteMedia'), t('apidoc.noteKey'), t('apidoc.noteAudit'),
+  t('apidoc.noteVision'), t('apidoc.noteCross'), t('apidoc.noteConvId'), t('apidoc.noteN1'),
+  t('apidoc.noteVideo'), t('apidoc.notePoll'), t('apidoc.noteMedia'), t('apidoc.noteDownload'),
+  t('apidoc.noteKey'), t('apidoc.noteAudit'),
 ])
 
 // 示例里的 Key 用占位符 $GW_KEY（不把真 Key 渲染进文档；本页的 Key 明文只在上方列表里回显）
@@ -166,7 +177,15 @@ const examples = computed(() => {
     { title: t('apidoc.exChat'), code:
 `curl ${base}/v1/chat/completions \\
   ${H} \\
-  -d '{"model":"wjd","messages":[{"role":"user","content":"${t('apidoc.sampleChat')}"}]}'` },
+  -d '{"model":"agnes-3.0-flash","messages":[{"role":"user","content":"${t('apidoc.sampleChat')}"}]}'` },
+    { title: t('apidoc.exMessages'), code:
+`curl ${base}/v1/messages \\
+  ${H} \\
+  -d '{"model":"${t('apidoc.sampleModelMessages')}","max_tokens":64,"messages":[{"role":"user","content":"${t('apidoc.sampleChat')}"}]}'` },
+    { title: t('apidoc.exResponses'), code:
+`curl ${base}/v1/responses \\
+  ${H} \\
+  -d '{"model":"${t('apidoc.sampleModelResponses')}","input":"${t('apidoc.sampleChat')}","max_output_tokens":64}'` },
     { title: t('apidoc.exImg'), code:
 `curl ${base}/v1/images/generations \\
   ${H} \\
@@ -185,7 +204,7 @@ curl "${base}/v1/videos/task_xxx?model=agnes-video-2.5-flash" \\
 `from openai import OpenAI
 
 c = OpenAI(base_url="${base}/v1", api_key="wjd-xxxxxxxx")
-r = c.chat.completions.create(model="wjd", messages=[{"role": "user", "content": "${t('apidoc.sampleChat')}"}])
+r = c.chat.completions.create(model="agnes-3.0-flash", messages=[{"role": "user", "content": "${t('apidoc.sampleChat')}"}])
 print(r.choices[0].message.content)` },
   ]
 })
