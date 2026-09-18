@@ -15,6 +15,19 @@ class ConfigError(ValueError):
 
 
 # ── 模型 / 供应商 ──
+# 模型级「强制参数」（providers.<key>.models[].params）允许出现的键。
+#
+# 只放采样 / 长度类参数：它们不影响"调哪个模型、走什么协议"，被覆盖最坏也只是改变生成风格。
+# 而 model / messages / stream / tools / stop 这类**结构性**键一旦允许出现在这里，
+# 等于把路由与协议语义交给配置文件，等于重开一条越权面（见 app/models.py 的
+# PROTECTED_PAYLOAD_KEYS 说明），故一律不放行。
+MODEL_PARAM_KEYS: frozenset[str] = frozenset({
+    "temperature", "top_p", "top_k", "min_tokens", "max_tokens",
+    "presence_penalty", "frequency_penalty", "repetition_penalty",
+    "seed", "logit_bias", "n",
+})
+
+
 @dataclass
 class ModelInfo:
     id: str
@@ -25,6 +38,14 @@ class ModelInfo:
     # 其余文本模型（ark-code 等）文档未声明图像输入 → 默认 False。
     #   用途：① /v1/models 暴露给前端标注/告警；② 带图请求走路由别名时把有视觉能力的模型排到前面。
     vision: bool = False
+    # 第二十五轮（模型参数硬约束）: 该模型**必须用**的上游参数，发送前强制覆盖客户端传值。
+    #   背景：OpenCode Go 的 kimi-k2.7-code 只接受 temperature=1，客户端传 0（含一键测速的
+    #   探针，它固定发 temperature=0）会被上游 400：
+    #     "invalid temperature: only 1 is allowed for this model"
+    #   配置成 {"temperature": 1} 后，网关无论收到什么值都按 1 发 —— 用户在前端把温度滑块
+    #   拉到 0 也不会再 400（值被网关改成上游唯一允许的那个）。
+    #   键必须在 MODEL_PARAM_KEYS 白名单内，否则 validate_config 直接报错（不静默失效）。
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -225,6 +246,10 @@ class GatewayConfig:
                     "vision": m.vision,
                     "provider": pkey,
                     "provider_name": pconfig.name,
+                    # 第二十五轮: 暴露模型级强制参数（如 {"temperature": 1}）。
+                    #   前端据此标注「该模型温度已由网关固定」，API 调用方也能提前知道
+                    #   自己传的采样参数会被上游要求覆盖，省掉一轮「传了没生效」的困惑。
+                    "params": dict(m.params or {}),
                 })
         return result
 
@@ -294,6 +319,40 @@ def _opt_int(v: Any, field_name: str, default: int, minimum: int | None = None) 
     if minimum is not None and val < minimum:
         raise ConfigError(f"{field_name} 不能小于 {minimum}，得到: {val}")
     return val
+
+
+def _parse_model_params(v: Any, where: str) -> dict[str, Any]:
+    """解析模型级「强制参数」（第二十五轮）。
+
+    形如 `params: {temperature: 1}` —— 网关发往上游前用这些值**覆盖**客户端传的同名参数。
+    用来应对上游的硬约束（某模型只接受 temperature=1 之类）：否则客户端传别的值就 400，
+    而且用户在前端拉个滑块就踩雷，根本不可能自己猜出上游要什么。
+
+    容错口径（宁可报错，不可静默失效）：
+      - 缺失 / None → {}（不是错误，只是这个模型没有约束）；
+      - 不是映射 → ConfigError；
+      - 参数名不在 MODEL_PARAM_KEYS 白名单内 → ConfigError（防止把 model/messages/stream
+        这类结构性键配进来，那等于让配置文件改写路由语义）；
+      - 值类型必须是标量 / list / dict。
+    """
+    if v is None:
+        return {}
+    if not isinstance(v, dict):
+        raise ConfigError(
+            f"{where} 必须是映射（如 {{temperature: 1}}），得到 {type(v).__name__}: {v!r}")
+    out: dict[str, Any] = {}
+    for k, val in v.items():
+        key = str(k).strip()
+        if not key:
+            raise ConfigError(f"{where} 出现空参数名")
+        if key not in MODEL_PARAM_KEYS:
+            raise ConfigError(
+                f"{where}.{key} 不是允许的模型参数（允许：{', '.join(sorted(MODEL_PARAM_KEYS))}）")
+        if val is None or isinstance(val, (bool, int, float, str, list, dict)):
+            out[key] = val
+        else:
+            raise ConfigError(f"{where}.{key} 的值类型不支持: {type(val).__name__}")
+    return out
 
 
 def _parse_media(pval: dict[str, Any]) -> MediaConfig:
@@ -423,8 +482,10 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
         )
         models = [
             ModelInfo(id=m.get("id", ""), display_name=m.get("display_name", ""),
-                      type=m.get("type", "text"), vision=_opt_bool(m.get("vision"), "providers.*.models.*.vision", False))
-            for m in pval.get("models", [])
+                      type=m.get("type", "text"), vision=_opt_bool(m.get("vision"), "providers.*.models.*.vision", False),
+                      params=_parse_model_params(
+                          m.get("params"), f"providers.{pkey}.models[{idx}].params"))
+            for idx, m in enumerate(pval.get("models", []))
         ]
         providers[pkey] = ProviderConfig(
             key=pkey,

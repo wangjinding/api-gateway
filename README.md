@@ -87,9 +87,19 @@ providers:
       video_model_name: "agnes-video-2.5-flash"
     models:
       - { id: "agnes-3.0-flash", display_name: "Agnes 3.0 Flash", type: "text" }
+      # params（可选，第二十五轮）：该模型发往上游前**强制覆盖**的参数，用于应对上游硬约束。
+      #   kimi-k2.7-code 只接受 temperature=1，写死后客户端传什么值都按 1 发（含一键测速探针）。
+      - id: "kimi-k2.7-code"
+        display_name: "Kimi K2.7 Code"
+        type: "text"
+        params: { temperature: 1 }
 ```
 
 认证优先级：**环境变量 > yaml 里的 `token` 字段**。
+
+**模型级强制参数 `models[].params`（第二十五轮）**：网关在组装完请求（**在 `extra` 逃生舱之后**）才应用它，所以客户端改不动 —— 目的就是"上游只接受某个值，别让用户踩雷"。允许的键：`temperature`、`top_p`、`top_k`、`max_tokens`、`min_tokens`、`presence_penalty`、`frequency_penalty`、`repetition_penalty`、`seed`、`logit_bias`、`n`；`model` / `messages` / `stream` / `tools` 这类**结构性键被刻意排除**（放行等于让配置文件改写路由与协议语义）。键名写错或值类型不对 → 启动/保存配置时直接 `ConfigError`，不会静默失效。`GET /v1/models` 会回 `params`，前端据此标挂锁。
+
+此外还有一层运行时兜底：上游若回 400 说某参数"只允许 X"（`invalid temperature: only 1 is allowed for this model`）或"必须大于 N"，网关会自动按上游要求修正并**重发一次**，并把这个值记在适配器实例上（后续请求不再多跑一轮）；日志会提示建议把它写进 `params`。管理员已写死的值不会被自动改掉（冲突时只记日志）。
 
 ### 路由别名 + 按「可用 + 速度」动态排序 + 熔断
 （第十一轮 #4：`wjd` 不再按配置里的数组优先级，改为运行时挑可用且最快的文本模型先调用；详见下方路由说明）
@@ -1183,7 +1193,7 @@ python smoke_test.py --url http://127.0.0.1:8808
 python live_check.py --url http://127.0.0.1:8808
 ```
 
-> 当前状态：单元测试 **137 passed / 0 failed**（`python tests/test_gateway.py`，不需要 pytest）；冒烟 5/5 PASS；活体检查 14 PASS / 0 FAIL / 0 WARN。
+> 当前状态：单元测试 **168 passed / 0 failed**（`python tests/test_gateway.py`，不需要 pytest）；冒烟 5/5 PASS；活体检查 14 PASS / 0 FAIL / 0 WARN。
 
 ## 备注
 

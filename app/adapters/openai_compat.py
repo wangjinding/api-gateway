@@ -11,12 +11,30 @@ Agnes / 火山方舟 两家均使用 OpenAI 兼容 API
 from __future__ import annotations
 
 import json
+import logging
+import re
 import uuid
 from typing import Any, AsyncIterator
 
+import httpx
 
 from app.adapters.base import BaseAdapter, json_or_raise
+from app.config import MODEL_PARAM_KEYS
 from app.models import CHAT_CORE_KEYS, PROTECTED_VIDEO_KEYS, strip_protected
+
+log = logging.getLogger("api-gateway")
+
+# ── 上游"某参数只允许取某个值"的报错形态（第二十五轮）──
+# 各家措辞不同，这里收录已实测到的两类：
+#   OpenCode Go: "Error from provider (Console Go): [invalid_request_error]
+#                 invalid temperature: only 1 is allowed for this model"
+#   "max_tokens must be greater than 2"
+# 参数名不写死 —— 同类约束也可能出现在 top_p / max_tokens 上。
+_PARAM_ONLY_RE = re.compile(
+    r"invalid\s+([a-z_][a-z0-9_]*)\s*:\s*only\s+([-+]?\d+(?:\.\d+)?)\s+is allowed", re.I)
+_PARAM_MIN_RE = re.compile(
+    r"([a-z_][a-z0-9_]*)\s+must be greater than\s+(\d+)", re.I)
+
 
 
 class OpenAICompatAdapter(BaseAdapter):
@@ -30,6 +48,7 @@ class OpenAICompatAdapter(BaseAdapter):
         timeout: int = 120,
         media=None,
         requires_session_header: bool = False,
+        model_params: dict[str, dict[str, Any]] | None = None,
     ):
         super().__init__(name=name, base_url=base_url, timeout=timeout, media=media)
         self._headers: dict[str, str] = headers or {}
@@ -37,6 +56,77 @@ class OpenAICompatAdapter(BaseAdapter):
         # 不能放静态 headers（_get_adapter 会缓存适配器、冻结 header），
         # 所以在每次请求时动态生成一个 UUID 会话头。
         self._requires_session = requires_session_header
+        # 模型级强制参数：model id → {参数名: 强制值}（来自 gateway.yaml 的 models[].params）
+        self._model_params: dict[str, dict[str, Any]] = {
+            k: dict(v) for k, v in (model_params or {}).items() if v
+        }
+        # 运行期自学习到的参数约束（进程内，不落盘）：见 _learn_from_upstream_error。
+        #   仅作兜底 —— 管理员在 gateway.yaml 写死 params 后就不再需要它。
+        self._learned_params: dict[str, dict[str, Any]] = {}
+
+    # ── 模型级强制参数 / 上游参数约束自学习（第二十五轮） ──
+
+    def _forced_params(self, model: str) -> dict[str, Any]:
+        """该模型发往上游前**必须使用**的参数值。
+
+        两层，配置优先：`gateway.yaml` 的 `models[].params` > 运行期自学习值。
+        配置优先是刻意的 —— 管理员写死的口径是最终口径，自学习绝不能把它改掉。
+        """
+        out = dict(self._learned_params.get(model) or {})
+        out.update(self._model_params.get(model) or {})
+        return out
+
+    def _learn_from_upstream_error(self, model: str, exc: Exception) -> dict[str, Any] | None:
+        """上游 400 说"这个参数只允许 X"→ 记下 X，并返回修正后的参数集供重发。
+
+        返回 None = 报文里没识别出可修正的参数（调用方按原样抛错）。
+
+        这不是「重试」：报文一模一样地重发只会再吃一次同样的 400，必须先把参数改成
+        上游允许的值。学到之后会缓存到本适配器实例，后续请求直接按修正值组装 payload，
+        不再多跑这一轮往返；配置变更时 main 会丢弃适配器缓存，学习值随之失效。
+        """
+        resp = getattr(exc, "response", None)
+        if resp is None or getattr(resp, "status_code", None) != 400:
+            return None
+        try:
+            text = resp.text or ""
+        except Exception:
+            return None
+
+        fixes: dict[str, Any] = {}
+        for m in _PARAM_ONLY_RE.finditer(text):
+            name = m.group(1).lower()
+            if name in MODEL_PARAM_KEYS:
+                raw = m.group(2)
+                fixes[name] = float(raw) if "." in raw else int(raw)
+        for m in _PARAM_MIN_RE.finditer(text):
+            name = m.group(1).lower()
+            if name in MODEL_PARAM_KEYS and name not in fixes:
+                fixes[name] = int(m.group(2)) + 1     # “must be greater than N” → 发 N+1
+        if not fixes:
+            return None
+
+        cfg_params = self._model_params.get(model) or {}
+        learned = dict(self._learned_params.get(model) or {})
+        changed: dict[str, Any] = {}
+        for k, v in fixes.items():
+            if k in cfg_params:
+                # 管理员已在 params 里写死该参数 → 不偷偷覆盖配置；但冲突必须说出来，
+                #   否则用户只会看到「明明配了却还是 400」，无从下手。
+                if cfg_params[k] != v:
+                    log.warning("模型 %s 的 params.%s=%r 与上游要求（%r）冲突，仍按配置发送",
+                                model, k, cfg_params[k], v)
+                continue
+            if learned.get(k) != v:
+                learned[k] = v
+                changed[k] = v
+        if not changed:
+            return None      # 没学到新东西 → 不重发，避免在同一约束上来回打转
+        self._learned_params[model] = learned
+        log.warning("上游限制了模型 %s 的参数：%s —— 已自动修正并按修正值重发一次；"
+                    "建议在 gateway.yaml 该模型下写死 params，省掉以后每次这一轮额外往返",
+                    model, changed)
+        return self._forced_params(model)
 
     def _req_headers(self, session_id: str | None = None) -> dict[str, str]:
         """每次请求的 headers。需要会话头的供应商动态注入 x-opencode-session。
@@ -85,6 +175,11 @@ class OpenAICompatAdapter(BaseAdapter):
         # 以及供应商特有参数）必须放行 —— 见 models.CHAT_CORE_KEYS 的说明。
         if extra:
             payload.update(strip_protected(extra, CHAT_CORE_KEYS))
+        # 第二十五轮: 模型级强制参数放在**最后**覆盖 —— 客户端（含 extra 逃生舱）改不动它。
+        #   这是应对"上游只接受某个值"的最终口径，优先级高于客户端的一切输入。
+        forced = self._forced_params(model)
+        if forced:
+            payload.update(forced)
         return payload
 
     async def chat(
@@ -105,6 +200,18 @@ class OpenAICompatAdapter(BaseAdapter):
             model, messages, temperature, top_p, max_tokens,
             stream, stop, tools, tool_choice, extra,
         )
+        try:
+            return await self._post_chat(payload, session_id)
+        except httpx.HTTPStatusError as e:
+            # 上游嫌参数（如 temperature）不合法时，按它要求的值修正后**重发一次**。
+            #   fixed 为 None（不是参数约束 / 已学过仍失败）则原样抛错，不做无谓重发。
+            fixed = self._learn_from_upstream_error(model, e)
+            if fixed is None:
+                raise
+            return await self._post_chat({**payload, **fixed}, session_id)
+
+    async def _post_chat(self, payload: dict[str, Any], session_id: str | None) -> dict[str, Any]:
+        """执行一次非流式 /chat/completions 请求（不含参数修正逻辑）。"""
         # Bug 4 修复: 用 lease 占用 client，热重载 close 会等本次请求结束才真正关连接
         async with self._lease() as client:
             resp = await client.post("/chat/completions", json=payload, headers=self._req_headers(session_id))
@@ -114,7 +221,7 @@ class OpenAICompatAdapter(BaseAdapter):
         # 统一返回格式
         return {
             "provider": self.name,
-            "model": model,
+            "model": payload.get("model", ""),
             "choices": data.get("choices", []),
             "usage": data.get("usage"),
             "raw": data,
@@ -138,6 +245,27 @@ class OpenAICompatAdapter(BaseAdapter):
             model, messages, temperature, top_p, max_tokens,
             True, stop, tools, tool_choice, extra,
         )
+        started = False
+        try:
+            async for chunk in self._stream_once(payload, session_id):
+                started = True
+                yield chunk
+            return
+        except httpx.HTTPStatusError as e:
+            # 已经开始吐内容就不能重发（会重复输出 / 串话）；只有"开局就被上游 400 顶回来"
+            #   才允许按上游要求修正参数重来一次。
+            if started:
+                raise
+            fixed = self._learn_from_upstream_error(model, e)
+            if fixed is None:
+                raise
+            payload = {**payload, **fixed}
+        async for chunk in self._stream_once(payload, session_id):
+            yield chunk
+
+    async def _stream_once(self, payload: dict[str, Any],
+                           session_id: str | None) -> AsyncIterator[dict]:
+        """执行一次流式 /chat/completions（不含参数修正逻辑）。"""
         # Bug 4 修复: lease 在整个流式期间持有占用，热重载/关闭不会掐断在途流
         async with self._lease() as client:
             async with client.stream(

@@ -89,7 +89,10 @@ def config_to_view(cfg: GatewayConfig) -> dict[str, Any]:
             "requires_session_header": bool(p.requires_session_header),
             "media": {k: getattr(p.media, k) for k in MEDIA_KEYS},
             "models": [
-                {"id": m.id, "display_name": m.display_name, "type": m.type, "vision": bool(m.vision)}
+                {"id": m.id, "display_name": m.display_name, "type": m.type, "vision": bool(m.vision),
+                 # 第二十五轮: 回传模型级强制参数。面板不提供编辑入口（在 YAML 全文编辑器里改），
+                 #   但必须一路带着走 —— 否则读回来再提交一次就会把它弄丢。
+                 "params": dict(m.params or {})}
                 for m in p.models
             ],
         }
@@ -220,14 +223,26 @@ def view_to_raw(cfg: GatewayConfig, raw: dict[str, Any], view: dict[str, Any]) -
             media_in = _as_dict(pv.get("media"), f"providers.{key}.media")
             base_media = _as_dict(base_p.get("media"), f"providers.{key}.media")
             models = []
+            # 第二十五轮: 模型项要「以文件原文为底」再覆盖面板管得着的键。
+            #   面板的模型编辑器只认 id/display_name/type/vision 四个字段，若照着它重建，
+            #   手写在 YAML 里的 models[].params（模型级强制参数，如 temperature: 1）
+            #   会被**静默清掉** —— 管理员只是在页面上改了别的东西，上游硬约束就没了，
+            #   之后又变成"这个模型怎么老是 400"。按 id 对齐原文、保留其余键即可。
+            base_models: dict[str, dict[str, Any]] = {}
+            for bm in (base_p.get("models") or []):
+                if isinstance(bm, dict) and str(bm.get("id") or "").strip():
+                    base_models[str(bm["id"]).strip()] = bm
             for i, m in enumerate(pv.get("models") or []):
                 m = _as_dict(m, f"providers.{key}.models[{i}]")
-                models.append({
-                    "id": str(m.get("id") or "").strip(),
+                mid = str(m.get("id") or "").strip()
+                item = dict(base_models.get(mid) or {})
+                item.update({
+                    "id": mid,
                     "display_name": str(m.get("display_name") or "").strip(),
                     "type": str(m.get("type") or "text").strip(),
                     "vision": bool(m.get("vision", False)),
                 })
+                models.append(item)
             providers[key] = {
                 "name": str(pv.get("name") or key).strip(),
                 "base_url": str(pv.get("base_url") or "").strip(),

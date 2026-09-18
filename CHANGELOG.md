@@ -4,6 +4,54 @@
 
 ---
 
+## 2026-09-18 · 第二十五轮：模型参数硬约束 + 测速超时/错误文案（一轮全修）
+
+**背景（两条线一起收）**：上一轮排查出两个"看起来都坏了"的模型，其实是两回事：
+1. **`kimi-k2.7-code` 每次必挂** —— 上游只接受 `temperature=1`，而一键测速探针固定发 `temperature: 0`，于是每次都 400 `invalid temperature: only 1 is allowed for this model`。更严重的是：这不只影响测速 —— **前端对话页的温度滑块默认 0.7**，用户把这个模型拖到任何非 1 的值都会 400。
+2. **`mimo-v2.5` 不是坏，是慢** —— 直连 2.2~3s、过网关 2.9~8.4s，偶发冲破探针 15s 超时。但旧文案只回 `str(e)`，两者在前端都显示成含糊的「调用失败」，无从区分。
+
+### 改动
+- **`app/config.py`**
+  - `ModelInfo` 新增 `params: dict`（模型级**强制参数**）：发往上游前覆盖客户端传值。
+  - 新增 `MODEL_PARAM_KEYS` 白名单（`temperature/top_p/top_k/max_tokens/min_tokens/presence_penalty/frequency_penalty/repetition_penalty/seed/logit_bias/n`）。**结构性键（`model`/`messages`/`stream`/`tools`）刻意不放行** —— 放行等于把路由与协议语义交给配置文件，重开一条越权面。
+  - 新增 `_parse_model_params()`：非映射、空参数名、白名单外的键、非法值类型一律 `ConfigError`（**写错立刻报错，绝不静默失效**）。
+  - `all_models()` 暴露 `params`，供 `/v1/models` 与前端标注。
+- **`app/adapters/openai_compat.py`**
+  - 新增 `model_params` 入参、`_forced_params(model)`（配置 > 运行期自学习）。
+  - `_build_payload()` **末尾**应用强制参数：在 `strip_protected(extra, CHAT_CORE_KEYS)` **之后**覆盖，客户端连同 `extra` 逃生舱都改不动。
+  - 新增 `_learn_from_upstream_error()`：上游 400 报文里出现 `invalid <参数>: only <X> is allowed` / `<参数> must be greater than <N>` 时，按上游要求修正并**重发一次**。这不是"重试"——报文照原样重发只会再吃一次 400。学到的值缓存进实例（后续请求直接按修正值组装，不再多一轮往返）；学不到新东西就返回 `None`，绝不与同一约束来回打转；管理员已在配置里写死的参数**不被偷偷改**（值冲突时只打日志说明）。
+  - `chat` / `chat_stream` 拆出 `_post_chat` / `_stream_once`，各自在"开局就被 400 顶回"时走一次修正重发；**流式若已开始吐内容则不重发**（避免重复输出/串话）。
+- **`app/adapters/__init__.py`**：`create_adapter` 把各模型 `params` 带进适配器 —— 对话 / 流式 / 批量 / 一键测速**所有入口自动一致**，不会出现"主链路修了、测速还漏着"的偏差。配置变更时 `main._apply_config` 丢弃适配器缓存，约束不会滞留旧值。
+- **`app/main.py`**
+  - `_models_payload()` 在 `/v1/models` 暴露 `params`（该端点自己构造 data 项，不是直接用 `all_models()` 的结果）。
+  - 测速探针超时 **15s → 30s**（≈实测最慢值的 3 倍）。该 timeout 只作用于探针自己创建的 adapter（适配器缓存 key 含 timeout），**不影响真实对话链路**的 `server.timeout`。
+  - 新增 `_speedtest_error_text()`：超时 → `上游超时（>30s 未响应）`；上游 4xx/5xx → 透出**上游原文**（如 `invalid temperature: only 1 is allowed for this model`）。
+- **`app/settings.py`**
+  - `view_to_raw()` 的模型项改为「以文件原文为底」再覆盖面板管的 4 个键 —— 面板的模型编辑器不认 `params`，照它重建会**静默清掉**手写约束（管理员只是在页面上改了别的东西，上游硬约束就没了）。
+  - `config_to_view()` 回传 `params`，roundtrip 不丢。
+- **`data/gateway.yaml`**：`kimi-k2.7-code` 写死 `params: {temperature: 1}`。
+- **前端**
+  - `Models.vue`：模型行前缀挂锁图标（`title` 说明），模型清单「能力」列新增「参数固定」标签（列宽 120 → 190）。
+  - `Chat.vue`：温度 chip 加挂锁；参数抽屉顶部新增说明条「该模型参数由网关固定：… （你在这里调的值会被网关覆盖后再发送）」；模型下拉选项同步挂锁。
+  - `Icon.vue` 新增 `lock`；中英文案 `paramTag` / `paramLocked` 对称（726/726）。
+
+### 验证
+- **上游全量扫描**：20 个文本模型逐个以 `temperature=0` 探测，**只有 `kimi-k2.7-code` 被拒**（400 `invalid temperature: only 1 is allowed for this model`），改 `temperature=1` 复测 200。→ 约束只此一处，未凭猜测给别的模型加参数。
+- **配置层**：非法 `params`（结构性键 / 非法值类型 / 非映射）全部被 `ConfigError` 拦下；真配置解析出 `opencode/kimi-k2.7-code → {'temperature': 1}`；`/v1/models` 暴露一致。
+- **适配器层（MockTransport，7 个场景）**：① 配置强制覆盖客户端传值且只发 1 次；② 未配时 400 → 按上游要求修正重发（0 → 1）；③ 学到后后续请求直接带修正值（1 次）；④ 上游一直 400 → 只发 2 次就抛错；⑤ 配置值与上游要求冲突 → 尊重配置、不发第二枪；⑥ 非参数类 400（额度）→ 原样抛错，不误改参数；⑦ 流式开局 400 → 修正后重发成功。
+- **隔离实例真机**（`/tmp/gw25-verify/project`，8899，生产 8808 全程未动）：真 key 实测 `kimi-k2.7-code` 测速 **1668ms 成功**、`mimo-v2.5` **4691ms 成功**；主链路显式 `temperature=0` → **200 + 正常内容**（`finish_reason=stop`），流式同样 200。
+- **真浏览器**（同一隔离实例）：Models 页 `kimi-k2.7-code` 行出现橙色挂锁、「参数固定」标签、单行测速 **1566 ms**；Chat 页选中该模型后温度 chip 带挂锁、抽屉顶部出现固定说明条。
+- **单测**：**168 passed / 0 failed**（+10：参数解析/白名单拦截/真配置锁定/强制覆盖/自动修正重发/不无限重试/配置冲突/流式修正/测速文案/面板保留 params）；前端 `vue-tsc --noEmit` 通过、`check:i18n` 726/726 对称、`check:svg` 通过、`npm run build` 成功（在副本内构建，未覆盖生产 dist）。
+
+### 上线（待老板批准）
+- 含 Python 代码改动（`config` / `adapters` / `main` / `settings`）→ 需 `supervisorctl restart api-gateway:api-gateway_00` 才生效（会踢网页会话）。
+- 前端需 `npm run build` 覆盖 `frontend/dist`（挂锁/提示条才会出现在线上）。
+- CNB 推送新增提交。
+
+**一句话**：给模型加「强制参数」机制并给上游硬约束的 `kimi-k2.7-code` 写死 `temperature: 1`（同时兜一道"上游报什么就改成什么"的自学习重发），把探针超时从 15s 放宽到 30s 并让失败文案说清是超时还是上游拒绝 —— 于是"必挂的模型"变 1.5s 成功、"慢的模型"不再被误判成坏。
+
+---
+
 ## 2026-09-18 · OpenCode Go 会话 id 升级为「对话级稳定」（方案 A）
 
 **背景**：上一轮 `x-opencode-session` 是每请求随机 UUID —— 能过上游 400 强校验，但每次 id 都变，吃不到文档所述的提示词缓存。本轮按老板要求实现**稳定会话**：同一段对话共用同一个 session id。

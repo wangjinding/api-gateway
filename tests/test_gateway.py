@@ -3779,6 +3779,259 @@ def test_opencode_session_header_from_conversation_id():
     assert "x-opencode-session" not in ag._req_headers("conv-abc")
 
 
+def test_api_conversation_id_flows_to_session_header():
+    """API 调用（HTTP body）传 conversation_id → 适配器 session_id；且不透传上游 payload。
+
+    覆盖老板问的「非前端、纯 API 调用是否支持稳定会话」：只要请求体带
+    conversation_id，后端就把它作为 OpenCode Go 的 x-opencode-session 透传。
+    """
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    captured = {}
+
+    class Capture:
+        async def chat(self, model=None, messages=None, session_id=None, extra=None, **kw):
+            captured["session_id"] = session_id
+            captured["extra"] = extra
+            return {"id": "c1", "object": "chat.completion", "model": model,
+                    "choices": [{"message": {"role": "assistant", "content": "ok"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 2, "completion_tokens": 1}}
+
+    orig = m._get_adapter
+    m._get_adapter = lambda model_id, timeout=None, cfg=None: (
+        Capture(), "agnes", m._cfg().providers["agnes"])
+    try:
+        client = TestClient(m.app)
+        # ① 带 conversation_id → 原样落为 session_id；且不作为上游参数透传
+        r = client.post("/v1/chat/completions", headers={"Authorization": _AUTOBEARER},
+                        json={"model": "agnes-3.0-flash",
+                              "messages": [{"role": "user", "content": "hi"}],
+                              "conversation_id": "conv-api-42"})
+        assert r.status_code == 200, r.text
+        assert captured["session_id"] == "conv-api-42"
+        assert not captured["extra"] or "conversation_id" not in captured["extra"]
+        # ② 不传 → session_id 为 None（由适配器回退随机 UUID）
+        r2 = client.post("/v1/chat/completions", headers={"Authorization": _AUTOBEARER},
+                         json={"model": "agnes-3.0-flash",
+                               "messages": [{"role": "user", "content": "hi"}]})
+        assert r2.status_code == 200, r2.text
+        assert captured["session_id"] is None
+    finally:
+        m._get_adapter = orig
+
+
+# ── 第二十五轮：模型级强制参数（上游硬约束）+ 测速超时/错误文案 ──
+#
+# 起因：kimi-k2.7-code 上游只接受 temperature=1，测速探针固定发 0 → 每次必 400；
+# 而 mimo-v2.5 是慢（偶发冲破 15s 探针超时），却被显示成同样的「调用失败」。
+# 两条修法各自的回归如下。
+
+def test_model_params_parsed_from_config():
+    """gateway.yaml 的 models[].params 要被解析出来，并随 all_models 暴露。"""
+    from app.config import parse_config
+    cfg = parse_config({"providers": {"p": {"base_url": "http://x/v1", "models": [
+        {"id": "m1", "params": {"temperature": 1, "top_p": 0.9}},
+        {"id": "m2"}]}}})
+    assert cfg.providers["p"].models[0].params == {"temperature": 1, "top_p": 0.9}
+    assert cfg.providers["p"].models[1].params == {}
+    am = {m["id"]: m for m in cfg.all_models()}
+    assert am["m1"]["params"] == {"temperature": 1, "top_p": 0.9}
+
+
+def test_model_params_rejects_bad_keys_and_types():
+    """params 的键必须在白名单内：结构性键（model/messages/stream）绝不允许 ——
+    否则等于让配置文件改写路由与协议语义（回到越权面）。写错必须报错，不能静默失效。"""
+    from app.config import parse_config, ConfigError
+    bads = [{"model": "evil"}, {"messages": []}, {"stream": True}, {"temperature": object()}, [1, 2]]
+    for bad in bads:
+        try:
+            parse_config({"providers": {"p": {"base_url": "http://x/v1",
+                                              "models": [{"id": "m", "params": bad}]}}})
+        except ConfigError:
+            continue
+        raise AssertionError(f"非法 params 未被拦截: {bad!r}")
+
+
+def test_real_config_locks_kimi_temperature():
+    """真配置口径：kimi-k2.7-code 只接受 temperature=1，必须在配置里写死。"""
+    cfg = load_config(CONFIG)
+    m = [x for x in cfg.providers["opencode"].models if x.id == "kimi-k2.7-code"][0]
+    assert m.params.get("temperature") == 1, m.params
+
+
+def test_model_params_override_client_value():
+    """配了 params 的模型：客户端传什么值都被覆盖，且只发一次请求（不做无谓重发）。"""
+    from app.adapters.openai_compat import OpenAICompatAdapter
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return httpx.Response(200, json={"id": "1", "choices": [], "usage": {}})
+
+    ad = OpenAICompatAdapter("t", "http://mock.test/v1",
+                             model_params={"locked": {"temperature": 1}})
+    ad._client = httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                                   base_url="http://mock.test/v1")
+
+    async def run():
+        await ad.chat("locked", [{"role": "user", "content": "hi"}], temperature=0)
+        await ad.close()
+
+    asyncio.run(run())
+    assert seen[0]["temperature"] == 1, seen[0]
+    assert len(seen) == 1
+
+
+def test_model_param_constraint_auto_corrected_and_retried():
+    """上游 400 说「只允许 temperature=1」→ 网关按 1 重发一次（而非原样重试）。"""
+    from app.adapters.openai_compat import OpenAICompatAdapter
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        if len(seen) == 1:
+            return httpx.Response(400, json={"error": {"message":
+                "Error from provider (Console Go): [invalid_request_error] "
+                "invalid temperature: only 1 is allowed for this model"}})
+        return httpx.Response(200, json={"id": "1", "choices": [
+            {"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}], "usage": {}})
+
+    ad = OpenAICompatAdapter("t", "http://mock.test/v1")
+    ad._client = httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                                   base_url="http://mock.test/v1")
+
+    async def run():
+        r = await ad.chat("kimi-k2.7-code", [{"role": "user", "content": "hi"}], temperature=0)
+        await ad.close()
+        return r
+
+    r = asyncio.run(run())
+    assert len(seen) == 2, seen
+    assert seen[0]["temperature"] == 0 and seen[1]["temperature"] == 1, seen
+    assert r["choices"][0]["message"]["content"] == "ok"
+
+
+def test_model_param_constraint_no_infinite_retry():
+    """上游始终 400 → 只修正重发一次就抛错（绝不能与同一约束来回打转）。"""
+    from app.adapters.openai_compat import OpenAICompatAdapter
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return httpx.Response(400, json={"error": {"message":
+            "invalid temperature: only 1 is allowed for this model"}})
+
+    ad = OpenAICompatAdapter("t", "http://mock.test/v1")
+    ad._client = httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                                   base_url="http://mock.test/v1")
+
+    async def run():
+        try:
+            await ad.chat("m", [{"role": "user", "content": "hi"}], temperature=0)
+        finally:
+            await ad.close()
+
+    try:
+        asyncio.run(run())
+        raise AssertionError("应抛出 httpx.HTTPStatusError")
+    except httpx.HTTPStatusError:
+        pass
+    assert len(seen) == 2, f"应只发 2 次（原始 + 修正），实际 {len(seen)}"
+
+
+def test_model_param_conflict_respects_configured_value():
+    """管理员写死的值与上游要求冲突 → 尊重配置，不偷偷改、也不发无谓的第二枪。"""
+    from app.adapters.openai_compat import OpenAICompatAdapter
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return httpx.Response(400, json={"error": {"message":
+            "invalid temperature: only 1 is allowed for this model"}})
+
+    ad = OpenAICompatAdapter("t", "http://mock.test/v1", model_params={"m": {"temperature": 0.5}})
+    ad._client = httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                                   base_url="http://mock.test/v1")
+
+    async def run():
+        try:
+            await ad.chat("m", [{"role": "user", "content": "hi"}], temperature=0.5)
+        finally:
+            await ad.close()
+
+    try:
+        asyncio.run(run())
+        raise AssertionError("应抛出 httpx.HTTPStatusError")
+    except httpx.HTTPStatusError:
+        pass
+    assert len(seen) == 1, seen
+    assert seen[0]["temperature"] == 0.5, seen[0]
+
+
+def test_stream_param_constraint_auto_corrected():
+    """流式路径同样自修复：开局 400 → 按上游要求修正后重发。"""
+    from app.adapters.openai_compat import OpenAICompatAdapter
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        if len(seen) == 1:
+            return httpx.Response(400, json={"error": {"message":
+                "invalid temperature: only 1 is allowed for this model"}})
+        return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n',
+                              headers={"content-type": "text/event-stream"})
+
+    ad = OpenAICompatAdapter("t", "http://mock.test/v1")
+    ad._client = httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                                   base_url="http://mock.test/v1")
+
+    async def run():
+        out = [c async for c in ad.chat_stream("kimi-k2.7-code",
+                                               [{"role": "user", "content": "hi"}], temperature=0)]
+        await ad.close()
+        return out
+
+    out = asyncio.run(run())
+    assert len(seen) == 2, seen
+    assert seen[0]["temperature"] == 0 and seen[1]["temperature"] == 1, seen
+    assert out, "流式应至少收到一个数据块"
+
+
+def test_speedtest_error_text_surfaces_timeout_and_upstream_detail():
+    """测速失败文案：超时要说清是超时，400 要透出上游原文。
+    （本轮排查时，"参数被上游拒绝" 与 "模型太慢" 在旧文案里长得一模一样。）"""
+    import app.main as m
+    t = m._speedtest_error_text(httpx.ReadTimeout("timed out"), 30.0)
+    assert "超时" in t and "30" in t, t
+
+    req = httpx.Request("POST", "http://x/v1/chat/completions")
+    resp = httpx.Response(400, request=req, json={"error": {
+        "message": "invalid temperature: only 1 is allowed for this model"}})
+    e = httpx.HTTPStatusError("Client error '400 Bad Request'", request=req, response=resp)
+    t2 = m._speedtest_error_text(e, 30.0)
+    assert "only 1 is allowed" in t2, t2
+
+
+def test_settings_panel_preserves_model_params():
+    """管理页面保存配置时，手写在 YAML 里的 models[].params 不能被面板冲掉。
+    （面板的模型编辑器只认 id/display_name/type/vision，照它重建就会静默丢掉 params。）"""
+    from app import settings as gw_settings
+    from app.config import parse_config
+    raw = {"providers": {"p": {"name": "P", "base_url": "http://x/v1", "models": [
+        {"id": "m", "display_name": "M", "type": "text", "vision": False,
+         "params": {"temperature": 1}}]}}}
+    cfg = parse_config(raw)
+    view = gw_settings.config_to_view(cfg)
+    # 面板读出来就带着 params
+    assert view["providers"]["p"]["models"][0]["params"] == {"temperature": 1}
+    # 提交回去（模拟面板原样回传）→ params 必须还在
+    out = gw_settings.view_to_raw(cfg, raw, {"providers": view["providers"]})
+    assert out["providers"]["p"]["models"][0]["params"] == {"temperature": 1}, \
+        out["providers"]["p"]["models"][0]
+
+
 # 直接运行（非 pytest）
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]

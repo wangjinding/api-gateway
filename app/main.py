@@ -868,6 +868,27 @@ def _speedtest_retryable(e: Exception) -> bool:
     return status == 429 or (status is not None and status >= 500)
 
 
+def _speedtest_error_text(e: Exception, timeout: float) -> str:
+    """测速探针的失败文案（第二十五轮）：把「超时」和「上游原文」这两个关键信息说清楚。
+
+    修复前只回 `str(e)`，形如 `Client error '400 Bad Request' for url ...` ——
+    上游真正的原因（如 `invalid temperature: only 1 is allowed for this model`）
+    根本看不到；超时更是只显示成含糊的「调用失败」。结果是：
+      「参数被上游拒绝」（每次都失败）与「模型响应慢」（偶发失败）
+    在前端长得一模一样，只能靠猜 —— 排查这两个模型时就是这么被误导的。
+    """
+    if isinstance(e, (httpx.TimeoutException, TimeoutError)):
+        return f"上游超时（>{int(timeout)}s 未响应）"
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        detail = _upstream_detail(getattr(resp, "text", "") or "")
+        if detail:
+            return detail
+        return f"上游返回 HTTP {getattr(resp, 'status_code', '?')}（无响应正文）"
+    text = str(e)
+    return _upstream_detail(text) or text[:200] or "调用失败"
+
+
 def _clear_auth_fails(request: Request) -> None:
     """登录成功后清掉该来源的失败计数：否则同一出口 IP（办公室 NAT）被前人失败连带，
     真人输对密码后紧接一次手误就吃 429。"""
@@ -1123,7 +1144,10 @@ def _models_payload():
                      "display_name": m["display_name"],
                      "type": m["type"], "provider": m["provider"], "provider_name": m["provider_name"],
                      # 第十三轮: 暴露「是否支持图像输入」，前端据此标注/告警（对话页带图时提示换模型）
-                     "vision": bool(m.get("vision"))})
+                     "vision": bool(m.get("vision")),
+                     # 第二十五轮: 暴露模型级强制参数（如 {"temperature": 1}）。前端据此标挂锁，
+                     #   API 调用方也能提前知道自己传的采样参数会被上游要求覆盖。
+                     "params": dict(m.get("params") or {})})
     for r in cfg.all_routes():
         data.append({"id": r["name"], "object": "model", "created": created,
                      "owned_by": "gateway", "type": "route", "models": r["models"],
@@ -1164,7 +1188,13 @@ async def models_speedtest(request: Request, _auth=Depends(require_auth)):
     except Exception:
         _body = {}
     only = _body.get("model") if isinstance(_body, dict) else None
-    probe_timeout = 15.0
+    # 探针超时（第二十五轮: 15s → 30s）：
+    #   15s 对"慢的推理模型"太紧 —— 实测 mimo-v2.5 过网关 2.9s~8.4s、agnes-2.5-flash 11s，
+    #   上游一排队就冲破 15s，被记成「调用失败」，和「模型真的坏了」完全分不清。
+    #   30s ≈ 实测最慢值的 3 倍，仍远小于真实对话链路用的 server.timeout。
+    #   注意：该 timeout 只作用于**本探针自己创建的 adapter**（适配器缓存 key 含 timeout），
+    #   改它不影响用户对话的超时行为。
+    probe_timeout = 30.0
     results: list[dict] = []
     for m in cfg.all_models():
         if m.get("type") != "text":
@@ -1201,7 +1231,7 @@ async def models_speedtest(request: Request, _auth=Depends(require_auth)):
                 ok = True
                 break
             except Exception as e:
-                err = _upstream_detail(str(e))
+                err = _speedtest_error_text(e, probe_timeout)
                 if attempt < 3 and _speedtest_retryable(e):
                     await asyncio.sleep(0.3 * attempt)
                 else:

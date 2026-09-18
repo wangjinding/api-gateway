@@ -30,4 +30,10 @@ def create_adapter(
         timeout=timeout,
         media=pconfig.media,
         requires_session_header=pconfig.requires_session_header,
+        # 第二十五轮: 把模型级强制参数（providers.*.models[].params）随适配器带下去。
+        #   适配器按 model id 查表，在**组装完 payload 之后**覆盖，客户端无法绕过。
+        #   放在适配器而非每个调用点：所有入口（对话 / 流式 / 批量 / 一键测速）自动一致，
+        #   不会出现"主链路修了、测速还漏着"的偏差。
+        #   配置变更时 main._apply_config 会丢弃整个适配器缓存，约束不会滞留旧值。
+        model_params={m.id: dict(m.params) for m in pconfig.models if m.params},
     )

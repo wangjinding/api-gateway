@@ -67,7 +67,7 @@
           <span class="chip-sel" :class="{ on: params.stream }" @click="paramsOpen = true">
             <Icon name="bolt" :size="13" />{{ t('chat.streaming') }}
           </span>
-          <span class="chip-sel" @click="paramsOpen = true">{{ t('chat.tempShort') }} {{ params.temperature }}</span>
+          <span class="chip-sel" @click="paramsOpen = true" :title="currentPinNote || undefined">{{ t('chat.tempShort') }} {{ params.temperature }}<Icon v-if="currentPinNote" name="lock" :size="11" class="plock" /></span>
           <span class="chip-sel" @click="paramsOpen = true">
             {{ t('chat.maxShort') }} {{ params.max_tokens ?? t('common.none') }}
           </span>
@@ -213,6 +213,8 @@
                   <span class="opt">
                     <span>{{ modelLabel(m) }}</span>
                     <Icon v-if="m.vision" name="eye" :size="13" />
+                    <!-- 第二十五轮：参数被上游锁定的模型（网关会覆盖客户端传值） -->
+                    <Icon v-if="pinned(m)" name="lock" :size="13" class="plock" :title="pinNote(m)" />
                   </span>
                 </el-option>
               </el-option-group>
@@ -236,6 +238,12 @@
 
     <!-- 参数抽屉：窄屏按屏宽百分比，避免 330px 在小屏上顶到边 -->
     <el-drawer v-model="paramsOpen" :title="t('chat.params')" :size="isMobile ? '86%' : '330px'" :close-on-click-modal="true">
+      <!-- 第二十五轮：当前模型有上游硬约束的参数时，先说清楚"这里的值会被覆盖后再发"，
+           否则用户会以为调了温度没生效（kimi-k2.7-code 只接受 temperature=1 就是这种情况）。 -->
+      <div v-if="currentPinNote" class="pin-note">
+        <Icon name="lock" :size="13" class="plock" />
+        <span>{{ currentPinNote }}</span>
+      </div>
       <div class="param">
         <div class="plabel">{{ t('chat.temp') }}</div>
         <el-slider v-model="params.temperature" :min="0" :max="2" :step="0.05" show-input />
@@ -330,6 +338,22 @@ const params = reactive({
   system: '',
 })
 const paramsOpen = ref(false)
+
+// ── 模型级强制参数（第二十五轮）──
+// 网关 /v1/models 会回 params（如 kimi-k2.7-code → {temperature: 1}）：这些参数由网关
+// 按上游硬约束覆盖后才发出去。不提示的话，用户把温度从 0.7 调到 0 也看不出区别，
+// 只会以为"网关把我参数吞了"。这里只做标注，参数本身在 gateway.yaml 里改。
+function pinned(m: any): boolean {
+  return Object.keys((m && m.params) || {}).length > 0
+}
+function pinNote(m: any): string {
+  const ps = (m && m.params) || {}
+  return t('chat.paramLocked', { p: Object.keys(ps).map((k) => `${k}=${ps[k]}`).join(', ') })
+}
+const currentPinNote = computed(() => {
+  const m = textModels.value.find((x) => x.id === params.model)
+  return m ? pinNote(m) : ''
+})
 const streaming = ref(false)
 const messages = ref<ChatMessage[]>([])
 
@@ -825,6 +849,14 @@ watch(messages, scrollToBottom, { deep: true })
 /* ── 参数抽屉 ── */
 .param { margin-bottom: 18px; }
 .plabel { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+/* 第二十五轮：模型参数被上游锁定时的标注（挂锁 + 抽屉顶部说明条） */
+.plock { color: var(--warn); margin-left: 4px; }
+.pin-note {
+  display: flex; align-items: flex-start; gap: 6px;
+  margin: 0 0 14px; padding: 8px 10px; border-radius: 8px;
+  font-size: 12px; line-height: 1.5; color: var(--warn); background: var(--warn-soft);
+}
+.pin-note .plock { margin-left: 0; margin-top: 2px; }
 
 /* ── 窄屏 ── */
 @media (max-width: 768px) {

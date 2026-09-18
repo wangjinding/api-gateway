@@ -66,6 +66,8 @@ const ICONS: Record<string, string> = {
   inbox: '<path d="M3.4 11.6 6 4.6h8l2.6 7v4.8H3.4z"/><path d="M3.4 11.6h3.2l.9 1.8h5l.9-1.8h3.2"/>',
   // 第二十四轮：账号停用（禁用符号「圆 + 斜杠」），启用配已有的 play（圆 + 三角）
   ban: '<circle cx="10" cy="10" r="7"/><path d="M5.1 5.1l9.8 9.8"/>',
+  // 第二十五轮：模型参数被上游固定（挂锁 = 这参数你说了不算，由网关按上游要求锁定）
+  lock: '<rect x="4.6" y="9" width="10.8" height="7.2" rx="2"/><path d="M7 9V6.8a3 3 0 0 1 6 0V9"/>',
 }
 
 const body = computed(() => ICONS[props.name] || '')

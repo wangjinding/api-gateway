@@ -37,6 +37,9 @@
         <div v-for="m in textModelRows" :key="m.id" class="st-item">
           <div class="st-row">
             <Icon v-if="m.vision" name="eye" :size="12" class="vision" />
+            <!-- 第二十五轮：该模型的参数被上游固定（如 temperature 只能是 1），
+                 挂锁标注 + 悬浮说明，省掉「为什么我传的参数不生效」这类困惑。 -->
+            <Icon v-if="m.paramNote" name="lock" :size="12" class="plock" :title="m.paramNote" />
             <span class="code">{{ m.id }}</span>
             <span class="muted-2 st-prov">{{ m.provider }}</span>
             <span style="flex:1"></span>
@@ -97,12 +100,15 @@
         <el-table-column :label="t('models.provider')" min-width="150">
           <template #default="{ row }">{{ row.provider_name || '—' }}</template>
         </el-table-column>
-        <el-table-column :label="t('models.capability')" width="120">
+        <el-table-column :label="t('models.capability')" width="190">
           <template #default="{ row }">
             <span v-if="row.vision" class="pill ok cap">
               <Icon name="eye" :size="12" />{{ t('models.visionTag') }}
             </span>
-            <span v-else class="muted-2">—</span>
+            <span v-if="paramKeys(row).length" class="pill warn cap" :title="paramNote(row)">
+              <Icon name="lock" :size="12" />{{ t('models.paramTag') }}
+            </span>
+            <span v-if="!row.vision && !paramKeys(row).length" class="muted-2">—</span>
           </template>
         </el-table-column>
         <el-table-column :label="t('models.keySet')" width="120">
@@ -231,8 +237,22 @@ const textModelRows = computed(() =>
     id: m.id,
     provider: m.provider_name || '—',
     vision: !!m.vision,
+    // 模型级强制参数（第二十五轮）：被上游固定住的采样参数，用挂锁标注出来。
+    paramNote: paramKeys(m).length ? paramNote(m) : '',
   })),
 )
+
+// ── 模型级强制参数（第二十五轮）──
+// 后端 /v1/models 在 params 里给出「该模型发往上游前会被强制覆盖的参数」
+// （例：kimi-k2.7-code 只接受 temperature=1）。这里只做展示，不提供编辑入口。
+function paramKeys(m: any): string[] {
+  return Object.keys((m && m.params) || {})
+}
+function paramNote(m: any): string {
+  const ps = (m && m.params) || {}
+  const txt = paramKeys(m).map((k) => `${k}=${ps[k]}`).join(', ')
+  return t('models.paramLocked', { p: txt })
+}
 
 const keySet = computed(() => {
   const ks: Record<string, boolean> = {}
@@ -286,6 +306,7 @@ onMounted(async () => {
 .chain-item { display: inline-flex; align-items: center; gap: 6px; }
 .arrow { color: var(--muted-2); }
 .vision { color: var(--primary); }
+.plock { color: var(--warn); }
 .prov { padding: 10px 0; border-bottom: 1px solid var(--line-2); }
 .prov:last-child { border-bottom: 0; }
 .prov-top { display: flex; align-items: center; gap: 8px; }

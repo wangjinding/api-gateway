@@ -86,6 +86,12 @@ providers:
       - id: "kimi-k2.7-code"
         display_name: "Kimi K2.7 Code"
         type: "text"
+        # 上游硬约束：该模型**只接受 temperature=1**，传 0 / 0.7 等一律 400
+        #   "invalid temperature: only 1 is allowed for this model"。
+        # 写死后网关无论收到什么温度都按 1 发（前端温度滑块、API 传参、一键测速探针
+        # 统一生效）；客户端不传 temperature 时也会显式按 1 发送，与上游默认值一致。
+        params:
+          temperature: 1
       - id: "kimi-k2.6"
         display_name: "Kimi K2.6"
         type: "text"
