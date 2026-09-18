@@ -12,7 +12,7 @@ def create_adapter(
 ) -> BaseAdapter:
     """根据供应商配置创建对应适配器。
 
-    当前三个供应商（Agnes / 火山方舟 / 智谱 GLM）均为 OpenAI 兼容协议，
+    当前两个供应商（Agnes / 火山方舟）均为 OpenAI 兼容协议，
     统一使用 OpenAICompatAdapter，通过 base_url 和 extra_headers 区分。
     图像/视频端点通过 media 配置覆盖（Agnes 走 /videos + /agnesapi）。
     """

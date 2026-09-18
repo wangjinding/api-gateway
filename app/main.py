@@ -307,7 +307,7 @@ VERSION = "2.4.0"
 
 app = FastAPI(
     title="API Gateway",
-    description="统一多供应商 LLM 接入网关（Agnes / 火山方舟 / 智谱 GLM）",
+    description="统一多供应商 LLM 接入网关（Agnes / 火山方舟）",
     version=VERSION,
     lifespan=lifespan,
     default_response_class=UTF8JSONResponse,
@@ -1767,11 +1767,11 @@ _VIDEO_ASPECTS = ("21:9", "16:9", "4:3", "1:1", "3:4", "9:16")
 def _video_status(raw: dict | None) -> str:
     """视频原始返回的状态取法（统一小写）。
 
-    智谱异步结果是 task_status（PROCESSING/SUCCESS/FAIL），Agnes 用 status / state。
+    Agnes 轮询返回用 status / state；保留 task_status 兼容（未来其它视频供应商可能用到）。
     """
     if not raw:
         return ""
-    return str(raw.get("task_status") or raw.get("status") or raw.get("state") or "").lower()
+    return str(raw.get("status") or raw.get("state") or raw.get("task_status") or "").lower()
 
 
 def _video_terminal(status: str) -> bool:
@@ -1781,46 +1781,12 @@ def _video_terminal(status: str) -> bool:
                  "failed", "fail", "error", "cancelled", "canceled")
 
 
-# 智谱 CogVideoX-Flash 支持的分辨率（像素串），与 Agnes 的 720P 档位语义不同。
-_ZHIPU_VIDEO_SIZES = {
-    "720x480", "1024x1024", "1280x960", "960x1280",
-    "1920x1080", "1080x1920", "2048x1080",
-}
-
-
-def _validate_video_request(req, media=None) -> None:
+def _validate_video_request(req) -> None:
     """第十一轮 #3：按 Agnes Video 2.5 契约做**入站校验**，把明显不合法的 mode/媒体/时长
        组合在网关挡下并回**干净 400**（不再白发上游浪费限流额度，也不进熔断）。
        第十三轮补齐 size / aspect_ratio / n / videos 四项（文档「Flash 专属错误」与
        「生成模式规则」里明确列出的限制），并保留原有 mode/媒体/时长校验。
-       目前只有 Agnes 配了视频，字段语义按它的文档来；接入其它视频供应商时需按各家契约放宽。"""
-
-    # ── 智谱 CogVideoX（CogVideoX-Flash）：仅 text 文生视频；quality/fps/with_audio 走 req.extra ──
-    if media is not None and media.video_style == "zhipu":
-        if (req.mode or "text") != "text":
-            raise HTTPException(400, "智谱视频（CogVideoX）仅支持 text 文生视频模式")
-        if int(req.n or 1) != 1:
-            raise HTTPException(400, "视频接口一次只提交 1 个任务（n 必须为 1，收到 %s）" % req.n)
-        if req.videos or req.images or req.audios or req.first_frame or req.last_frame:
-            raise HTTPException(400, "智谱视频不支持首尾帧 / 参考图 / 参考音频（文生视频只填 prompt）")
-        if req.size and req.size not in _ZHIPU_VIDEO_SIZES:
-            raise HTTPException(400, "智谱视频 size 仅支持 %s，收到 %r" %
-                                ("/".join(sorted(_ZHIPU_VIDEO_SIZES)), req.size))
-        _x = req.extra or {}
-        _q = _x.get("quality")
-        if _q is not None and _q not in ("speed", "quality"):
-            raise HTTPException(400, "智谱视频 quality 仅支持 speed / quality，收到 %r" % _q)
-        _f = _x.get("fps")
-        if _f is not None:
-            try:
-                _fi = int(_f)
-            except (TypeError, ValueError):
-                _fi = -1
-            if _fi not in (30, 60):
-                raise HTTPException(400, "智谱视频 fps 仅支持 30 / 60，收到 %r" % _f)
-        return
-
-    # ── Agnes 契约（默认）───────────────────────────────
+       目前只有 Agnes 配了视频，字段语义按它的文档来。"""
     mode = req.mode or "text"
     if mode not in _VIDEO_MODES:
         raise HTTPException(400, f"视频 mode 仅支持 {'/'.join(_VIDEO_MODES)}，收到 {mode!r}")
@@ -1862,13 +1828,12 @@ async def videos_create(request: Request, req: VideoCreateRequestExtended, _auth
     cfg = _cfg()
     rid = getattr(request.state, "rid", "-")
     caller = getattr(request.state, "caller", "anonymous")
-    # Bug 4: 支持路由别名（如 wjd）→ 解析到第一个 type==video 的模型。
-    #   解析放在入站校验之前，好让 _validate_video_request 按供应商媒体契约（Agnes / 智谱）分流。
+    _validate_video_request(req)          # 第十一轮 #3：入站按 Agnes 契约校验 mode/媒体/时长
+    # Bug 4: 支持路由别名（如 wjd）→ 解析到第一个 type==video 的模型
     resolved = _resolve_media_model(cfg, req.model, "video")
     if resolved is None:
         raise HTTPException(404, f"未知视频模型/路由: {req.model}（没有可用的 video 类型模型）")
     pkey, pconfig, minfo, token, real_model = resolved
-    _validate_video_request(req, pconfig.media)   # 入站按供应商媒体契约校验
     # 顺序修复（本轮）：先能力检查（501），再校验回调地址（400），最后限流 —— 避免无效请求白扣 token。
     if not pconfig.media.supports_video:
         raise HTTPException(501, f"供应商 {pconfig.name} 不支持视频创建")

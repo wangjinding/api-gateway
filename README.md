@@ -1,6 +1,6 @@
 # API Gateway
 
-统一多供应商 LLM 接入网关，纯后端 FastAPI，配置驱动。支持 **Agnes AI**、**火山方舟 Coding Plan**、**智谱 GLM** 三个供应商，全部走 OpenAI 兼容协议。v2.4 已集成熔断、限流、图像/视频、指标、成本估算、热加载、测试等完整能力。
+统一多供应商 LLM 接入网关，纯后端 FastAPI，配置驱动。支持 **Agnes AI**、**火山方舟 Coding Plan** 两个供应商，全部走 OpenAI 兼容协议。v2.4 已集成熔断、限流、图像/视频、指标、成本估算、热加载、测试等完整能力。
 
 ## 特性
 
@@ -45,7 +45,6 @@ api-gateway/
 |---|---|---|---|
 | Agnes AI | `https://api.agnes-ai.cn/v1` | Bearer | `agnes-3.0-flash`(text)、`agnes-image-2.5-flash`(image)、`agnes-video-2.5-flash`(video) |
 | 火山方舟 Coding | `https://ark.cn-beijing.volces.com/api/coding/v3` | Bearer | `ark-code-latest`（text） |
-| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | Bearer | 文本：`GLM-4.7-Flash`、`GLM-4-Flash-250414`、`GLM-Z1-Flash`、`GLM-4.6V-Flash`、`GLM-4V-Flash`、`GLM-4.1V-Thinking-Flash`（其中 3 个 V 型号支持图像输入）；图像：`cogview-3-flash`；视频：`cogvideox-flash`（文生视频，异步 `/videos/generations` + `/async-result/{id}` 轮询） |
 
 > Agnes 的图像/视频走自有端点，通过供应商配置里的 `media` 段指定。
 
@@ -297,7 +296,7 @@ python run.py            # 默认读 data/gateway.yaml，端口 8808
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入 AGNES_API_KEY / VOLC_API_KEY / ZHIPU_API_KEY
+# 编辑 .env 填入 AGNES_API_KEY / VOLC_API_KEY
 python run.py           # 启动时自动读取 .env
 ```
 

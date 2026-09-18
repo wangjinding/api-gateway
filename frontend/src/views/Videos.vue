@@ -10,9 +10,7 @@
           </el-select>
         </div>
 
-        <!-- 智谱 CogVideoX-Flash / Agnes 两种视频契约：Agnes 用模式+时长+720P；智谱用 quality/fps/audio/像素 size -->
-        <template v-if="!isZhipu">
-          <!-- 第十一轮 #3：场景模式（对齐 Agnes Video 契约 text/keyframe/reference） -->
+        <!-- 第十一轮 #3：场景模式（对齐 Agnes Video 契约 text/keyframe/reference） -->
         <div class="field mb-field">
           <label>{{ t('videos.mode') }}</label>
           <div class="modes">
@@ -56,39 +54,6 @@
               :placeholder="t('videos.seedPH')" class="fill" />
           </div>
         </div>
-        </template>
-        <!-- 智谱 CogVideoX-Flash：文生视频专用（quality/fps/with_audio/像素 size，固定 text 模式） -->
-        <template v-else>
-          <div class="form-row mb-field">
-            <div class="field">
-              <label>{{ t('videos.zSize') }}</label>
-              <el-select v-model="zsize" class="fill">
-                <el-option v-for="s in zhipuSizes" :key="s" :value="s" :label="s" />
-              </el-select>
-            </div>
-            <div class="field">
-              <label>{{ t('videos.zQuality') }}</label>
-              <el-select v-model="zquality" class="fill">
-                <el-option value="speed" :label="t('videos.zSpeed')" />
-                <el-option value="quality" :label="t('videos.zQualityHigh')" />
-              </el-select>
-            </div>
-          </div>
-          <div class="form-row mb-field">
-            <div class="field">
-              <label>{{ t('videos.zFps') }}</label>
-              <el-select v-model="zfps" class="fill">
-                <el-option :value="30" label="30fps" />
-                <el-option :value="60" label="60fps" />
-              </el-select>
-            </div>
-            <div class="field">
-              <label>{{ t('videos.zAudio') }}</label>
-              <el-switch v-model="zaudio" />
-            </div>
-          </div>
-          <div class="hint tip">{{ t('videos.zTip') }}</div>
-        </template>
 
         <div class="field mb-field">
           <label>{{ t('videos.promptRow') }}</label>
@@ -255,7 +220,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -291,13 +256,6 @@ const router = useRouter()
 const { t } = useI18n()
 const models = ref<any[]>([])
 const model = ref('')
-// 所选视频模型是否智谱 CogVideoX（文生视频专用表单）
-const isZhipu = computed(() => models.value.find((m: any) => m.id === model.value)?.provider === 'bigmodel')
-// 切到智谱视频模型时强制 text 文生视频模式（智谱无 keyframe/reference）
-watch(model, (m) => {
-  const mo = models.value.find((x: any) => x.id === m)
-  if (mo?.provider === 'bigmodel') mode.value = 'text'
-})
 const prompt = ref('')
 const seconds = ref('5')
 const aspect = ref('16:9')
@@ -305,12 +263,6 @@ const quality = ref('720P')
 const seed = ref<number | null>(null)
 // 第十一轮 #3：场景模式与对应素材
 const mode = ref<'text' | 'keyframe' | 'reference'>('text')
-// 智谱 CogVideoX-Flash：text 文生视频专用参数（quality/fps/with_audio/像素 size）
-const zhipuSizes = ['720x480', '1024x1024', '1280x960', '960x1280', '1920x1080', '1080x1920', '2048x1080']
-const zsize = ref('1920x1080')
-const zquality = ref<'speed' | 'quality'>('speed')
-const zfps = ref(30)
-const zaudio = ref(true)
 const frameEl = ref<HTMLInputElement | null>(null)
 const refImgEl = ref<HTMLInputElement | null>(null)
 const refAudEl = ref<HTMLInputElement | null>(null)
@@ -514,25 +466,21 @@ async function create() {
   const t0 = Date.now()
   const summary = mediaSummary()
   try {
-    const body: any = { model: model.value, prompt: prompt.value }
-    if (isZhipu.value) {
-      // 智谱 CogVideoX-Flash：text 文生视频；quality/fps/with_audio 走 extra（后端透传给上游）
-      body.size = zsize.value
-      body.mode = 'text'
-      body.extra = { quality: zquality.value, fps: zfps.value, with_audio: zaudio.value }
-    } else {
-      body.seconds = seconds.value
-      body.size = quality.value
-      body.aspect_ratio = aspect.value
-      body.mode = mode.value
-      if (seed.value != null) body.seed = seed.value
-      if (mode.value === 'keyframe') {
-        if (firstFrame.value) body.first_frame = firstFrame.value
-        if (lastFrame.value) body.last_frame = lastFrame.value
-      } else if (mode.value === 'reference') {
-        if (imageList.value.length) body.images = imageList.value
-        if (audioList.value.length) body.audios = audioList.value
-      }
+    const body: any = {
+      model: model.value,
+      prompt: prompt.value,
+      seconds: seconds.value,
+      size: quality.value,
+      aspect_ratio: aspect.value,
+      mode: mode.value,
+    }
+    if (seed.value != null) body.seed = seed.value
+    if (mode.value === 'keyframe') {
+      if (firstFrame.value) body.first_frame = firstFrame.value
+      if (lastFrame.value) body.last_frame = lastFrame.value
+    } else if (mode.value === 'reference') {
+      if (imageList.value.length) body.images = imageList.value
+      if (audioList.value.length) body.audios = audioList.value
     }
     if (!stream.value) body.wait = true       // 同步等结果
     const j = await api('/v1/videos', { method: 'POST', body: JSON.stringify(body) })

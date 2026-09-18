@@ -54,9 +54,7 @@ class MediaConfig:
     video_create_endpoint: str | None = None  # 相对 base_url，默认 /videos
     video_poll_base: str | None = None       # 绝对 base（视频查询，默认同 base_url 去掉 /v1）
     video_poll_path: str | None = None       # 默认 /agnesapi（Agnes）
-    video_model_name: str | None = None      # 轮询用的 model_name 参数（Agnes）
-    video_style: str | None = None           # 视频契约风格："zhipu"=智谱异步(videos/generations + /async-result/{id})；None=Agnes 风格
-    video_default_size: str | None = None     # 视频默认尺寸（智谱为像素串如 1920x1080；Agnes 用 size 档位）
+    video_model_name: str | None = None      # 轮询用的 model_name 参数
 
     @property
     def supports_image(self) -> bool:
@@ -306,8 +304,6 @@ def _parse_media(pval: dict[str, Any]) -> MediaConfig:
         video_poll_base=m.get("video_poll_base"),
         video_poll_path=m.get("video_poll_path"),
         video_model_name=m.get("video_model_name"),
-        video_style=m.get("video_style"),
-        video_default_size=m.get("video_default_size"),
     )
 
 

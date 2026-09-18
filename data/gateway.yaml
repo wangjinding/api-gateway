@@ -1,5 +1,5 @@
 # AI 网关配置文件（data/ 目录）
-# 供应商：Agnes / 火山方舟 Coding / 智谱 GLM（bigmodel）
+# 供应商：Agnes / 火山方舟 Coding
 # 密钥统一走 token_env 指向的环境变量（本机见 data/.env），不再在 yaml 存明文
 # 端口默认 8808
 #
@@ -45,59 +45,6 @@ providers:
       - id: "ark-code-latest"
         display_name: "火山方舟 ark-code-latest"
         type: "text"
-
-  # ── 智谱 GLM（OpenAI 兼容 /chat/completions）──────────
-  # 密钥走 token_env（data/.env → ZHIPU_API_KEY），不在 yaml 存明文。
-  # Flash 系文本模型免费档可用；GLM-4V/4.6V/4.1V 系支持「图像输入」：
-  #   已用 200×200 红图真图实测 4V-Flash 与 4.1V-Thinking-Flash 均认出「红色」；
-  #   4.6V-Flash 实侧遇上游瞬时过载(1305)未取到视觉结果，型号带 V 故仍标 vision。
-  bigmodel:
-    name: "智谱 GLM"
-    base_url: "https://open.bigmodel.cn/api/paas/v4"
-    auth:
-      token_env: "ZHIPU_API_KEY"
-    extra_headers: {}
-    # 智谱媒体生成（openai 兼容 + 异步查询）：
-    #   - 图像 cogview-3-flash：POST /images/generations，size 为像素档，返回 data[].url
-    #   - 视频 cogvideox-flash：POST /videos/generations（异步），GET /async-result/{id} 轮询；
-    #     完成时 task_status=SUCCESS、video_result[].url。
-    #   video_style: zhipu 让适配器按智谱契约构造视频 payload 与轮询路径（不走 agnes 那套 seconds/mode/aspect）。
-    media:
-      image_endpoint: "/images/generations"
-      image_default_size: "1024x1024"
-      video_create_endpoint: "/videos/generations"
-      video_poll_base: "https://open.bigmodel.cn/api/paas/v4"
-      video_poll_path: "/async-result"
-      video_style: "zhipu"
-      video_default_size: "1920x1080"
-    models:
-      - id: "GLM-4.7-Flash"
-        display_name: "GLM-4.7-Flash"
-        type: "text"
-      - id: "GLM-4-Flash-250414"
-        display_name: "GLM-4-Flash-250414"
-        type: "text"
-      - id: "GLM-Z1-Flash"
-        display_name: "GLM-Z1-Flash"
-        type: "text"
-      - id: "GLM-4.6V-Flash"
-        display_name: "GLM-4.6V-Flash"
-        type: "text"
-        vision: true
-      - id: "GLM-4V-Flash"
-        display_name: "GLM-4V-Flash"
-        type: "text"
-        vision: true
-      - id: "GLM-4.1V-Thinking-Flash"
-        display_name: "GLM-4.1V-Thinking-Flash"
-        type: "text"
-        vision: true
-      - id: "cogview-3-flash"
-        display_name: "CogView-3-Flash"
-        type: "image"
-      - id: "cogvideox-flash"
-        display_name: "CogVideoX-Flash"
-        type: "video"
 server:
   host: "127.0.0.1"
   port: 8808
@@ -151,7 +98,6 @@ pricing:
 download:
   allowed_hosts:
     - "cos-platform-outputs.agnes-ai.cn"   # Agnes 图像/视频产物 CDN
-    - "maas-watermark-prod-new.cn-wlcb.ufileos.com"   # 智谱 CogView 图像 / CogVideoX 视频产物 CDN（UCloud）
   max_bytes: 67108864                      # 单文件上限 64MB
 
 # ── 网关入口鉴权 ─────────────────────────────────────

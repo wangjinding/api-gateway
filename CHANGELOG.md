@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-09-17 · 移除智谱 GLM（bigmodel）供应商
+
+**一句话**：老板要求删除智谱供应商，代码/配置/文档/测试/前端全清——覆盖上上轮新增的 6 个 GLM 文本模型（含 3 视觉）、CogView-3-Flash 文生图、CogVideoX-Flash 文生视频及配套的媒体契约代码。
+
+### 改动清单（除 CHANGELOG 历史条目外全部清零）
+- **`data/gateway.yaml`**：删 `providers.bigmodel` 整块（`GLM-4.7-Flash`/`GLM-4-Flash-250414`/`GLM-Z1-Flash`/`GLM-4.6V-Flash`/`GLM-4V-Flash`/`GLM-4.1V-Thinking-Flash` 6 文本 + `cogview-3-flash` 图像 + `cogvideox-flash` 视频 + 整套 media 配置）；`download.allowed_hosts` 删智谱 CDN 项（`maas-watermark-prod-new.cn-wlcb.ufileos.com`）；头注释供应商列表 → `Agnes / 火山方舟 Coding`。`routes.wjd`、`pricing` 本就不含智谱，无需动。
+- **`data/.env`**：删 `ZHIPU_API_KEY`。
+- **`app/config.py`**：`MediaConfig` 删 `video_style` / `video_default_size` 两个字段及其解析（智谱视频契约专用）。
+- **`app/main.py`**：`_ZHIPU_VIDEO_SIZES` 常量删；`_validate_video_request` 删 zhipu 分支、恢复单参数 `(req)`、docstring 去"接入其它视频供应商"；`videos_create` 恢复"先入站校验后解析"原顺序（去掉按供应商媒体契约分流）；`_video_status` 改通用描述（去智谱词，状态优先级 status/state/task_status）；`description` → `（Agnes / 火山方舟）`。
+- **`app/settings.py`**：面板 `MEDIA_KEYS` 删 `video_style` / `video_default_size`。
+- **`app/adapters/{__init__,openai_compat}.py`**：docstring「三家」→「两家」；`create_video` / `poll_video` 删 zhipu 分支（恢复纯 Agnes 风格）；删 `urllib.parse.quote` 导入。
+- **前端**：`Settings.vue` `TEXT_MODELS` 去 6 个 GLM；`Videos.vue` 删智谱视频专用表单/状态/`watch`/create 分支，恢复 Agnes 表单；`Images.vue` 删 cogview 像素档/`isZhipu`/参考图与 ratio 的 `v-if`；`locales/{zh,en}.ts` 删 `videos.z*`（7 键/语言）；`media.ts` `findVideoUrl` 优先键去 `video_result`。
+- **`README.md`** / **`docs/frontend-design.md`**：供应商改两家，删智谱供应商表行、`.env` 说明去 `ZHIPU_API_KEY`。
+- **`tests/test_gateway.py`**：`test_load_config_providers` 账号集合→`{agnes,volc_engine}`、删智谱媒体断言；速度排序测试用 `[ark-code-latest,agnes-3.0-flash]` 两模型演示（删 GLM）；`test_vision_first` 用 `agnes-3.0-flash`（vision）当视觉样例；媒体路由别名测试/配置写回测试/视频轮询测试改用真实模型或恢复原样。
+
+### 验证 / 上线
+- 单测 **155 passed / 0 failed**；全项目 grep `智谱|bigmodel|GLM|cogview|cogvideox|ufileos|ZHIPU|zhipu|video_style|_ZHIPU` 除 CHANGELOG 历史外**全部清零**。
+- 前端 `npm run build` 过（typecheck + i18n 对称），新入口 `index-BynIw5Ue.js`。
+- 配置校验：providers `[agnes,volc_engine]`、模型 `agnes[3] + volc[1]`、`routes.wjd` 2 项、下载白名单仅 Agnes。
+- `supervisorctl restart api-gateway:api-gateway_00` 上线（`description`/适配器/校验等属代码改动，需重启）。
+
+---
+
 ## 2026-09-17 · 移除 b.ai 供应商
 
 **一句话**：老板要求删除 b.ai 供应商及其两个模型（`qwen3.8-flash`、`hy3`），代码、配置、文档、测试全清。

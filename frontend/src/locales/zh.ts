@@ -303,13 +303,6 @@ export default {
   videos: {
     taskTitle: '任务列表',
     fixed: '固定',
-      zSize: '分辨率',
-      zQuality: '质量',
-      zSpeed: '速度优先',
-      zQualityHigh: '质量优先',
-      zFps: '帧率',
-      zAudio: '配音',
-      zTip: '智谱 CogVideoX 仅支持文生视频（text 模式）；生成耗时较长，请耐心等待。',
     title: '视频生成',
     model: '视频模型',
     mode: '场景',
