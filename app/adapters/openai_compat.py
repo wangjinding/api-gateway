@@ -205,6 +205,10 @@ class OpenAICompatAdapter(BaseAdapter):
         headers.pop("authorization", None)
         headers.pop("x-api-key", None)
         headers.update(self.auth_headers(protocol))
+        # 第三十轮: 这里原来写「无 session → 每请求一个随机 UUID（仍能过上游强校验，只是没有缓存收益）」，
+        #   那句话在第二十九轮之后**已经不对了** —— 网关三条协议线入口（chat 非流式/流式、batch、
+        #   三线直传）现在都传 `session_id`，随机回退只在"适配器被直接调用且没给 session"时才可能命中。
+        #   留 uuid4 是兜底（保证不缺头 → 不会 400 MissingSessionID），正常流量走不到这里。
         if self._requires_session:
             headers["x-opencode-session"] = session_id or uuid.uuid4().hex
         return headers
@@ -222,6 +226,11 @@ class OpenAICompatAdapter(BaseAdapter):
         headers = dict(self._headers)
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
+        # 第三十轮: 这里的会话头**故意**保持每请求随机，不是漏改。
+        #   媒体端点（图像/视频）是一次性任务，没有"同一会话复读同一大前缀"的场景，
+        #   也就没有前缀缓存可吃；反过来，若给它一个跨请求固定的会话，反而会让上游把
+        #   互不相关的图片/视频任务记到同一个会话名下，污染那边的会话视图。
+        #   注意当前配了媒体能力的供应商都不是 opencode（opencode 无 media），这行实际走不到。
         if self._requires_session:
             headers["x-opencode-session"] = uuid.uuid4().hex
         return headers

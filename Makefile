@@ -24,10 +24,16 @@ run:  ## 本地启动
 
 test:  ## 跑单元测试
 	python tests/test_gateway.py
-	# 或: pytest tests/ -q
+	# 第三十轮: 原来这里写「或: pytest tests/ -q」—— 但环境里**没装 pytest**，
+	#   照着敲只会报 command not found。这套单测其实是**自带 runner 的独立脚本**
+	#   （`python tests/test_gateway.py` 直接跑，pytest 只是可选外壳）：
+	#   装了 pytest 时 `pytest tests/ -q` 收集的是同一批 test_* 函数，结果等价。
 
 lint:  ## 语法编译检查
-	python -m py_compile app/config.py app/circuit.py app/metrics.py app/main.py app/routing.py app/models.py app/adapters/*.py run.py
+	# 第三十轮: 原来是一个**手写文件清单** —— 新增 app/users.py / history.py / feedback.py /
+	#   settings.py / sessions.py / video_owners.py 时没人回来补，等于这几个文件从没被 lint 过。
+	#   改成 compileall：整个包都覆盖，以后加文件也不用记得改这里。
+	python -m compileall -q app run.py
 	@echo "syntax OK"
 
 clean:  ## 清理

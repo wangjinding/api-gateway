@@ -28,6 +28,10 @@ _os.environ.setdefault("GATEWAY_HISTORY", str(_ROOT / ".test_history.json"))
 # 第二十二轮 意见反馈：同理——反馈（含图片）必须落到临时路径，别污染真实 data/
 _os.environ.setdefault("GATEWAY_FEEDBACK", str(_ROOT / ".test_feedback.json"))
 _os.environ.setdefault("GATEWAY_FEEDBACK_MEDIA", str(_ROOT / ".test_feedback_media"))
+# 第三十轮 会话落盘 / 视频归属落盘：同样隔离，否则跑测试会把真实登录会话与视频归属写脏
+_os.environ.setdefault("GATEWAY_SESSIONS", str(_ROOT / ".test_sessions.json"))
+_os.environ.setdefault("GATEWAY_VIDEO_OWNERS", str(_ROOT / ".test_video_owners.json"))
+_os.environ.setdefault("GATEWAY_ENV_FILE", str(_ROOT / ".test_env"))
 
 from app.config import load_config, validate_config, ConfigError
 from app.circuit import CircuitBreaker, CircuitBreakerRegistry
@@ -3379,8 +3383,6 @@ def _write_tmp_yaml(obj) -> str:
 
 def test_config_endpoints_permission_matrix():
     """GET/PUT /config：只认管理员 + 网页会话（API Key 不行），普通账号 403。"""
-    import tempfile
-    from pathlib import Path as P
     from fastapi.testclient import TestClient
     import app.main as m
     client = TestClient(m.app)
@@ -3411,7 +3413,6 @@ def test_config_save_applies_without_restart():
     from pathlib import Path as P
     from fastapi.testclient import TestClient
     import app.main as m
-    from app.config import GatewayConfig
 
     client = TestClient(m.app)
     ah = {"Authorization": f"Bearer {_login_admin_session(client)}"}
@@ -3631,7 +3632,7 @@ def test_admin_disabled_flag_in_file_is_autohealed():
     from app.users import UsersStore
     with tempfile.TemporaryDirectory() as d:
         p = _P(d) / "users.json"
-        store = UsersStore(str(p))
+        UsersStore(str(p))          # 造出初始文件（下面直接改里面 admin 的 disabled 标记）
         data = _json.loads(p.read_text(encoding="utf-8"))
         data["users"]["admin"]["disabled"] = True
         data["users"]["admin"]["disabled_at"] = 1.0
@@ -4336,7 +4337,6 @@ def test_prometheus_export_ok_and_dropped_metrics_removed():
     （或反之）都说明导出器接线断了，Grafana 会看到空图。
     """
     from fastapi.testclient import TestClient
-    import app.main as m
 
     with _Isolated() as mm:
         r = TestClient(mm.app).get("/metrics/prometheus")
@@ -4394,6 +4394,164 @@ def test_media_requests_carry_bearer_token():
     for req in seen:
         assert req.headers.get("authorization") == "Bearer test-token-123", \
             (req.url.path, dict(req.headers))
+
+
+# ── 第三十轮「全面体检」发现项：会话落盘 / 视频归属 / env 值校验 / 口令下限 ──────
+
+def test_session_store_persists_across_restart_and_hides_raw_token():
+    """会话落盘：重启不掉线（本轮目的）；但盘上只许有 token 的哈希，不能有可直接用的凭证。"""
+    import tempfile, os
+    from app.sessions import SessionStore
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "sessions.json")
+    s1 = SessionStore(ttl_seconds=3600, path=p)
+    tok = s1.create("1.2.3.4", "alice")
+    assert s1.validate(tok)
+    raw = open(p, encoding="utf-8").read()
+    assert tok not in raw, "落盘文件里出现了明文会话 token"
+    assert "alice" in raw, "账号名要留着（否则重启后没法按账号吊销）"
+    s2 = SessionStore(ttl_seconds=3600, path=p)          # 模拟进程重启
+    assert s2.validate(tok), "重启后旧会话应仍然有效（本轮的改动目的）"
+    assert s2.account_for(tok) == "alice"
+    assert s2.revoke_account("alice") == 1
+    s3 = SessionStore(ttl_seconds=3600, path=p)
+    assert not s3.validate(tok), "吊销必须落盘，否则重启就把被吊销的会话放回来了"
+
+
+def test_session_store_drops_expired_entries_on_load():
+    """载入时直接丢掉过期会话 —— 别把已死亡会话带进运行期（否则 TTL 形同虚设一份）。"""
+    import json, tempfile, os, time
+    from app.sessions import SessionStore, _fp
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "sessions.json")
+    live, dead = "sess-live-token", "sess-dead-token"
+    json.dump({"version": 1, "sessions": {
+        _fp(live): {"created": time.time(), "ip": "", "account": "a"},
+        _fp(dead): {"created": time.time() - 10 * 86400, "ip": "", "account": "a"},
+    }}, open(p, "w", encoding="utf-8"))
+    s = SessionStore(ttl_seconds=3600, path=p)
+    assert s.validate(live)
+    assert not s.validate(dead), "过期会话不该被载入"
+
+
+def test_video_owner_store_semantics():
+    """视频归属：有登记按登记判、无登记放行、管理员放行；结论要能跨重启保持。"""
+    import tempfile, os
+    from app.video_owners import VideoOwnerStore
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "videos.json")
+    v = VideoOwnerStore(path=p)
+    v.record("vid-1", "alice", "agnes")
+    assert v.owner("vid-1") == "alice"
+    assert v.allows("vid-1", "alice") is True
+    assert v.allows("vid-1", "bob") is False, "别人的视频不该能让另一个账号读到"
+    assert v.allows("vid-1", "bob", is_admin=True) is True, "管理员要能排障"
+    assert v.allows("vid-unknown", "bob") is True, "无登记的老任务放行（渐进收紧，不砸正常流程）"
+    v2 = VideoOwnerStore(path=p)                          # 重启后归属仍在
+    assert v2.allows("vid-1", "bob") is False
+    v.record("vid-2", "alice")
+    assert v.count() == 2
+
+
+def test_video_poll_denies_other_account_allows_owner_and_admin():
+    """端点级：别人 poll 我的视频 → 404（不是 403，避免把 id 变成存在性探针）；本人与管理员正常。"""
+    import uuid
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    vid = "vtest-owner-" + uuid.uuid4().hex[:8]
+
+    class Fake:
+        async def create_video(self, **kw):
+            return {"video_id": vid, "raw": {"status": "queued", "id": vid}}
+
+        async def poll_video(self, video_id, **kw):
+            return {"raw": {"status": "completed", "progress": 100}}
+
+    real = m._get_adapter
+    m._get_adapter = lambda model, t, cfg: (Fake(), {}, model)
+    client = TestClient(m.app)
+    ah = {"Authorization": f"Bearer {_login_admin_session(client)}"}
+    names = []
+    try:
+        owner = _member(client, ah, "vowner"); names.append("vowner")
+        other = _member(client, ah, "vother"); names.append("vother")
+        r = client.post("/v1/videos", json={"model": "agnes-video-2.5-flash",
+                                            "prompt": "x", "aspect_ratio": "16:9"}, headers=owner)
+        assert r.status_code == 200, r.text
+        assert r.json()["video_id"] == vid
+        assert client.get(f"/v1/videos/{vid}", headers=other).status_code == 404, \
+            "另一个账号不该能读走别人的视频任务"
+        assert client.get(f"/v1/videos/{vid}", headers=owner).status_code == 200
+        assert client.get(f"/v1/videos/{vid}", headers=ah).status_code == 200, "管理员放行"
+        # 无登记（本次改动之前创建的老任务）→ 放行，不能砸掉正在轮询的老流程
+        assert client.get("/v1/videos/never-recorded-xyz", headers=other).status_code == 200
+    finally:
+        m._get_adapter = real
+        for n in names:
+            client.delete(f"/auth/users/{n}", headers=ah)
+
+
+def test_config_env_rejects_multiline_value_and_writes_sandbox_file():
+    """env 值校验：换行/控制字符/超长一律 400（能凭空改掉 .env 里别的行）；正常值才落盘。"""
+    import os
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    client = TestClient(m.app)
+    ah = {"Authorization": f"Bearer {_login_admin_session(client)}"}
+    name = sorted(m._env_snapshot().keys())[0]
+    env_path = m._env_file()
+    assert str(env_path).endswith(".test_env"), f"测试必须写在沙箱 env 文件上：{env_path}"
+    before = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    try:
+        for bad in ("abc\ndef", "abc\rX=A", "A\x00B", "x" * 4097):
+            r = client.post("/config/env", json={"envs": {name: bad}}, headers=ah)
+            assert r.status_code == 400, (bad[:12], r.status_code, r.text)
+        after = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        assert after == before, "被拒的值不该动到文件"
+        old = os.environ.get(name)
+        try:
+            r = client.post("/config/env", json={"envs": {name: "sk-test-value-123"}}, headers=ah)
+            assert r.status_code == 200, r.text
+            assert os.environ.get(name) == "sk-test-value-123", "写盘后要立即在运行时生效"
+            assert f"{name}=sk-test-value-123" in env_path.read_text(encoding="utf-8")
+        finally:
+            if old is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old
+    finally:
+        if before:
+            env_path.write_text(before, encoding="utf-8")
+
+
+def test_password_min_length_raised_to_8():
+    """口令下限 4→8：只作用于「显式给密码/改密」；登录不设下限（老短口令账号照常登录）。"""
+    import tempfile, os
+    from app.users import UsersStore, UserError
+    p = tempfile.NamedTemporaryFile(suffix=".json", delete=False).name
+    try:
+        u = UsersStore(p)
+        for bad in ("1234", "1234567", ""):
+            try:
+                u.create_user("shorty", password=bad)
+                raise AssertionError(f"短口令 {bad!r} 不该被接受")
+            except UserError as e:
+                assert "8" in str(e), e
+        u.create_user("shorty")                     # 默认密码=账号名，不受下限约束（老板约定）
+        assert u.verify("shorty", "shorty") is True, "短默认口令仍要能登录"
+        try:
+            u.change_password("shorty", "1234567")
+            raise AssertionError("改密到 7 位不该被接受")
+        except UserError:
+            pass
+        u.change_password("shorty", "12345678")
+        assert u.verify("shorty", "12345678") is True
+        assert u.verify("shorty", "shorty") is False
+    finally:
+        try: os.unlink(p)
+        except OSError: pass
 
 
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`

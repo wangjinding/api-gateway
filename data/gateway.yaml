@@ -292,8 +292,12 @@ pricing:
 #   允许被代下载，且解析出来的 IP 必须是公网地址；列表为空 = 该功能整体关闭。
 #   换了供应商/换了 CDN 域名时，往这里加一条即可（如 volc 的 tos-*.volces.com）。
 download:
+  # 维护提醒（第三十轮）：这张表是**下载代理的出网白名单** —— /v1/media/download 只肯代抓这里列出的域名。
+  #   供应商换 CDN、或同一供应商多套存储（普通版 / 水印版）时，**漏加就会让「下载」按钮 400**
+  #   （报「该地址不在允许下载的域名白名单内」）。新增前先确认域名确实属于该供应商的产物存储。
   allowed_hosts:
-    - "cos-platform-outputs.agnes-ai.cn"   # Agnes 图像/视频产物 CDN
+    - "cos-platform-outputs.agnes-ai.cn"             # Agnes 图像/视频产物 CDN（普通版）
+    - "maas-watermark-prod-new.cn-wlcb.ufileos.com"  # Agnes 水印版产物 CDN（UCloud ufileos）
   max_bytes: 67108864                      # 单文件上限 64MB
 
 # ── 网关入口鉴权 ─────────────────────────────────────

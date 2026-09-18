@@ -23,6 +23,17 @@ data/feedback_media/
 .test_history.json
 .test_feedback.json
 .test_feedback_media/
+.test_sessions.json
+.test_video_owners.json
+.test_env
+
+# 运行期状态（第三十轮）：会话落盘 / 视频归属落盘 —— 都是运行数据，且含账号名与凭证哈希，
+# 属"可重新生成、不该进版本库"的一类（重启后从空开始，语义上无害）
+data/sessions.json
+data/video_owners.json
+
+# 配置自动备份（每存一次网关配置就多一对）：不该跟着源码走，也不该在仓库里堆历史版本
+data/*.bak
 
 # 说明：data/gateway.yaml 不含明文 Key —— 三家供应商密钥统一在 .env（已被上面忽略），
 # 由 yaml 各供应商的 token_env 引用。只要 .env 不提交，密钥就不会进版本库。

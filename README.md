@@ -273,7 +273,8 @@ auth:
   `admin` 账号永不可停用（唯一管理员被停用后没人能进管理页，只能停机改 `users.json` 救回，故
   接口直接拒绝，且启动加载时会把手工写入的 `disabled` 自动恢复并告警），也不能停用自己。
   停用状态落在账号记录的 `disabled` / `disabled_at` 两个字段上。
-- 普通账号最多 3 把 API Key（到量后页面按钮置灰并给出提示，不再是一句裸 400）；**admin 不限数量**。显式设置/修改的密码至少 4 位。
+- 普通账号最多 3 把 API Key（到量后页面按钮置灰并给出提示，不再是一句裸 400）；**admin 不限数量**。显式设置/修改的密码至少 **8 位**（第三十轮从 4 位提到 8 位：4 位在可离线爆破的空间里几乎等于没设）。
+  只作用于「建号时显式给密码 / 事后改密」；**登录不做长度校验**，所以既有短口令账号照常能登，只是不能再被改回短口令。
 - **Key 明文回显**：创建后页面展示明文，之后随时可在列表里再复制。代价是 `data/users.json` 里额外存一份
   明文 Key（该文件权限固定 600、已在 `.gitignore`）。因此 `GET /auth/apikeys` 也只认会话凭证——
   泄漏一把 Key 不该能顺走同账号其它 Key 的明文。此改动之前发的旧 Key 无法反推明文（只回显哈希前缀），
@@ -300,6 +301,13 @@ auth:
 >   登录成功一次即清零该来源计数（避免同出口 NAT 下被前人失败连坐）。
 > - 防用户名枚举：账号不存在时也会走一次等代价的 PBKDF2，登录响应耗时不随账号存在与否变化。
 > - 全局限流按**账号**归并成桶：同一账号多开几个会话/多建几把 Key 不再成倍放大配额。
+> - **产物下载代理**（`/v1/media/download`）：出网域名白名单在 `data/gateway.yaml` 的
+>   `download.allowed_hosts`，只代抓这里列出的域名（含子域）。供应商多一套存储（例如 Agnes 的
+>   **水印版**产物走另一个 CDN）而没补进白名单 → 页面「下载」按钮 400「该地址不在允许下载的域名白名单内」。
+>   换 CDN 记得同步这一行（第三十轮补上水印域名 `maas-watermark-prod-new.cn-wlcb.ufileos.com`）。
+> - **视频任务归属**（第三十轮）：`GET /v1/videos/{video_id}` 按「创建时登记的 video_id → 账号」判权，
+>   别的账号拿到 id 也读不到（回 404，不用 403，免得 id 变成存在性探针）；admin 放行；
+>   本次改动之前创建的老任务无登记 → 放行（渐进收紧，不砸正在轮询的流程）。
 
 ### 历史（图像 / 视频 / 对话）落盘
 
@@ -311,6 +319,16 @@ auth:
 data/history.json          # {账号: {类别: [条目…]}}，权限 600，已进 .gitignore
 GATEWAY_HISTORY=<路径>     # 可选，测试/多实例时指定
 ```
+
+同目录还有两份运行期状态文件（第三十轮，均可整份删掉、重启从空开始）：
+
+```
+data/sessions.json         # 登录会话（**只存 token 的 sha256**，不存 token 本身），600
+data/video_owners.json     # 视频任务归属（video_id → 账号），600
+GATEWAY_SESSIONS=<路径> / GATEWAY_VIDEO_OWNERS=<路径>   # 可选覆盖（测试用）
+```
+
+会话落盘是为了「重启不再把所有人踢下线」；吊销语义不变（改密/删号/停用仍旧立刻失效，且吊销也落盘）。
 
 - **按账号隔离**：普通账号只看得到自己的历史；admin 也只看自己的（历史是个人数据，不是运维数据）。
 - **按 id upsert**：带已存在 id → 原地更新（视频"生成中→完成"走这条）；新 id → 插到最前。
@@ -375,11 +393,17 @@ python run.py            # 默认读 data/gateway.yaml，端口 8808
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入 AGNES_API_KEY / VOLC_API_KEY
+# 编辑 .env 填入 AGNES_API_KEY / VOLC_API_KEY / OPENCODE_API_KEY
 python run.py           # 启动时自动读取 .env
 ```
 
 优先级：真实环境变量 > `.env`（密钥所在，经各供应商 `token_env` 引用）> yaml 其它字段。
+
+> **两层 `.env`**（第三十轮补文档）：`data/.env` 是「网关配置页 → 环境变量」那张卡写的那层，
+> 用 `load_dotenv(..., override=True)` 加载，**故意压过**项目根 `.env` —— 否则页面里刚改的
+> Key 会被根 `.env` 的旧值顶掉。所以本机想把 Key 交给页面管理，就写 `data/.env`（权限 600，
+> 已进 `.gitignore`）。页面对值的校验：不得含换行/控制字符、长度 ≤4096（换行会让 `.env`
+> 凭空多出几行、改到别的变量）。
 
 
 ## API 端点（含 v2.1 新增）
@@ -438,10 +462,10 @@ python run.py           # 启动时自动读取 .env
 ### 调用示例
 
 ```bash
-# 授权：所有调用带 Bearer（data/gateway.yaml 的 auth.users 里 key）
+# 授权：所有调用带 Bearer（Key 在「API Key」页自助铸造；admin 密码在 data/users.json）
 AUTH="Authorization: Bearer <你的 key>"
 
-# 文本（自动路由）+ 响应带 estimated_cost_cny
+# 文本（chat/completions 线；第二十七轮起没有路由，model 就是真实模型 id）+ 响应带 estimated_cost_cny
 curl -X POST http://localhost:8808/v1/chat/completions \
   -H "$AUTH" -H "Content-Type: application/json" \
   -d '{"model":"agnes-3.0-flash","messages":[{"role":"user","content":"你好"}],"max_tokens":256}'
@@ -1248,7 +1272,9 @@ python smoke_test.py --url http://127.0.0.1:8808
 python live_check.py --url http://127.0.0.1:8808
 ```
 
-> 当前状态：单元测试 **165 passed / 0 failed**（`python tests/test_gateway.py`，不需要 pytest）；冒烟 5/5 PASS；活体检查 14 PASS / 0 FAIL / 0 WARN。
+> 一行跑完所有门禁（单测 + i18n/SVG 文案体检 + 前端类型检查 + 语法编译）：`bash scripts/ci_check.sh`
+
+> 当前状态：单元测试 **179 passed / 0 failed**（`python tests/test_gateway.py`，不需要 pytest）；冒烟 5/5 PASS；活体检查 14 PASS / 0 FAIL / 0 WARN。
 
 ## 备注
 

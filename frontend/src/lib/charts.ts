@@ -121,8 +121,10 @@ export function piePalette(n: number): string[] {
 }
 
 /** 空数据时环形图也得画个灰圈，别留白块。
- *  空态那一项只报名字（「暂无数据」），别拼成「暂无数据: 1」这种看着像真数据的怪文案。 */
-export function pieData(items: { name: string; value: number }[], emptyLabel = '暂无数据') {
+ *  空态那一项只报名字（「暂无数据」），别拼成「暂无数据: 1」这种看着像真数据的怪文案。
+ *  第三十轮: 这个空态文案**必须由调用方传**（原来是默认值硬编码中文，切英文后图表里
+ *  还是中文）。两个调用点都传 t(...)，所以改成必填参数，别再留一个中文兜底。 */
+export function pieData(items: { name: string; value: number }[], emptyLabel: string) {
   if (items.length) {
     const colors = piePalette(items.length)
     return items.map((it, i) => ({ ...it, itemStyle: { color: colors[i] } }))

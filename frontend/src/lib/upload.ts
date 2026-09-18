@@ -9,8 +9,15 @@
 // 而 base64 会把体积再放大 4/3。手机随手拍的 3~5MB 照片直接转 base64 只会换来一个 413。
 // 所以这里按用途分级压缩 + 逐级降档，并在提交前做「整包体积」预算检查。
 
+import i18n from '../i18n'
+
 /** 网关 Nginx / 应用层的请求体上限（字节），留一点余量给 prompt 与 JSON 结构。 */
 export const BODY_BUDGET = 1_700_000
+
+// 第三十轮: 本模块抛出的错误是**直接给用户看**的（页面 catch 后 toast），原先全是硬编码中文 ——
+// 切英文后整片报错仍是中文。这里取全局 t（模块不是组件，用不了 useI18n）：
+// i18n.global 是响应式实例，语言切换后这些文案立即跟着变。
+const tr = (key: string, args: Record<string, unknown> = {}) => i18n.global.t(key, args)
 
 export interface MediaPreset {
   /** 长边上限（像素） */
@@ -19,24 +26,25 @@ export interface MediaPreset {
   quality: number
   /** 单件 data URI 目标上限（字节） */
   maxBytes: number
-  label: string
+  /** 用途名（**i18n 键**，不是文案本身）：只用在报错里告诉用户是哪一档超限了 */
+  labelKey: string
 }
 
 /** 各用途的压缩档位。数值来自实测：1024px/q0.82 的普通照片约 150~300KB（base64 后 ×1.37）。 */
 export const PRESETS: Record<string, MediaPreset> = {
   // 对话视觉：给模型看的，1024px 足够（再大也只会烧 token）
-  chat: { maxSide: 1024, quality: 0.8, maxBytes: 500_000, label: '对话附图' },
+  chat: { maxSide: 1024, quality: 0.8, maxBytes: 500_000, labelKey: 'upload.presetChat' },
   // 图生图 / 多图合成：保留构图细节
-  ref: { maxSide: 1024, quality: 0.85, maxBytes: 500_000, label: '参考图' },
+  ref: { maxSide: 1024, quality: 0.85, maxBytes: 500_000, labelKey: 'upload.presetRef' },
   // 视频首/尾帧：画面直接进视频，给到 1280px
-  frame: { maxSide: 1280, quality: 0.85, maxBytes: 450_000, label: '首/尾帧' },
+  frame: { maxSide: 1280, quality: 0.85, maxBytes: 450_000, labelKey: 'upload.presetFrame' },
   // 视频参考图：最多 5 张，单件必须小（5 × 300KB ≈ 1.5MB，逼近 2MB 上限）
-  videoRef: { maxSide: 1024, quality: 0.8, maxBytes: 300_000, label: '视频参考图' },
+  videoRef: { maxSide: 1024, quality: 0.8, maxBytes: 300_000, labelKey: 'upload.presetVideoRef' },
   // 视频参考音频：无浏览器端压缩手段，只能卡体积（最多 3 段）
-  audio: { maxSide: 0, quality: 0, maxBytes: 420_000, label: '参考音频' },
+  audio: { maxSide: 0, quality: 0, maxBytes: 420_000, labelKey: 'upload.presetAudio' },
   // 第二十二轮 意见反馈附图：一条最多 3 张，管理员要在电脑上看清细节，给到 1280px；
   // 但整包（3 张 + 缩略图）必须落在网关/Nginx 的 2MB 上限内，所以单张卡 400KB。
-  feedback: { maxSide: 1280, quality: 0.8, maxBytes: 400_000, label: '反馈图片' },
+  feedback: { maxSide: 1280, quality: 0.8, maxBytes: 400_000, labelKey: 'upload.presetFeedback' },
 }
 
 export interface PickedMedia {
@@ -89,7 +97,7 @@ export function isImageFile(f: File): boolean {
 function readAsDataUri(f: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const fr = new FileReader()
-    fr.onerror = () => reject(new Error('读取文件失败'))
+    fr.onerror = () => reject(new Error(tr('upload.errRead')))
     fr.onload = () => resolve(String(fr.result || ''))
     fr.readAsDataURL(f)
   })
@@ -108,7 +116,7 @@ async function loadBitmap(file: File): Promise<{ w: number; h: number; draw: Can
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
       const el = new Image()
       el.onload = () => resolve(el)
-      el.onerror = () => reject(new Error('图片解码失败（格式不支持？）'))
+      el.onerror = () => reject(new Error(tr('upload.errDecode')))
       el.src = url
     })
     return {
@@ -133,7 +141,7 @@ async function encodeCanvas(file: File, maxSide: number, quality: number): Promi
     cv.width = w
     cv.height = h
     const ctx = cv.getContext('2d')
-    if (!ctx) throw new Error('浏览器不支持 Canvas 2D，无法压缩图片')
+    if (!ctx) throw new Error(tr('upload.errNoCanvas'))
     // 白底：PNG 透明区转 JPEG 会变黑，铺一层白更接近原图观感
     ctx.fillStyle = '#ffffff'
     ctx.fillRect(0, 0, w, h)
@@ -162,7 +170,7 @@ export async function makeThumb(dataUri: string, maxSide = 256, quality = 0.6): 
  * 「原档 → 0.75×边长 → 0.5×边长」逐级降档，直到落进 maxBytes 预算。
  */
 export async function pickImage(file: File, preset: MediaPreset): Promise<PickedMedia> {
-  if (!isImageFile(file)) throw new Error(`${file.name} 不是图片文件`)
+  if (!isImageFile(file)) throw new Error(tr('upload.errNotImage', { name: file.name }))
   const raw = await readAsDataUri(file)
   // 小体积 PNG/WEBP 直接原样用（避免无谓的有损压缩，也保住透明通道）
   if (raw.length <= preset.maxBytes && /png|webp|gif|bmp/i.test(file.type || extOf(file.name))) {
@@ -188,14 +196,19 @@ export async function pickImage(file: File, preset: MediaPreset): Promise<Picked
       }
     }
   }
-  throw new Error(`${file.name} 压缩后仍有 ${formatBytes(dataUriBytes(last))}，超过 ${preset.label} 单件上限 ${formatBytes(preset.maxBytes)}`)
+  throw new Error(tr('upload.errTooBigAfterCompress', {
+      name: file.name, size: formatBytes(dataUriBytes(last)),
+      label: tr(preset.labelKey), max: formatBytes(preset.maxBytes),
+    }))
 }
 
 /** 音频 → data URI（浏览器端无法重编码，只做体积与格式校验）。 */
 export async function pickAudio(file: File, preset: MediaPreset = PRESETS.audio): Promise<PickedMedia> {
-  if (!isAudioFile(file)) throw new Error(`${file.name} 不是音频文件（支持 ${AUDIO_EXT.join('/')}）`)
+  if (!isAudioFile(file)) throw new Error(tr('upload.errNotAudio', { name: file.name, ext: AUDIO_EXT.join('/') }))
   if (file.size > preset.maxBytes) {
-    throw new Error(`${file.name} 有 ${formatBytes(file.size)}，超过参考音频上限 ${formatBytes(preset.maxBytes)}（请裁剪或压缩后再传）`)
+    throw new Error(tr('upload.errAudioTooBig', {
+      name: file.name, size: formatBytes(file.size), max: formatBytes(preset.maxBytes),
+    }))
   }
   const uri = await readAsDataUri(file)
   return { name: file.name, kind: 'audio', uri, thumb: '', bytes: uri.length, compressed: false }
@@ -214,8 +227,8 @@ export function assertBodyBudget(parts: Array<string | undefined>, extraBytes = 
   const total = parts.reduce((n, p) => n + (p ? p.length : 0), 0) + extraBytes
   if (total > BODY_BUDGET) {
     throw new Error(
-      `本次请求体约 ${formatBytes(total)}，超过网关上送上限（约 ${formatBytes(BODY_BUDGET)}）。` +
-      '请减少素材数量，或换体积更小的图片/音频。',
+      tr('upload.errBodyBudget', { size: formatBytes(total), max: formatBytes(BODY_BUDGET) }) +
+      tr('upload.errBodyBudgetTip'),
     )
   }
 }

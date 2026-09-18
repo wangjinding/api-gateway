@@ -54,6 +54,7 @@ from app.sessions import SessionStore
 from app.users import UsersStore, UserError, key_limit_for_role
 from app.history import HistoryStore, HistoryError, MAX_ITEMS as HISTORY_CAP
 from app.feedback import FeedbackStore, FeedbackError, MAX_ENTRIES as FEEDBACK_CAP
+from app.video_owners import VideoOwnerStore
 from app import settings as gw_settings
 
 # 功能 8: 读取 .env（若存在），补充 token 等环境变量。
@@ -104,6 +105,12 @@ _history = HistoryStore(str(_HISTORY_PATH))
 _FEEDBACK_PATH = Path(os.environ.get("GATEWAY_FEEDBACK", str(_PROJECT_ROOT / "data" / "feedback.json")))
 _FEEDBACK_MEDIA = Path(os.environ.get("GATEWAY_FEEDBACK_MEDIA", str(_PROJECT_ROOT / "data" / "feedback_media")))
 _feedback = FeedbackStore(str(_FEEDBACK_PATH), str(_FEEDBACK_MEDIA))
+
+# ── 视频任务归属（第三十轮） ──
+# 轮询端点 GET /v1/videos/{video_id} 原先不判归属（任何登录账号拿到 id 就能读别人任务）。
+# 现在创建成功时记一条 id→账号，轮询按它判；无记录的旧任务放行（见 app/video_owners.py 头部口径）。
+_OWNERS_PATH = Path(os.environ.get("GATEWAY_VIDEO_OWNERS", str(_PROJECT_ROOT / "data" / "video_owners.json")))
+_owners = VideoOwnerStore(str(_OWNERS_PATH))
 
 # 请求级账号上下文（ContextVar 每 task 独立，异步并发安全；定义在 app/metrics.py，
 #   供访问日志/指标标记「归属账号」，从而实现所有人（含 admin）只看自己的调用日志；
@@ -303,7 +310,7 @@ VERSION = "2.4.0"
 
 app = FastAPI(
     title="API Gateway",
-    description="统一多供应商 LLM 接入网关（Agnes / 火山方舟）",
+    description="统一多供应商 LLM 接入网关（Agnes / 火山方舟 / OpenCode Go）",
     version=VERSION,
     lifespan=lifespan,
     default_response_class=UTF8JSONResponse,
@@ -681,7 +688,11 @@ def _get_adapter(model_id: str, timeout: int | None = None, cfg: GatewayConfig |
 
 # ── 鉴权 + 限流（全局 / 供应商级；路由级限流随路由功能一并移除） ──
 _bearer = HTTPBearer(auto_error=False)
-_sess = SessionStore()   # 前端登录会话（/auth/login 换取 sess- token，见 app/sessions.py）
+# 前端登录会话（/auth/login 换取 sess- token，见 app/sessions.py）。
+# 第三十轮起落盘到 data/sessions.json（只存 token 的 sha256）→ 网关重启不再把所有人踢下线；
+# 测试用 GATEWAY_SESSIONS 指到独立文件，避免污染真实会话。
+_SESSIONS_PATH = Path(os.environ.get("GATEWAY_SESSIONS", str(_PROJECT_ROOT / "data" / "sessions.json")))
+_sess = SessionStore(path=_SESSIONS_PATH)
 
 
 def _effective_rps(cfg, pkey: str | None) -> float | None:
@@ -1567,6 +1578,11 @@ async def models_speedtest(request: Request, _auth=Depends(require_auth)):
             try:
                 # 直传原语：入站 body 原样上去、上游响应原样回来。探针只关心"通不通"，
                 #   所以不解析响应体，只看状态码（4xx/5xx 都算失败并带上游原文）。
+                #
+                # 第三十轮（注明有意，不是漏改）：这里**故意不传 session_id** —— 探针要量的是
+                #   "这个模型现在真实响不响应、要多久"，若复用真实对话用的固定会话值，
+                #   上游前缀缓存会把结果拉成假快（命中缓存 → 延迟低得不像真调用），
+                #   测速就失去意义。所以适配器回退到每请求随机值（对 opencode 即每次一个新会话）。
                 status, data = await adapter.raw_json(protocol, _probe_payload(protocol, m["id"]))
                 if 200 <= status < 300:
                     ok = True
@@ -2230,6 +2246,10 @@ async def videos_create(request: Request, req: VideoCreateRequestExtended, _auth
             mode=req.mode, aspect_ratio=req.aspect_ratio, size=req.size, extra=extra or None,
         )
         video_id = result.get("video_id")
+        # 第三十轮: 登记视频归属 —— 轮询端点据此判权（见 app/video_owners.py 顶部的口径说明）。
+        #   放在这里是因为这是"已知归属"的唯一时刻：上游刚把 video_id 交给我们，且 caller 明确。
+        if video_id:
+            await _offload(_owners.record, video_id, request.state.account, pkey)
         cb.record(True)
         _metrics.record_call(real_model, pkey, ok=True)
         _metrics.record_latency(real_model, time.time() - t0)
@@ -2315,7 +2335,13 @@ async def videos_poll(request: Request, video_id: str, model: str = "", wait: bo
     cfg = _cfg()
     rid = getattr(request.state, "rid", "-")
     # 说明：轮询端点不再往 /logs 记访问行（第十轮起改为按 video_id 累积到「创建」那条），
-    # 故这里不取 caller。
+    # 故这里不取 caller 做日志归属。
+    # 第三十轮: 但**归属校验**必须有 —— 此前任何登录账号拿到 video_id 就能读走别人视频的
+    #   状态与产物 URL。创建时登记过归属的按登记判；无登记（本次改动前的老任务）放行，
+    #   用 404 而不是 403 回绝，避免把 id 变成"存在性探针"。口径见 app/video_owners.py。
+    if not await _offload(_owners.allows, video_id, request.state.account,
+                          request.state.role == "admin"):
+        raise HTTPException(404, f"视频任务不存在: {_logsafe(video_id)}")
 
     # 本轮重写：供应商定位不再"盲猜"。
     #   视频任务 ID 是**供应商私有**的，查错供应商必然 404/502，且静默误导。
@@ -2801,8 +2827,11 @@ async def root(request: Request, _auth=Depends(require_auth_or_open)):
             "models": "GET /models 或 GET /v1/models",
             "metrics": "GET /metrics（JSON）/ GET /metrics/prometheus",
             "logs": "GET /logs?n=100",
-            "health": "GET /health（运维看板）/ GET /health/{provider}",
-            "docs": "GET /docs（Swagger UI）",
+            "health": 'GET /health（运维看板；health_auth=false 时匿名只回 {"status":"ok"}）'
+                      " / GET /health/{provider}（**始终需鉴权**）",
+            # 第三十轮: /docs 只在 docs_enabled 打开时才存在（关掉时路由就没注册）——
+            #   导航里还列着它，照着敲会吃 404。这里跟真实路由表对齐：关了就整条不列。
+            **({"docs": "GET /docs（Swagger UI）"} if _docs_on else {}),
         },
         "providers": list(cfg.providers.keys()),
     }
@@ -3046,7 +3075,8 @@ async def auth_user_history(username: str, kind: str, request: Request,
         kind = HistoryStore._check_kind(kind)
     except HistoryError as e:
         raise HTTPException(400, str(e))
-    return {"account": username, "kind": kind, "items": _history.get(username, kind)}
+    return {"account": username, "kind": kind,
+            "items": await _offload(_history.get, username, kind)}
 
 
 def _require_session(request: Request) -> str:
@@ -3102,8 +3132,11 @@ async def auth_delete_apikey(keyhint: str, request: Request, _auth=Depends(requi
 # 两台设备各生成一条也不会互相覆盖。读接口允许会话或 API Key；写接口只认会话。
 @app.get("/history/{kind}")
 async def history_list(request: Request, kind: str, _auth=Depends(require_auth)):
+    # 第三十轮（性能）: 历史落盘/读取整体挪到线程池 —— HistoryStore 每次都是**整份**读写
+    #   （上限 4MB），同步跑在 async handler 里会把事件循环按住，所有并发请求一起等。
+    #   users/feedback/config 早就走 _offload 了，这里此前是唯一漏网的。
     try:
-        items = _history.get(request.state.account, kind)
+        items = await _offload(_history.get, request.state.account, kind)
     except HistoryError as e:
         raise HTTPException(400, str(e))
     return {"kind": kind, "items": items, "cap": HISTORY_CAP}
@@ -3122,7 +3155,7 @@ async def history_save(request: Request, kind: str, _auth=Depends(require_auth))
     if not isinstance(items, list):
         raise HTTPException(400, "items 必须是数组")
     try:
-        merged = _history.upsert(request.state.account, kind, items)
+        merged = await _offload(_history.upsert, request.state.account, kind, items)
     except HistoryError as e:
         raise HTTPException(400, str(e))
     return {"status": "ok", "count": len(merged), "cap": HISTORY_CAP}
@@ -3132,7 +3165,7 @@ async def history_save(request: Request, kind: str, _auth=Depends(require_auth))
 async def history_clear(request: Request, kind: str, _auth=Depends(require_auth)):
     _require_session(request)
     try:
-        n = _history.clear(request.state.account, kind)
+        n = await _offload(_history.clear, request.state.account, kind)
     except HistoryError as e:
         raise HTTPException(400, str(e))
     return {"status": "ok", "cleared": n}
@@ -3142,7 +3175,7 @@ async def history_clear(request: Request, kind: str, _auth=Depends(require_auth)
 async def history_delete_one(request: Request, kind: str, item_id: str, _auth=Depends(require_auth)):
     _require_session(request)
     try:
-        ok = _history.delete_item(request.state.account, kind, item_id)
+        ok = await _offload(_history.delete_item, request.state.account, kind, item_id)
     except HistoryError as e:
         raise HTTPException(400, str(e))
     if not ok:
@@ -3259,7 +3292,9 @@ async def feedback_media(request: Request, fid: str, idx: int, _auth=Depends(req
 
 # ── API Key 环境变量（data/.env）读取/写入（网关配置页「环境变量」卡）────────
 def _env_file() -> Path:
-    return _PROJECT_ROOT / "data" / ".env"
+    # 第三十轮: 路径可被 GATEWAY_ENV_FILE 覆盖 —— 与 users/history/feedback 同一套路，
+    #   否则测试一旦覆盖到写路径就会**直接改掉生产 data/.env**（这是本轮补测试时发现的隐患）。
+    return Path(os.environ.get("GATEWAY_ENV_FILE", str(_PROJECT_ROOT / "data" / ".env")))
 
 def _env_snapshot() -> dict[str, dict]:
     """当前用 token_env 的供应商 → 环境变量名 + 是否配置 + 运行时值（以 os.environ 为准）。"""
@@ -3331,7 +3366,14 @@ async def config_env_post(request: Request, _auth=Depends(require_auth)):
             continue
         if name not in allowed:
             raise HTTPException(400, f"环境变量 {name} 未被任何供应商用作 API Key")
-        updates[name] = v if isinstance(v, str) else ""
+        val = v if isinstance(v, str) else ""
+        # 第三十轮: 值必须先校验再落盘。写入是**逐行重建 .env**，一个带 \n 的值
+        #   （页面上粘贴多了个换行、或刻意构造）就能在文件里**凭空多出几行**，
+        #   把同一份 .env 里的其它变量改掉/加进去；值里的换行同时会让"一行一变量"的文件
+        #   在下次读取时被截断成错误的值。Key 也不该有控制字符与超长内容。
+        if any(c in val for c in ("\n", "\r", "\x00")) or len(val) > 4096:
+            raise HTTPException(400, f"环境变量 {name} 的值非法（不得含换行/控制字符，长度 ≤4096）")
+        updates[name] = val
     if updates:
         await _offload(_write_env_values, updates)
     return {"status": "ok", "applied": len(updates), "envs": _env_snapshot()}
@@ -3487,8 +3529,12 @@ async def health(request: Request, _auth=Depends(require_auth_or_open)):
 @app.get("/health/{provider_key}")
 async def provider_health(request: Request, provider_key: str, _auth=Depends(require_auth)):
     # 第六轮安全审计: 本端点会用**网关持有的上游 Key** 去 GET {base_url}/models，
-    #   等同于"未授权者借网关的凭证触发上游请求并读回结果"。故与 /health 同受
-    #   health_auth 保护（此前它已经是 require_auth_or_open，这里补注释说明必要性）。
+    #   等同于"未授权者借网关的凭证触发上游请求并读回结果"。
+    # 第三十轮更正: 上面这行的注释此前写着"与 /health 同受 health_auth 保护（此前它已经是
+    #   require_auth_or_open）"—— 与代码不符：**它用的是 require_auth，恒定要鉴权**，
+    #   并不随 health_auth 放宽。这个"更严"的行为是刻意的（理由就是上一段：它会花掉上游额度），
+    #   所以保留代码、把注释改对：**本端点不受 health_auth 影响，永远需要凭证**；
+    #   想让探活工具不带头也能用，用 /healthz 或 GET /health（匿名只回 {"status":"ok"}）。
     cfg = _cfg()
     if provider_key not in cfg.providers:
         raise HTTPException(404, f"未知供应商: {provider_key}")

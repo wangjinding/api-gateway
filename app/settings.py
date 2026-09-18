@@ -506,6 +506,13 @@ def write_config(path: str | Path, text: str) -> dict[str, Any]:
     if path.exists():
         shutil.copy2(path, bak_path)
         shutil.copy2(path, stamp_path)
+        # 第三十轮: copy2 是**照抄源文件权限**，源文件若是历史遗留的 644，备份也就 644。
+        #   备份里同样可能有明文 token（正常应走 token_env），所以显式再钉一次 600。
+        for p in (bak_path, stamp_path):
+            try:
+                os.chmod(p, 0o600)
+            except OSError:
+                pass
         _prune_backups(path)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")

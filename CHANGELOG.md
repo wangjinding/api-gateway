@@ -1,5 +1,107 @@
 # CHANGELOG
 
+## 2026-09-18 · 第三十轮：全面体检发现项「全部」修完（下载白名单 / 视频归属 / 会话落盘 / i18n / 口令下限）
+
+**老板决策**：上一轮交了「只查未改」的体检清单，老板回一句「**全部**」—— 逐项修完并直接上生产验证。
+
+### P0（实测复现的真 bug）产物下载白名单
+- `download.allowed_hosts` 只放了 `cos-platform-outputs.agnes-ai.cn`，而 Agnes 的**水印版**
+  产物走另一个 CDN `maas-watermark-prod-new.cn-wlcb.ufileos.com`（admin 历史里 9-16 的 3 条产物
+  都是这个域名）→ 页面「下载」必 400「该地址不在允许下载的域名白名单内」。
+- 补上水印域名；`data/gateway.yaml` 与 README 都写清**这张表是出网白名单、换 CDN 要同步维护**。
+- 生产实测：`GET /v1/media/download?url=<水印图>` → **200 / 129871 bytes**（改前 400）；
+  非白名单域名（`evil.example.com`）仍 400。
+
+### 视频任务归属（新增 `app/video_owners.py`）
+- 原先 `GET /v1/videos/{video_id}` **不判归属**：任何已登录账号拿到 id 就能读别人视频任务的状态
+  与产物 URL（与 users/history/metrics 的「按账号隔离」口径不一致）。
+- 创建成功那一刻登记 `video_id → 账号`（`_owners.record`，走 `_offload`），轮询据此判权：
+  **非归属账号回 404**（而非 403 —— 403 等于确认 id 存在，会把 id 变成存在性探针）、
+  **admin 放行**、**无登记放行**（改动前创建的老任务 / 落盘丢失时，渐进收紧，不砸正在轮询的流程）。
+- 落盘 `data/video_owners.json`（600、原子写、TTL 7 天、上限 2000 条）。
+
+### 登录会话落盘（`app/sessions.py`）
+- 此前纯内存 → **每次重启把全体网页登录踢下线**。现在落盘 `data/sessions.json`：
+  **只存 token 的 sha256**（不存 token 本身，备份泄漏也无法直接冒充）、原子写 + 权限 600、
+  写失败只告警（退化成原行为）、载入时丢弃已过期会话。
+- 吊销语义不变且**吊销也落盘**（改密 / 重置 / 删号 / 停用 → 该账号全部会话立即失效）。
+- 生产实测：登录拿 token → `restart` → **同一 token 仍 200**（`/auth/apikeys`）；
+  文件里 `token in raw == False`。
+
+### 口令下限 4 → 8（`app/users.py`）
+- `MIN_PASSWORD = 8`。只作用于「建号时显式给密码 / 事后改密」；**登录不做长度校验**，
+  故既有短口令账号（如 `test`）照常能登，只是不能再被改回短口令。前端 `newPw`/`newUserTip` 同步。
+
+### `/config/env` 值校验（配置页环境变量卡）
+- 拒绝含 `\n` / `\r` / `\x00` 或长度 > 4096 的值 —— `.env` 是**逐行重建**的，一个带换行的值
+  就能在文件里凭空多出几行、改掉同一份 `.env` 里的其它变量。
+- 生产实测：换行值 / 超长值 / 非白名单变量名均 400，且 `md5(data/.env)` 前后一致。
+
+### 性能 / 一致性
+- `history` 四个端点补 `_offload`：HistoryStore 每次**整份**读写（上限 4MB），此前是唯一还在
+  事件循环里同步跑的文件 IO（users/feedback/config 早已挪到线程池）。
+- `GET /` 导航里的 `docs` 一行改为**仅当 `docs_enabled` 时**列出（关掉时路由不存在，列着会 404）。
+- `/health/{provider}` 注释更正：它一直是 `require_auth`（**恒定要鉴权**，不随 `health_auth` 放宽），
+  旧注释误写「同受 health_auth 保护」。保留更严的行为（它会用网关的 Key 打上游 `/models`），改注释。
+
+### 前端 i18n 收口
+- `views/Videos.vue` 素材摘要（原硬编码 `首帧:xx.png`）、`lib/upload.ts` 全部用户可见报错与
+  preset 名、`lib/charts.ts` 空态文案 → 全部走 i18n（新增 `videos.media*` 5 键 + `upload.*` 15 键，
+  中英 **737/737** 对称）；`lib/upload.ts` 取全局 `i18n.global.t`（模块非组件）。
+- 删除 `router.ts` 中**无人消费**的 `meta.title`（只有中文的死元数据；菜单标题唯一来源是
+  `lib/nav.ts` + i18n）。
+- **`frontend/scripts/check-i18n.mjs` 新增「硬编码中文」扫描**：剥掉块/HTML/行注释（避开
+  `https://`）后扫字符串字面量，命中即 build 失败；允许清单仅放「语言自称」（登录页的 `中`）。
+  自测：临时塞一句 `'中文硬编码自测'` → 构建前置检查正确抓出。
+
+### 文档 / 基建
+- README：`.env` 段补 `OPENCODE_API_KEY`、说明**两层 `.env`**（`data/.env` 用
+  `override=True` 压过根 `.env`，值不得含换行/控制字符、≤4096）、修掉 `data/gateway.yaml 的
+  auth.users` 死引用与「自动路由」措辞、安全基线补「下载代理白名单维护」「视频任务归属」、
+  数据文件清单补 `sessions.json` / `video_owners.json` 与对应 `GATEWAY_*` 覆盖项、测试计数
+  165 → 179。
+- `.env.example` 重写：删 `B_AI_API_KEY`（供应商早已删除）、补 `OPENCODE_API_KEY` 与全部可覆盖
+  路径，写清三层优先级（真实环境变量 > `data/.env` > 根 `.env`）。
+- `Makefile`：`lint` 从**手写文件清单**改 `python -m compileall -q app run.py`（原清单漏了
+  `users.py` / `history.py` / `feedback.py` / `settings.py` / `sessions.py` / `video_owners.py`）。
+- `.gitignore`：补 3 个测试临时文件、`data/sessions.json`、`data/video_owners.json`、`data/*.bak`；
+  仓库里 3 个 `data/gateway.yaml*.bak` 执行 `git rm --cached`（本地文件保留，只是不再入库）。
+- `app/settings.py`：配置备份写完后**显式 `chmod 600`**（`shutil.copy2` 会照抄源文件权限，
+  源是历史遗留的 644 时备份也会跟着 644）。
+- 新增 `scripts/ci_check.sh`：一条命令跑完「后端 compileall + 单测 + i18n/SVG 体检 + `vue-tsc` +
+  build」（`--fast` 跳过 build），本地与 CI 通用；**任何一步失败都继续跑完再汇总**（一次暴露全部问题）。
+  **没写 `.cnb.yml`**：CNB 流水线的配置 schema 我没把握，不想靠猜去改线上流水线 —— 交给老板确认后
+  把 `bash scripts/ci_check.sh` 挂上去即可（脚本退出码就是判定依据）。
+- `Makefile` 的 `test` 目标注释改成实话：环境里**没装 pytest**，「`pytest tests/ -q`」照着敲只会
+  `command not found`；这套单测是自带 runner 的独立脚本，`python tests/test_gateway.py` 才是能跑的。
+- `tests/` + `app/` 的 `flake8 --select=F,E9` 清到 **0**（原本 5 处：未用 import ×4、赋值未用 ×1）。
+- 一键测速探针**不传 session** 处补注释：这是**有意**的 —— 复用真实会话值会被上游前缀缓存拉成
+  「假快」，测速失去意义（所以适配器回退随机值）。
+
+### 测试
+- **179 passed / 0 failed**（173 → 179）。新增：会话落盘（跨重启有效 + 盘上无明文 + 吊销落盘）、
+  过期会话载入即丢、视频归属语义（本人 / 他人 / admin / 无登记 + 跨重启保持）、端点级
+  「他人 poll → 404」、`/config/env` 值校验（4 种坏值 + 沙箱写路径生效）、口令下限（含
+  「默认密码=账号名不受限、短口令仍可登录」）。
+- **修掉一个测试隐患**：写路径此前没有环境变量覆盖，测试一旦覆盖到就会**直接改生产
+  `data/.env`** —— 新增 `GATEWAY_ENV_FILE`（与 `GATEWAY_SESSIONS` / `GATEWAY_VIDEO_OWNERS`
+  同套路），测试全部指到 `.test_*` 沙箱文件。
+
+### 结论：CSP 的 `'unsafe-eval'` 现在还不能删（有 A/B 实测）
+- 临时把 CSP 改成 `script-src 'self'` 并重启 → 真浏览器打开 `/web/#/login`：**`#app` 全空、
+  登录表单完全不渲染**；改回 `'unsafe-eval'` → 表单与中英切换全正常。
+- 根因：打包产物里唯一一处 `new Function` 在 **vue-i18n 的消息编译器**（运行时编译带插值/复数的
+  文案需要 eval）。**正解是把文案编译搬到构建期**（`@intlify/unplugin-vue-i18n` 预编译消息），
+  在没做这件事之前不要动这条 CSP —— 旧注释里「本地无 CSP 的 vite preview 看不出、上线会白屏」
+  是对的。
+
+### 上线与验证
+- 后端 `supervisorctl restart api-gateway:api-gateway_00`；前端 `npm run build` 覆盖
+  `frontend/dist`（网关 `StaticFiles` 直接挂载）→ 线上入口 **`index-Bf3pWvHR.js`**。
+- 生产验证：`/healthz` 200、登录页 + 中英切换（真浏览器）、`/health/agnes` 无凭据 401、
+  `GET /` 导航无 `docs`、env 值校验 400 且文件未变、水印图下载 200、未登记 video_id 轮询
+  照常走通（无 500）、同一会话 token 跨重启仍有效。
+
 ## 2026-09-18 · 第二十九轮：`x-opencode-session` 缺省按 **API Key 稳定**派生（提缓存命中）
 
 **老板决策**：把网关接入 agent / QwenPaw 时，客户端多数不传 `conversation_id`，网关此前

@@ -425,22 +425,25 @@ const firstFrame = computed(() => (firstSlot.value?.uri || firstUrl.value).trim(
 const lastFrame = computed(() => (lastSlot.value?.uri || lastUrl.value).trim())
 const imageList = computed(() => [...refImgs.value.map((r) => r.uri), ...toList(refImgUrls.value)])
 const audioList = computed(() => [...refAuds.value.map((r) => r.uri), ...toList(refAudUrls.value)])
-/** 卡片上展示的素材摘要（只存名字/数量，data URI 不进历史） */
+/** 卡片上展示的素材摘要（只存名字/数量，data URI 不进历史）
+ *  第三十轮: 这里的标签原来是硬编码中文 —— 切英文后摘要仍是「首帧:xx.png」。
+ *  全部走 i18n（videos.media*），中英各自成句。 */
 function mediaSummary(): string {
+  const L = (key: string) => t(`videos.${key}`)
   if (mode.value === 'keyframe') {
     const names: string[] = []
-    if (firstSlot.value) names.push(`首帧:${firstSlot.value.name}`)
-    else if (firstUrl.value.trim()) names.push('首帧:URL')
-    if (lastSlot.value) names.push(`尾帧:${lastSlot.value.name}`)
-    else if (lastUrl.value.trim()) names.push('尾帧:URL')
+    if (firstSlot.value) names.push(`${L('mediaFirst')}:${firstSlot.value.name}`)
+    else if (firstUrl.value.trim()) names.push(`${L('mediaFirst')}:${L('mediaUrl')}`)
+    if (lastSlot.value) names.push(`${L('mediaLast')}:${lastSlot.value.name}`)
+    else if (lastUrl.value.trim()) names.push(`${L('mediaLast')}:${L('mediaUrl')}`)
     return names.join(' / ')
   }
   if (mode.value === 'reference') {
     const names: string[] = []
-    refImgs.value.forEach((r, i) => names.push(`图${i + 1}:${r.name}`))
-    if (toList(refImgUrls.value).length) names.push(`图URL×${toList(refImgUrls.value).length}`)
-    refAuds.value.forEach((r, i) => names.push(`音${i + 1}:${r.name}`))
-    if (toList(refAudUrls.value).length) names.push(`音URL×${toList(refAudUrls.value).length}`)
+    refImgs.value.forEach((r, i) => names.push(`${L('mediaImg')}${i + 1}:${r.name}`))
+    if (toList(refImgUrls.value).length) names.push(`${L('mediaImg')}${L('mediaUrl')}×${toList(refImgUrls.value).length}`)
+    refAuds.value.forEach((r, i) => names.push(`${L('mediaAud')}${i + 1}:${r.name}`))
+    if (toList(refAudUrls.value).length) names.push(`${L('mediaAud')}${L('mediaUrl')}×${toList(refAudUrls.value).length}`)
     return names.join(' / ')
   }
   return ''

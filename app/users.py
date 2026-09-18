@@ -37,7 +37,10 @@ KEY_PREFIX = "wjd-"        # 新建 API Key 的统一前缀（与对外品牌一
 LEGACY_KEY_PREFIXES: tuple[str, ...] = ("ak-",)
 _KEY_PREFIXES: tuple[str, ...] = (KEY_PREFIX,) + LEGACY_KEY_PREFIXES
 KEY_BYTES = 28  # token_urlsafe(28) ≈ 38 chars → 整把 key 42 字符
-MIN_PASSWORD = 4          # 显式设置/修改的密码下限（默认密码=账号名不受此限，按老板约定）
+MIN_PASSWORD = 8          # 显式设置/修改的密码下限（默认密码=账号名不受此限，按老板约定）
+# 第三十轮把下限从 4 提到 8：4 位口令在可离线爆破的空间里（1 万种）几乎等于没设。
+# 只对**新建时显式给密码 / 事后改密**生效 —— 登录校验不做长度判断，
+# 所以既有短口令账号（如 test）照常登录，只是不能再被改回短口令。
 MAX_KEYS_PER_MEMBER = 3   # 普通账号每人最多 3 把 API Key（防失控膨胀 / 泄漏后无限铸 Key）
 
 

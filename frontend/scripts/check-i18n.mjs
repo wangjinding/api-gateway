@@ -9,6 +9,13 @@
 // 另外顺手核三件小事（都是会出现"界面里冒出 nav.xxx 原始键名"的原因）：
 //   1. 中英两份键完全对称；2. 同一个对象里没有重复键；3. 没有空文案。
 //
+// 第三十轮追加第四件：**源码里的硬编码中文**。
+//   体检的由头是 Videos.vue 的素材摘要（`首帧:xx.png`）和 lib/upload.ts 的一串报错，
+//   全都是写死的中文 —— 切到英文后这些地方照旧中文，肉眼很难在一个大页面里发现。
+//   规则：src 下（locales 除外）**字符串字面量**里出现中日韩统一表意文字就报错；
+//   注释里的中文不算（本项目注释大量中文，且注释本来就不该翻）、模板里的纯文字节点不算
+//   （那是语言切换器自己要显示的「中文」，按惯例各语言写给自己的名字）。
+//
 // 只依赖 Node 内置模块：不引第三方解析器，规则显式写在下面，谁都能看懂。
 
 import fs from 'node:fs'
@@ -85,6 +92,53 @@ function checkBraces(value) {
   return bad
 }
 
+// ── 硬编码中文扫描（第三十轮）──────────────────────────────
+const CJK = /[\u4e00-\u9fa5]/
+
+/** 允许出现的硬编码中文（逐条写上理由，别用"通配"把整类放过） */
+const CJK_ALLOW = new Map([
+  // 登录页右上角的语言切换：写的是**中文这门语言自己的名字**，切到英文界面也该显示「中文」
+  ['views/Login.vue::中', '语言切换按钮上的语言自称（各语言写自己的名字）'],
+])
+
+function walk(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const p = path.join(dir, e.name)
+    return e.isDirectory() ? walk(p) : [p]
+  })
+}
+
+/** 去掉注释（块注释 / HTML 注释 / 行注释 —— 行注释要避开 `https://` 里的两个斜杠） */
+function stripComments(code) {
+  return code
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .split('\n')
+    .map((l) => l.replace(/(^|[^:])\/\/.*$/, '$1'))
+    .join('\n')
+}
+
+function scanHardcodedChinese() {
+  const found = []
+  const files = walk(path.join(ROOT, 'src')).filter(
+    (f) => /\.(vue|ts|mts|js|mjs)$/.test(f) && !f.includes(`${path.sep}locales${path.sep}`),
+  )
+  for (const abs of files) {
+    const rel = path.relative(path.join(ROOT, 'src'), abs).split(path.sep).join('/')
+    const lines = stripComments(fs.readFileSync(abs, 'utf8')).split('\n')
+    lines.forEach((line, i) => {
+      const lits = line.match(/'[^'\n]*'|"[^"\n]*"|`[^`\n]*`/g) || []
+      for (const lit of lits) {
+        const text = lit.slice(1, -1)
+        if (!CJK.test(text)) continue
+        if (CJK_ALLOW.has(`${rel}::${text}`)) continue
+        found.push(`src/${rel}:${i + 1} 硬编码中文：${lit}（走 i18n：中文进 zh.ts、英文进 en.ts）`)
+      }
+    })
+  }
+  return found
+}
+
 const problems = []
 const parsed = {}
 
@@ -103,6 +157,9 @@ const zhKeys = new Set(parsed.zh.keys())
 const enKeys = new Set(parsed.en.keys())
 for (const k of zhKeys) if (!enKeys.has(k)) problems.push(`en 少了键：${k}（中文写好了英文没写 → 英文界面会显示这个原始键名）`)
 for (const k of enKeys) if (!zhKeys.has(k)) problems.push(`zh 少了键：${k}（英文写好了中文没写 → 中文界面会显示这个原始键名）`)
+
+// 硬编码中文
+problems.push(...scanHardcodedChinese())
 
 if (problems.length) {
   console.error(`\n✗ 文案体检不通过（${problems.length} 个问题）：`)
