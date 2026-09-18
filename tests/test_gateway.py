@@ -3716,12 +3716,21 @@ def test_api_conversation_id_flows_to_session_header():
                           "conversation_id": "conv-api-42"})
         assert captured["session_id"] == derived, "同一会话必须派生出同一个 session"
         assert not captured["extra"] or "conversation_id" not in captured["extra"]
-        # ② 不传 → session_id 为 None（由适配器回退随机 UUID）
+        # ② 不传 conversation_id → 第二十九轮起不再 None/随机：走「Key 稳定会话」
+        #   （无 Key 走账号稳定兜底；此处是登录会话 → 账号兜底，同样必须恒定）
         r2 = client.post("/v1/chat/completions", headers={"Authorization": _AUTOBEARER},
                          json={"model": "agnes-3.0-flash",
                                "messages": [{"role": "user", "content": "hi"}]})
         assert r2.status_code == 200, r2.text
-        assert captured["session_id"] is None
+        kstable = captured["session_id"]
+        assert kstable is not None, "无会话也必须派生成稳定值（不再是 None/随机）"
+        assert kstable != derived, "无会话的稳定值应来自另一个命名空间"
+        # 同 Key 再打一次（换一句提问） → 会话依旧恒定，缓存才能生效
+        r3 = client.post("/v1/chat/completions", headers={"Authorization": _AUTOBEARER},
+                         json={"model": "agnes-3.0-flash",
+                               "messages": [{"role": "user", "content": "hi again"}]})
+        assert r3.status_code == 200, r3.text
+        assert captured["session_id"] == kstable, "同一 Key 无会话时必须恒定（保住缓存收益）"
     finally:
         m._get_adapter = orig
 
@@ -3764,11 +3773,20 @@ def test_conversation_id_isolated_per_account():
     assert a != b, "不同账号必须隔离（否则共用上游缓存命名空间）"
     assert a == m._upstream_session("shared-conv", "alice"), "同账号同会话必须稳定（保住缓存收益）"
     assert m._upstream_session("other-conv", "alice") != a, "同账号不同会话必须不同"
-    assert m._upstream_session(None, "alice") is None, "未传 → None（适配器回退随机 UUID）"
-    assert m._upstream_session("", "alice") is None
-    # 上游只应看到一个十六进制串，不该看到账号名或业务命名
+    # 第二十九轮：未传 conversation_id → 不再回退 None/随机（那会命中率恒 0）。
+    #   有 API Key → 按 Key 派生稳定会话；没有（登录会话）→ 按账号稳定兜底。
+    k1 = m._upstream_session(None, "alice", "TOKEN-A")
+    assert k1 and len(k1) == 32 and all(c in "0123456789abcdef" for c in k1)
+    assert k1 == m._upstream_session(None, "alice", "TOKEN-A"), "同一 Key → 必须恒定（缓存收益）"
+    assert k1 != m._upstream_session(None, "alice", "TOKEN-B"), "不同 Key → 必须隔离"
+    assert k1 != a, "Key 会话与「账号+会话」派生值应来自不同空间"
+    assert m._upstream_session("", "alice", "TOKEN-A") == k1, "空白串视同未传 → 走 Key 稳定会话"
+    u1 = m._upstream_session(None, "alice")
+    assert u1 and u1 == m._upstream_session(None, "alice"), "无 Key → 账号兜底且恒定"
+    assert u1 != m._upstream_session(None, "bob"), "不同账号兜底值不同"
+    # 上游只应看到一个十六进制串，不该看到账号名、业务命名或 Key 明文
     assert len(a) == 32 and all(c in "0123456789abcdef" for c in a), a
-    assert "alice" not in a and "shared" not in a
+    assert "alice" not in a and "shared" not in a and "TOKEN-A" not in k1
 
 
 def test_non_ascii_conversation_id_rejected_before_upstream():
@@ -3806,11 +3824,11 @@ def test_non_ascii_conversation_id_rejected_before_upstream():
         assert r.status_code == 422, (r.status_code, r.text)
         assert calls == []
 
-        # ③ 空白串 → 视作未传，正常放行（session_id=None → 上游随机 UUID）
+        # ③ 空白串 → 视作未传，正常放行（第二十九轮：不再 None/随机，给稳定会话）
         r = client.post("/v1/chat/completions", headers={"Authorization": _AUTOBEARER},
                         json={**base, "conversation_id": "   "})
         assert r.status_code == 200, r.text
-        assert calls == [None]
+        assert len(calls) == 1 and calls[0] is not None, "空白=未传 → 稳定会话（非 None）"
     finally:
         m._get_adapter = orig
 

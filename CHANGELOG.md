@@ -1,5 +1,28 @@
 # CHANGELOG
 
+## 2026-09-18 · 第二十九轮：`x-opencode-session` 缺省按 **API Key 稳定**派生（提缓存命中）
+
+**老板决策**：把网关接入 agent / QwenPaw 时，客户端多数不传 `conversation_id`，网关此前
+回退成**每调用一个随机 UUID** → 上游（OpenCode Go）提示词缓存命中率恒为 0（换 session 就不
+吃缓存）。
+
+### 改法（`app/main.py`，只动网关，不动 QwenPaw）
+- 缺 `conversation_id` 时不再随机：
+  - 请求带 **API Key** → 上游会话 = `sha256("k:" + <该 Key 的随机串，即 wjd- 后面那串>)[:32]`，
+    一个 Key 一个稳定会话（`_key_token()` 去前缀 + `_upstream_session` 哈希）。
+  - 只有**登录会话**（页面）→ 上游会话 = `sha256("u:" + 账号)[:32]` 稳定兜底。
+- 仍保留：客户端显式带 `conversation_id` → 按「账号:会话」哈希（按会话隔离）。
+- **安全取舍**：不把 Key 随机串本体直接发给 opencode（那串是凭证内容，泄漏给第三方等于半个
+  Key），而是先 `sha256` 再发；上游只看到 32 位十六进制串，既不暴露账号名也不暴露 Key 明文。
+
+### 验证
+- 单测 173 passed / 0 failed（`test_conversation_id_isolated_per_account`、
+  `test_api_conversation_id_flows_to_session_header`、`test_non_ascii_...` 已更新为「不传→非
+  None 稳定会话」新语义）
+- 生产已重启（`api-gateway:api-gateway_00`，pid 1488509），`/healthz` ok、无回归
+- **真实的 `cached_tokens>0` 演示暂被挡**：opencode 免费 5 小时额度仍锁定（上游 429），待额度
+  重置（约 3h）后可再实测两通相同前缀调用确认命中。
+
 ## 2026-09-18 · 第二十七轮：三线直传 + **彻底删除路由别名**
 
 **老板决策**：wjd 路由这个功能去掉、删除掉，相关的代码和文档一起更新。

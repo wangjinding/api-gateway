@@ -847,6 +847,21 @@ def _record_auth_fail(request: Request, limit_per_min: int) -> bool:
     return len(dq) >= limit_per_min
 
 
+def _key_token(key: str) -> str | None:
+    """丢 API Key 前缀（wjd- / 旧 ak-）取随机串本体；非 Key 凭证（登录会话）返回 None。
+
+    第二十九轮：缺 conversation_id 时用「这个 API Key 自己」派生稳定的上游会话 —— 也就是
+    老板要的「x-opencode-session 就传 wjd- 后面那串」的落地版。但**不能把随机串本体原样
+    传给上游**：那串就是网关 Key 的凭证部分，发出去等于把 Key 关键内容泄给 opencode（第三
+    方）。所以这里取出来只用于哈希（_upstream_session 里 sha256），稳定性和"原样传"完全
+    一致，且不落地上游任何明文。
+    """
+    for p in ("wjd-", "ak-"):
+        if key.startswith(p):
+            return key[len(p):]
+    return None
+
+
 def _identity_from_credentials(key: str) -> tuple[str, str, str] | None:
     """Bearer 凭证 → (account, role, kind)。kind ∈ {"session", "apikey"}。
 
@@ -954,6 +969,10 @@ async def require_auth(
     account, role, kind = identity
     _set_identity(request, account, role)
     request.state.credential = kind
+    # 第二十九轮：把「这个 API Key 的随机串」暂存到 state，供 _upstream_session 在缺
+    #   conversation_id 时派生出稳定的上游会话（见 _key_token 的说明）。登录会话没有 Key，
+    #   置 None，由 _upstream_session 按账号稳定兜底。
+    request.state.key_token = _key_token(key) if kind == "key" else None
     # 全局限流按**账号**分桶（yaml/注释都写"单 user QPS 上限"）。
     # 第八轮审计: 原先是 account + 凭证前缀，同一个人多开几个会话/多建几把 Key 就能
     # 成倍放大自己的配额，账号级限流形同虚设。
@@ -1325,7 +1344,7 @@ async def _passthrough(request: Request, protocol: str):
 
     # 定点改写：model 换成真实 id（别名场景）+ 盖模型级强制参数；其余字段一个不动
     payload = adapter.prepare_payload(model_in, clean)
-    session = _upstream_session(conv, caller)
+    session = _upstream_session(conv, caller, getattr(request.state, "key_token", None))
 
     if stream:
         return await _passthrough_stream(request, rid, caller, protocol, adapter, cb,
@@ -1609,23 +1628,28 @@ async def chat_completions(request: Request, req: ChatRequest, _auth=Depends(req
     return await _chat_once(cfg, rid, caller, request, req, model_id, messages, tools)
 
 
-def _upstream_session(conversation_id: str | None, account: str) -> str | None:
-    """把客户端的会话 id 派生成**按账号隔离**的上游 session id（第二十六轮）。
+def _upstream_session(conversation_id: str | None, account: str, key_token: str | None = None) -> str:
+    """把调用的标识派生成**稳定**的上游 session id（第二十六轮 + 第二十九轮强化）。
 
     上游（OpenCode Go）的提示词缓存以 `x-opencode-session` 为作用域 —— 实测：同一 session
     的第二次请求 `cached_tokens` 全量命中，换成另一个 session 则恒为 0（换 session = 完全不
-    吃缓存）。所以这个值值得稳定，但也**不该原样透传客户端的字符串**：
+    吃缓存）。所以这个值**必须在一次最近的重复调用间恒定**。取值优先级：
 
-    两个账号只要用了相同的值（`test`、`1`、照文档抄的示例），就会落进同一个上游缓存命名
-    空间。这不会泄露彼此内容（缓存只是前缀 KV 复用，绝不会返回别人的回答），但**命中率会
-    互相干扰**，计费和缓存收益的口径也就串了。
+    ① 客户端带了 `conversation_id`（第二十六轮）：first 「账号:会话」后哈希 —— 同一段对话
+       恒定 → 该对话内反复出现的前缀命中；不同账号天然隔离。
+    ② 没带（QwenPaw / 多数 agent 不发这个字段，第二十九轮老板决策）：用**这个 API Key
+       自己**派生 —— 一个 Key 一个稳定会话，比"每调随机"命中率高得多。但**先哈希再传**：
+       直接把 `wjd-` 后面那串原样发给上游等于泄露 Key 凭证内容给第三方（见 _key_token）。
+    ③ 连 Key 都没有（登录页面会话，kind=session）：按账号稳定兜底，同样不再随机。
 
-    这里加账号前缀后哈希：对上游仍是"同一对话恒定不变"的稳定 id（缓存收益不变），但不同
-    账号之间天然隔离；同时上游只看到一个 32 位十六进制串，既不暴露账号名也不暴露业务命名。
+    这三级都**不再回退成每个调用一个随机 UUID** —— 随机=缓存命中率恒为 0。上游只看到
+    32 位十六进制串，不暴露账号名、业务命名或 Key 明文。
     """
-    if not conversation_id:
-        return None
-    return hashlib.sha256(f"{account}:{conversation_id}".encode("utf-8")).hexdigest()[:32]
+    if conversation_id:
+        return hashlib.sha256(f"{account}:{conversation_id}".encode("utf-8")).hexdigest()[:32]
+    if key_token:
+        return hashlib.sha256(f"k:{key_token}".encode("utf-8")).hexdigest()[:32]
+    return hashlib.sha256(f"u:{account}".encode("utf-8")).hexdigest()[:32]
 
 
 async def _chat_once(cfg, rid, caller, request, req, model_id, messages, tools):
@@ -1672,7 +1696,7 @@ async def _chat_once(cfg, rid, caller, request, req, model_id, messages, tools):
                 max_tokens=req.max_tokens, stop=req.stop,
                 tools=tools, tool_choice=tool_choice,
                 extra=req.upstream_extra() or None,
-                session_id=_upstream_session(req.conversation_id, caller),
+                session_id=_upstream_session(req.conversation_id, caller, getattr(request.state, "key_token", None)),
             )
             ok = True
             break
@@ -1777,7 +1801,7 @@ def _stream_response(request, req, model_id, messages, tools):
                     max_tokens=req.max_tokens, stop=req.stop,
                     tools=tools, tool_choice=req.tool_choice,
                     extra=req.upstream_extra() or None,
-                    session_id=_upstream_session(req.conversation_id, caller),
+                    session_id=_upstream_session(req.conversation_id, caller, getattr(request.state, "key_token", None)),
                 )
                 async for chunk in stream_gen:
                     if chunk.get("done"):
