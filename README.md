@@ -81,9 +81,11 @@ routes:
   wjd:
     timeout: 60         # 单模型 60s 没出结果就切下一个（避免 6×120s 挂死）
     retry: 1           # 每个模型试 1 次，失败立即切下一个
+    # wjd 链路 = 全部文本模型（新增/现有文本模型都必须加入）
     models:
       - "ark-code-latest"     # 1) 火山方舟（最高优先级）
-      - "agnes-3.0-flash"     # 2) Agnes 兜底
+      - "agnes-3.0-flash"     # 2) Agnes 3.0
+      - "agnes-2.5-flash"     # 3) Agnes 2.5
 
 circuit:                 # 供应商熔断
   enabled: true

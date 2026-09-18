@@ -4,7 +4,24 @@
 
 ---
 
-## 2026-09-18 · 新增 Agnes 2.5 Flash 文本模型
+## 2026-09-18 · wjd 链路 = 全部文本模型（老板决策）
+
+**一句话**：老板拍板——**现有 + 以后新增的每一个文本模型都必须加入 `routes.wjd` 兜底链**。本次把 `agnes-2.5-flash` 补进 wjd，并把这句作为长期规则写入 MEMORY / README / CHANGELOG，供后续新增模型照做。
+
+### 改动
+- **`data/gateway.yaml`**：`routes.wjd.models` 补第 3 位 `agnes-2.5-flash`，链改为
+  `ark-code-latest` → `agnes-3.0-flash` → `agnes-2.5-flash`；加上注释「wjd 链路 = 全部文本模型（新增/现有都必须加入）」。
+- **`README.md`**：wjd yaml 示例链同步为 3 模型 + 同一句注释。
+- **`tests/test_gateway.py`**：`test_load_config_routes` 断言 `len(wjd.models) == 2` → `3`。
+- **`MEMORY.md` / `memory/2026-09-18/wjd-route-rule.md`**：记录决策为长期约束（新增文本模型必须同时进 `routes.wjd.models`）。
+
+### 验证
+- 静态校验：`data/gateway.yaml` 中全部 `type: text` 模型 = `agnes-2.5-flash / agnes-3.0-flash / ark-code-latest`，与 `routes.wjd.models` 完全一致（无缺失、wjd 无多出的非文本模型）。
+- 单测：`python3 tests/test_gateway.py` → **155 passed, 0 failed**。
+- 运行时排序不受影响：wjd 仍按「可用性 + 速度」实时重排，配置序只是冷启动初始序；`timeout:60 / retry:1` 不变。
+
+### 上线
+- 纯配置改动，hot_reload ≤15s 自动生效，无需重启、不踢会话；是否推 CNB 等老板确认。
 
 **一句话**：给 Agnes 供应商注册新模型 `agnes-2.5-flash`（2.0 升级版，OpenAI 兼容 Chat Completions，支持图像 URL 输入）。
 

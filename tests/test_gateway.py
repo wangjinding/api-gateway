@@ -96,7 +96,8 @@ def test_load_config_providers():
 def test_load_config_routes():
     cfg = load_config(CONFIG)
     assert "wjd" in cfg.routes
-    assert len(cfg.routes["wjd"].models) == 2
+    # wjd 链路 = 全部文本模型（ark-code-latest / agnes-3.0-flash / agnes-2.5-flash）
+    assert len(cfg.routes["wjd"].models) == 3
     assert cfg.routes["wjd"].timeout == 60
     assert cfg.routes["wjd"].retry == 1
 
