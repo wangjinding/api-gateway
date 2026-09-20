@@ -409,9 +409,8 @@ export default {
     probedLine: 'probed via {p}',
     // Round 31: virtual model id (alias) — clients always send model: wjd, the gateway
     // forwards to the model an admin picks. An alias is not a model: it never shows up in
-    // the speed-test list or the model counts, only in this card and its read-only row.
+    // the speed-test list or the model counts, only in this card.
     aliasCard: 'Virtual model id (alias)',
-    aliasSub: 'Clients always send model: {id}; the gateway forwards to the model you pick',
     aliasLine: 'Only the chat/completions (OpenAI) format is supported: calling {id} on /v1/messages or /v1/responses is rejected with 400 at the gateway (it never translates formats).',
     aliasInherit: 'Vision, forced params and pricing all follow the target model — the alias stores no configuration of its own, so switching the target switches everything.',
     aliasName: 'Alias id',
@@ -422,7 +421,6 @@ export default {
     aliasEnabled: 'Enabled',
     aliasDisabled: 'Disabled',
     aliasNotConfigured: 'No target model configured yet — clients sending model: {id} get "unknown model".',
-    aliasReadonly: 'Read-only: the mapping is chosen by an admin in the gateway config',
     aliasSave: 'Save mapping',
     aliasSaved: '{id} → {target} is live',
     aliasSaveFail: 'Save failed',

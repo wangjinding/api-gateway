@@ -3569,12 +3569,20 @@ async def config_put(request: Request, _auth=Depends(require_auth)):
     except ConfigError as e:
         raise HTTPException(400, str(e))
     text = gw_settings.render_yaml(raw_new)
-    info = await _offload(gw_settings.write_config, CONFIG_PATH, text)
+    # 第三十一轮: 结构化保存走文本级合并 —— 只把**值真的变了**的段替换进原文，其余字节
+    #   （含手写注释、行尾注释、键序）原样保留。起因：模型页「保存映射」只改 aliases 一段，
+    #   却走 render_yaml 整份重渲染，把 gateway.yaml 里历轮手写的现场注释（协议线实测结论、
+    #   各家鉴权差异…）整段抹掉。面板 PUT 的是整份视图，所以"没变"的段由 write_config_merged
+    #   自己比对 raw_old 后跳过；合并回读校验不过时自动退回整份重渲染（配置一定正确，只赔注释）。
+    submitted = {k for k in view if isinstance(k, str)}
+    info = await _offload(gw_settings.write_config_merged, CONFIG_PATH, raw_new, raw_old, submitted)
+    text = info.get("text") or text
     restart = gw_settings.restart_keys_changed(old_cfg, new_cfg)
     await _apply_config(new_cfg, source=f"页面保存（{request.state.account}）")
     _state["mtime"] = _config_mtime()
-    log.warning("配置已由 %s 通过管理页面保存并生效（%d 供应商 / %d 字节）",
-                request.state.account, len(new_cfg.providers), info.get("bytes", 0))
+    log.warning("配置已由 %s 通过管理页面保存并生效（%d 供应商 / %d 字节 / 写盘=%s / 重写段=%s）",
+                request.state.account, len(new_cfg.providers), info.get("bytes", 0),
+                info.get("mode", "?"), ",".join(info.get("sections", [])) or "无")
     return {
         "status": "ok",
         "applied": True,

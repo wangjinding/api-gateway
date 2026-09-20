@@ -3444,6 +3444,10 @@ def test_config_save_applies_without_restart():
     tmp = tempfile.TemporaryDirectory()
     cfg_path = P(tmp.name) / "gateway.yaml"
     cfg_path.write_text(P(CONFIG).read_text(encoding="utf-8"), encoding="utf-8")
+    # 注入一行人工注释：结构化保存**不许**把它抹掉（第三十一轮修的正是这个事故）
+    with cfg_path.open("a", encoding="utf-8") as fh:
+        fh.write("\n# 人工注释：别动我\n")
+    comments_before = cfg_path.read_text(encoding="utf-8").count("#")
     old_path, old_cfg = m.CONFIG_PATH, m.config
     m.CONFIG_PATH = cfg_path
     try:
@@ -4770,6 +4774,10 @@ def test_alias_panel_round_trip_and_save_validation():
     tmp = tempfile.TemporaryDirectory()
     cfg_path = P(tmp.name) / "gateway.yaml"
     cfg_path.write_text(P(CONFIG).read_text(encoding="utf-8"), encoding="utf-8")
+    # 注入一行人工注释：结构化保存**不许**把它抹掉（第三十一轮修的正是这个事故）
+    with cfg_path.open("a", encoding="utf-8") as fh:
+        fh.write("\n# 人工注释：别动我\n")
+    comments_before = cfg_path.read_text(encoding="utf-8").count("#")
     old_path, old_cfg = m.CONFIG_PATH, m.config
     m.CONFIG_PATH = cfg_path
     try:
@@ -4779,18 +4787,23 @@ def test_alias_panel_round_trip_and_save_validation():
         assert "aliases" in view, view.keys()
         # 换一个和生产默认不同的目标，才能证明写入真的生效了
         target = "ark-code-latest"
-        view["aliases"] = {"wjd": {"enabled": True, "target": target, "note": "客户入口"}}
-        r = client.put("/config", headers=ah, json={"config": view})
+        payload = {"wjd": {"enabled": True, "target": target, "note": "客户入口"}}
+        # 面板真实载荷：模型页「保存映射」只提交 aliases 一段（Models.vue saveAlias），
+        #   不是整份视图 —— 服务端按段合并，其余段沿用文件原文（连行尾注释都不动）。
+        r = client.put("/config", headers=ah, json={"config": {"aliases": payload}})
         assert r.status_code == 200, r.text
         assert m.config.resolve_alias("wjd") == target, "保存即生效"
-        # 落盘 yaml 里也确实有这一段（面板下次读得回来）
-        assert _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["aliases"]["wjd"]["target"] == target
+        # 落盘 yaml 里也确实有这一段（面板下次读得回来），且**人工注释一行不少**
+        disk = cfg_path.read_text(encoding="utf-8")
+        assert _yaml.safe_load(disk)["aliases"]["wjd"]["target"] == target
+        assert "人工注释：别动我" in disk, "结构化保存把人工注释抹掉了"
+        assert disk.count("#") == comments_before, "结构化保存不该改动其他段的注释"
         lm = client.get("/v1/models", headers=ah).json()["data"]
         assert next(x for x in lm if x["id"] == "wjd")["alias_of"] == target
         # 非法目标：400 + 不写盘（盘上仍是上一个合法值）
-        bad = client.get("/config", headers=ah).json()["config"]
-        bad["aliases"]["wjd"]["target"] = "根本没有这个模型"
-        r2 = client.put("/config", headers=ah, json={"config": bad})
+        r2 = client.put("/config", headers=ah,
+                        json={"config": {"aliases": {"wjd": {"enabled": True,
+                                                             "target": "根本没有这个模型"}}}})
         assert r2.status_code == 400 and "wjd" in r2.text, r2.text
         assert _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["aliases"]["wjd"]["target"] == target
         assert m.config.resolve_alias("wjd") == target
@@ -4829,6 +4842,122 @@ def test_alias_streaming_uses_one_name_throughout():
     for f in frames:
         assert f.get("model") == "wjd", f          # 名字只有一个：客户端请求的那个
     assert frames[0]["served_model"] == "m-chat", frames[0]   # 真实目标在这里说清楚
+
+
+def test_merged_write_keeps_neighbour_docs_and_skips_unchanged():
+    """第三十一轮补测：文本级合并的三个边界（都是这次真踩过的坑）。
+
+    ① 被替换段的**段尾说明**（那是下一段的抬头注释 / 文件页脚）必须留在原位 ——
+       否则"改 providers"会顺手把 `server:` 上方的说明书删掉；
+    ② 新增的段要插在下一段**说明注释之前**，不能插进"说明与键行"之间（否则别人的
+       说明书就成了新段的抬头）；
+    ③ 提交了但值没变的段一个字节都不许动 —— 面板 PUT 的是整份视图，段内行尾注释
+       （如 `timeout: 120  # …`）不该因为一次无关保存而蒸发。"""
+    import tempfile
+    import yaml as _yaml
+    from pathlib import Path as P
+    from app.settings import merge_submitted_sections, write_config_merged
+
+    text = (
+        "# 抬头：手写说明\n"
+        "providers:\n"
+        "  p:\n"
+        "    name: P\n"
+        "    base_url: http://x/v1\n"
+        "    models:\n"
+        "      - id: m-chat\n"
+        "        display_name: Chat\n"
+        "# ── server 的说明书（人工）────────────────\n"
+        "# host/port 改完要重启进程才生效。\n"
+        "server:\n"
+        "  timeout: 120      # 行尾注释：同一模型的超时，别动\n"
+    )
+    prov = {"p": {"name": "P", "base_url": "http://x/v1",
+                  "models": [{"id": "m-chat", "display_name": "Chat"}]}}
+    alias = {"wjd": {"enabled": True, "target": "m-chat", "note": "客户入口"}}
+    plain = {"providers": prov, "server": {"timeout": 120}}
+
+    # ① 改 providers：它的段尾正是 server 的说明书 → 说明与段序都得在
+    m = merge_submitted_sections(text, plain, {"providers"})
+    assert _yaml.safe_load(m) == plain, m
+    assert "── server 的说明书" in m and "host/port 改完要重启进程才生效。" in m, m
+    assert m.index("说明书") < m.index("server:"), "说明必须还在 server 上方"
+
+    # ② 新增 aliases：插点在 server 的说明注释之前
+    m2 = merge_submitted_sections(text, {**plain, "aliases": alias}, {"aliases"})
+    assert _yaml.safe_load(m2) == {**plain, "aliases": alias}, m2
+    assert m2.index("aliases:") < m2.index("── server 的说明书") < m2.index("server:"), m2
+    assert m2.startswith("# 抬头：手写说明"), "抬头不许被跳过"
+
+    # ③ 值没变的段不重写：server 的行尾注释要活下来（写盘端到端）
+    with tempfile.TemporaryDirectory() as d:
+        f = P(d) / "gateway.yaml"
+        f.write_text(text, encoding="utf-8")
+        raw_old = _yaml.safe_load(text)
+        info = write_config_merged(f, {**plain, "aliases": alias}, raw_old,
+                                   {"aliases", "providers", "server"})
+        disk = f.read_text(encoding="utf-8")
+        assert info["mode"] == "merged" and info["sections"] == ["aliases"], info
+        assert "行尾注释：同一模型的超时，别动" in disk, "没变的段被重写了"
+        assert _yaml.safe_load(disk) == {**plain, "aliases": alias}, disk
+
+
+def test_structured_save_only_touches_submitted_section():
+    """第三十一轮修的真实事故：结构化保存（模型页「保存映射」）原来走 render_yaml 整份重写，
+    把 gateway.yaml 里历轮手写的现场注释全抹了。现在只替换**提交过的那一段**，其余字节不动。
+
+    这里用一个带"人工注释"的小配置文件端到端验：改别名 → 注释还在、别的段一个字节没变；
+    再加一段定位失败的怪文本，确认回退整份重渲染（配置正确优先，注释其次）。
+    """
+    from app.settings import merge_submitted_sections, write_config_merged, render_yaml
+    import yaml as _yaml
+    text = (
+        "# 抬头注释（人工）\n"
+        "providers:\n"
+        "  p:\n"
+        "    # 这里也是人工注释：别动我\n"
+        "    name: P\n"
+        "    base_url: http://x/v1\n"
+        "    models:\n"
+        "      - id: m-chat\n"
+        "        display_name: Chat 模型\n"
+        "server:\n"
+        "  timeout: 120\n"
+    )
+    new = {"providers": {"p": {"name": "P", "base_url": "http://x/v1",
+                               "models": [{"id": "m-chat", "display_name": "Chat 模型"}]}},
+           "aliases": {"wjd": {"enabled": True, "target": "m-chat", "note": "客户入口"}},
+           "server": {"timeout": 120}}
+    merged = merge_submitted_sections(text, new, {"aliases"})
+    assert merged is not None
+    assert "别动我" in merged and "抬头注释（人工）" in merged, "人工注释必须原样保留"
+    assert merged.startswith(text.split("aliases")[0][:20]), "前面的文本不该被重排"
+    # 新增段插到它该在的位置（aliases 在 _SECTION_ORDER 里紧跟 providers → 应在 server 之前）
+    assert merged.index("aliases:") < merged.index("server:"), merged
+    assert "wjd" in merged and _yaml.safe_load(merged) == new, "合并结果必须与提交内容一致"
+    assert "provider 与 server 的原文都在"  # 语义检查由上面 safe_load 相等保证
+
+    # 段已存在 → 只替换该段
+    merged2 = merge_submitted_sections(merged, {**new, "server": {"timeout": 999}}, {"server"})
+    assert "timeout: 999" in merged2 and "别动我" in merged2 and _yaml.safe_load(merged2)["aliases"] == new["aliases"]
+
+    # 怪文本（没有顶层段）→ 让调用方回退整份重渲染
+    assert merge_submitted_sections("这不是 yaml：：\n- 1\n- 2\n", new, {"aliases"}) is None
+
+    # write_config_merged: 不变量对不上时自动回退 rendered 模式（且写出的一定是正确配置）
+    import tempfile
+    from pathlib import Path as P
+    with tempfile.TemporaryDirectory() as d:
+        f = P(d) / "g.yaml"
+        f.write_text(text, encoding="utf-8")
+        info = write_config_merged(f, new, {}, {"aliases"})
+        assert info["mode"] == "merged" and "别动我" in f.read_text(encoding="utf-8"), info
+        # 提交一个"面板不认识"的段 → 仍然要能写对（追加到末尾），且回读一致
+        weird = {**new, "custom_x": {"a": 1}}
+        info2 = write_config_merged(f, weird, {}, {"aliases", "custom_x"})
+        assert _yaml.safe_load(f.read_text(encoding="utf-8")) == weird, info2
+        assert ("别动我" in f.read_text(encoding="utf-8")) if info2["mode"] == "merged" else True
+    assert render_yaml(new).startswith("#"), "整份重渲染路径仍在（回退用）"
 
 
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`

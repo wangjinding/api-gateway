@@ -79,13 +79,12 @@
     </div>
 
     <!-- 第三十一轮：虚拟模型 id（别名）。客户端固定写 model: wjd，实际转发到哪个真实模型
-         由管理员在这里选；member 只看只读行（数据来自 /v1/models 的 alias_of —— 普通账号
-         读不到 /config，也不需要读到）。
+         由管理员在这里选；member 没有编辑行，只看到「wjd → 目标」这一行数据（数据来自
+         /v1/models 的 alias_of —— 普通账号读不到 /config，也不需要读到）。
          保存走 PUT /config（管理员 + 网页会话），**保存即生效**：不需要重启网关。 -->
     <div v-if="aliasRows.length" class="card" style="margin-top: var(--gap)">
       <div class="card-h">
         <b>{{ t('models.aliasCard') }}</b>
-        <span class="sub">{{ t('models.aliasSub', { id: aliasRows[0].name }) }}</span>
       </div>
 
       <div v-for="a in aliasRows" :key="a.name" class="alias">
@@ -114,8 +113,6 @@
             {{ t('models.aliasSave') }}
           </el-button>
         </div>
-        <div v-else class="alias-ro">{{ t('models.aliasReadonly') }}</div>
-
         <div class="alias-hint">
           <div>{{ t('models.aliasLine', { id: a.name }) }}</div>
           <div>{{ t('models.aliasInherit') }}</div>
@@ -298,7 +295,7 @@ const models = computed(() => items.value.filter((x: any) => !x.alias_of))
 // ── 别名（第三十一轮）──
 // admin：读 GET /config 的 aliases（**含 enabled** —— 停用的别名在 /v1/models 里看不到），
 //   可改可存；没配过就给一行以 wjd 为名的空白模板（选完目标点保存即可）。
-// member：读 /v1/models 里的 alias_of，只显示只读行（PUT /config 本就只认管理员+会话）。
+// member：读 /v1/models 里的 alias_of，只渲染数据行（没有编辑行；PUT /config 本就只认管理员+会话）。
 const ALIAS_ID = 'wjd'      // 当前就这一个（老板 2026-09-18 定）；配置层支持多个，页面按列表渲染
 const aliasEdit = ref<any[]>([])
 const aliasSaving = ref(false)
@@ -510,7 +507,8 @@ onMounted(load)
 .st-lat { min-width: 88px; text-align: center; }
 .st-loading { font-style: italic; }
 .lat-head { display: flex; align-items: center; gap: 8px; padding: 2px 0 6px; }
-/* 第三十一轮：别名卡片（别名不是模型，用"指针"感的排版：名字 → 目标） */
+/* 第三十一轮：别名卡片（别名不是模型，用"指针"感的排版：名字 → 目标）。
+   2026-09-18 老板：卡片的副标题与 member 的「只读：…」提示都删掉，只留数据行 + 说明。 */
 .alias { padding: 10px 0; }
 .alias + .alias { border-top: 1px dashed var(--line); }
 .alias-top { display: flex; align-items: center; gap: 8px; font-size: 13px; }
@@ -522,7 +520,6 @@ onMounted(load)
 .alias-arrow { color: var(--muted-2); }
 .alias-edit { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
 .alias-sel { width: 340px; max-width: 100%; }
-.alias-ro { margin-top: 8px; font-size: 11.5px; color: var(--muted-2); }
 .alias-hint { margin-top: 8px; font-size: 11.5px; line-height: 1.65; color: var(--muted-2); }
 .alias-warn { color: var(--warn); }
 </style>

@@ -20,7 +20,9 @@ adapter 缓存，与 mtime 热重载走**同一条** `_apply_config` 路径（�
 from __future__ import annotations
 
 import copy
+import logging
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -37,6 +39,8 @@ from app.config import (
     validate_config,
     validate_warnings,
 )
+
+log = logging.getLogger("api-gateway.settings")
 
 # ── 改了必须重启进程才生效的键（其余都是"每请求读配置"，保存即生效） ──
 #   host / port：uvicorn 在进程启动时绑定，改文件不会重绑。
@@ -520,6 +524,177 @@ def render_yaml(raw: dict[str, Any]) -> str:
 
 
 # ── 写盘（备份 + 原子替换）────────────────────────────────
+def _top_key_of(line: str) -> str | None:
+    """这一行是不是一个**顶层段**的键行（`aliases:` 这种，列 0 起、非注释）？是则返回键名。"""
+    if not line or line[:1].isspace() or line.lstrip().startswith("#"):
+        return None
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_.-]*):", line)
+    return m.group(1) if m else None
+
+
+def _split_top_sections(text: str) -> list[tuple[str | None, int, int]]:
+    """把 yaml 原文切成 [(顶层键或 None, 起始偏移, 结束偏移)]。
+
+    None 那一段是文件开头的抬头注释（不属于任何段）。段**从键行开始**，不含键行上方的
+    说明注释 —— 那些注释属于上一段的尾巴，替换时保持原位不动（注释是文件主人的，别动它）。
+    """
+    lines = text.splitlines(keepends=True)
+    secs: list[tuple[str | None, int, int]] = []
+    cur_key: str | None = None
+    cur_start = 0
+    pos = 0
+    for ln in lines:
+        key = _top_key_of(ln)
+        if key is not None:
+            secs.append((cur_key, cur_start, pos))
+            cur_key, cur_start = key, pos
+        pos += len(ln)
+    secs.append((cur_key, cur_start, pos))
+    return secs
+
+
+def _split_tail(seg: str) -> tuple[str, str]:
+    """把段文本切成 (正文, 尾巴)：尾巴 = 段尾连续的空行 / 整行注释（列 0）。
+
+    那些行是**下一段的说明书**（如 `server:` 上方的「服务与运维开关」）或文件页脚
+    （如 `auth:` 后面的「路由别名已删除」）。它们落在本段的偏移区间里（段从键行起算、
+    到下一个键行前结束），替换本段时必须原样留在原位 —— 否则改 providers 就会顺手
+    把 aliases 的说明删掉。
+    """
+    lines = seg.splitlines(keepends=True)
+    i = len(lines)
+    while i > 0 and (lines[i - 1].strip() == "" or lines[i - 1][:1] == "#"):
+        i -= 1
+    return "".join(lines[:i]), "".join(lines[i:])
+
+
+def _doc_start(text: str, pos: int) -> int:
+    """`pos` 是某段键行的偏移 → 返回紧贴它的「空行/整行注释」块的起点。
+
+    新增段要插到这一段**说明注释之前**，否则会插进别人的说明书和键行之间，把说明
+    变成新段的抬头（第一轮实测真踩过：新插 `aliases` 会顶掉 `server` 的说明）。
+    """
+    lines = text[:pos].splitlines(keepends=True)
+    i = len(lines)
+    while i > 0 and (lines[i - 1].strip() == "" or lines[i - 1][:1] == "#"):
+        i -= 1
+    return pos - sum(len(x) for x in lines[i:])
+
+
+def merge_submitted_sections(text: str, raw_new: dict[str, Any],
+                             submitted: set[str]) -> str | None:
+    """把本次提交的段替换进原文 `text`，**其余字节一个都不动**（含手写注释/格式/键序）。
+
+    为什么需要它（第三十一轮）: 原来结构化保存走 `render_yaml(raw_new)` —— 整份重渲染。
+    结果"在模型页改一个别名"会把 `gateway.yaml` 里手写的现场注释（协议线实测结论、各家
+    鉴权差异、会话头要求…）整段抹掉。注释是历轮踩坑的产物，不能因为改一个小段就赔进去。
+
+    规则：
+      · 段已存在 → 只替换**这个段**的文本，段尾的说明注释/页脚原样保留（见 _split_tail）；
+      · 段是新增的（如第一次配 `aliases`）→ 按 `_SECTION_ORDER` 插到它该在的位置，
+        且插点在下一段**说明注释之前**（见 _doc_start）；
+      · 段里提交的键必须都在 `raw_new` 里，缺键直接跳过（调用方已按提交内容算过 raw_new）；
+      · 有任何一段定位不到（文件格式怪）→ 返回 None，调用方退回整份重渲染（不静默出错）。
+
+    返回新文本；定位失败返回 None。**不写盘**（写盘交给 write_config，备份+原子替换照旧）。
+    """
+    secs = _split_top_sections(text)
+    if not secs or secs[0][0] is not None or not any(k is not None for k, _s, _e in secs):
+        # 开头那段不是抬头、或整篇一个顶层段都没有 → 这不是我们认识的 gateway.yaml，
+        #   别硬改（返回 None 让调用方整份重渲染，至少配置是对的）
+        return None
+    known = set(_SECTION_ORDER)
+
+    def block(key: str) -> str:
+        # 段文本本身不带抬头注释：文件里原有的抬头注释留在原位（新增段才补注释）
+        return _dump({key: raw_new[key]})
+
+    # 从后往前替换，偏移量才不会因前面的替换而失效
+    edits: list[tuple[int, int, str]] = []
+    inserts: list[tuple[int, str]] = []
+    for key in sorted(submitted):
+        if key not in raw_new:
+            continue          # 提交了一个 raw_new 里没有的段（正常不会）→ 不猜，跳过
+        span = next(((s, e) for k, s, e in secs if k == key), None)
+        if span is not None:
+            _body, tail = _split_tail(text[span[0]:span[1]])
+            edits.append((span[0], span[1], block(key) + tail))
+            continue
+        # 新增段：插到"顺序上排在它后面"的第一个已存在段之前；没有就追加到文件末尾
+        try:
+            order = _SECTION_ORDER.index(key)
+        except ValueError:
+            order = len(_SECTION_ORDER)      # 面板不认识的自定义段 → 追加到末尾，也算定位成功
+        nxt = None
+        for k, s, _e in secs:
+            if k is None or k not in known:
+                continue
+            if _SECTION_ORDER.index(k) > order:
+                nxt = s
+                break
+        head = _SECTION_COMMENTS.get(key, "") if key in known else ""
+        if nxt is None:
+            inserts.append((len(text), head + block(key)))
+        else:
+            # 前面补一个空行（与上一段隔开）；插点在下一段的说明注释之前
+            inserts.append((_doc_start(text, nxt), "\n" + head + block(key)))
+
+    # 一次性按**偏移从大到小**应用所有改动：先动后面的，前面替换/插入才不会让偏移失效
+    ops: list[tuple[int, int, str]] = []       # (起始, 结束, 新文本)；插入时 起始 == 结束
+    ops.extend(edits)
+    ops.extend((at, at, new) for at, new in inserts)
+    out = text
+    for start, end, new in sorted(ops, key=lambda x: -x[0]):
+        if start == end and start >= len(out):
+            # 追加到文件末尾：补一个换行，免得与上一段挤在一行
+            out = out + ("" if out.endswith("\n") or not out else "\n") + new
+            continue
+        out = out[:start] + new + out[end:]
+    if not out.endswith("\n"):
+        out += "\n"
+    return out
+
+
+def write_config_merged(path: str | Path, raw_new: dict[str, Any], raw_old: dict[str, Any],
+                        submitted: set[str]) -> dict[str, Any]:
+    """结构化保存的写盘（第三十一轮）：**只替换真正变了的段**，其余文本原样保留。
+
+    不变量：合并后的文本 `yaml.safe_load` 回去必须**等于** `raw_new`。合并是文本级操作，
+    理论上可能因为缩进/引号风格把值改掉 —— 所以这里回读校验；一旦对不上就退回整份重渲染
+    （老行为，会丢手写注释，但配置一定正确），并记一条 ERROR 说明哪一段没合并成功。
+
+    只有"值真的变了"的段才重写：面板提交的是**整份视图**（GET /config 原样 PUT），但里面
+    绝大多数段和盘上一模一样 —— 那些段一个字节都不动，段内的行尾注释（如 server.retry
+    后面那句说明）才不会因为一次无关保存而蒸发。
+
+    返回 write_config 的信息字典，外加 `mode`（merged / rendered）、`sections`（被重写的段）
+    与 `text`（实际写盘文本）。
+    """
+    path = Path(path)
+    try:
+        text_old = path.read_text(encoding="utf-8")
+    except OSError:
+        text_old = ""
+    changed = {k for k in submitted if k in raw_new and raw_new.get(k) != raw_old.get(k)}
+    merged = merge_submitted_sections(text_old, raw_new, changed) if text_old.strip() else None
+    mode = "merged"
+    if merged is None:
+        merged, mode = render_yaml(raw_new), "rendered"
+    else:
+        try:
+            back = yaml.safe_load(merged)
+        except yaml.YAMLError as e:
+            log.error("文本级合并后的配置解析失败（%s）→ 回退整份重渲染: %s", changed, e)
+            merged, mode = render_yaml(raw_new), "rendered"
+        else:
+            if back != raw_new:
+                log.error("文本级合并结果与提交内容不一致（%s）→ 回退整份重渲染", changed)
+                merged, mode = render_yaml(raw_new), "rendered"
+    info = write_config(path, merged)
+    info.update({"mode": mode, "sections": sorted(changed), "text": merged})
+    return info
+
+
 def _prune_backups(path: Path) -> None:
     """只留最近 BACKUP_KEEP 份时间戳备份（滚动 .bak 不动）。"""
     pat = f"{path.name}.*.bak"
