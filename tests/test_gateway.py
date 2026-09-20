@@ -4760,6 +4760,105 @@ def test_alias_not_speedtested():
         m.config = old_cfg
 
 
+def test_view_to_raw_keeps_panel_defaults_out_of_the_file():
+    """第三十二轮：面板视图是「填满默认值」的，GET→PUT 不许把这些默认值写进文件。
+
+    起因（真踩到的坑）：文件里没写 `rate_limit_rps` / `requires_session_header` / `endpoints`，
+    模型没写 `type` / `vision` / `protocols`，可面板视图里这些键**全都有值**（默认值）。
+    照着视图重建 providers，这些"用户从没写过"的键就被当成用户输入 → 段值变化 →
+    合并写盘判定该段要重写 → 段内手写注释跟着赔掉（实测：整份视图 PUT 会重写 530 行、
+    `#` 标记 126 → 72）。规则：**文件里没有 且 值等于面板默认 → 不写**。
+    """
+    import app.settings as S
+    from app.config import parse_config
+
+    raw_file = {
+        "providers": {
+            "p1": {
+                "name": "P1",
+                "base_url": "http://p1/v1",
+                "auth": {"token_env": "P1_KEY"},
+                "media": {"image_endpoint": "/images/generations"},
+                "models": [
+                    {"id": "m-a", "display_name": "A", "type": "text", "vision": True},
+                    {"id": "m-b", "display_name": "B", "protocols": ["messages"]},
+                ],
+            },
+            "p2": {                       # 故意什么默认键都没有：无 auth / 无 media / 无 models 元数据
+                "name": "P2",
+                "base_url": "http://p2/v1",
+                "rate_limit_rps": 5,      # 文件里**有**这个键 → 必须原样留住
+                "models": [{"id": "m-c", "display_name": "C"}],
+            },
+        },
+        "server": {"port": 8808},
+    }
+    cfg = parse_config(raw_file)
+    view = S.config_to_view(cfg)
+
+    # 先钉住前提：视图确实是"填满默认值"的（否则这个用例就白测了）
+    vp1 = view["providers"]["p1"]
+    assert vp1["rate_limit_rps"] is None and vp1["requires_session_header"] is False
+    assert "endpoints" in vp1 and vp1["extra_headers"] == {}
+    assert vp1["models"][0]["protocols"] == ["chat/completions"]   # 文件里没写 → 视图给默认线
+    assert vp1["models"][0]["params"] == {}
+    assert vp1["media"]["video_model_name"] is None
+
+    out = S.view_to_raw(cfg, raw_file, view)
+    # 核心不变量：只有 providers 段以面板为准，而这趟"原样往返"必须零变化
+    assert out["providers"] == raw_file["providers"], "面板默认值被写进文件了"
+    assert "rate_limit_rps" not in out["providers"]["p1"]
+    assert "endpoints" not in out["providers"]["p1"]
+    assert "media" not in out["providers"]["p2"] and "auth" not in out["providers"]["p2"]
+    assert out["providers"]["p1"]["media"] == {"image_endpoint": "/images/generations"}
+    assert out["providers"]["p2"]["rate_limit_rps"] == 5
+    assert out["providers"]["p1"]["models"][1]["protocols"] == ["messages"]
+    assert "vision" not in out["providers"]["p2"]["models"][0]
+
+    # 真改过就要写：文件里没这个键，但值≠默认 → 落盘
+    v_mod = {**view, "providers": {**view["providers"],
+                                   "p1": {**vp1, "rate_limit_rps": 7}}}
+    assert S.view_to_raw(cfg, raw_file, v_mod)["providers"]["p1"]["rate_limit_rps"] == 7
+    # 文件里本来就有的键，用户清空（值变成默认）→ 也是明确意图，照写
+    v_clear = {**view, "providers": {**view["providers"],
+                                     "p2": {**view["providers"]["p2"], "rate_limit_rps": None}}}
+    assert S.view_to_raw(cfg, raw_file, v_clear)["providers"]["p2"]["rate_limit_rps"] is None
+
+
+def test_full_view_put_rewrites_nothing():
+    """第三十二轮：把 `GET /config` 的整份视图原样 PUT 回来 = 零变化（文件逐字节不动）。
+
+    这是"注释不被赔掉"的总闸 —— 只要 `view_to_raw` 还 materialize 默认值，
+    providers 段就会被判「变了」重写一遍（实测 530 行、`#` 126 → 72）。用临时配置文件跑，
+    绝不碰生产 data/gateway.yaml。
+    """
+    import tempfile
+    from pathlib import Path as P
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    client = TestClient(m.app)
+    ah = {"Authorization": f"Bearer {_login_admin_session(client)}"}
+    tmp = tempfile.TemporaryDirectory()
+    cfg_path = P(tmp.name) / "gateway.yaml"
+    src = P(CONFIG).read_text(encoding="utf-8")
+    cfg_path.write_text(src, encoding="utf-8")
+    with cfg_path.open("a", encoding="utf-8") as fh:
+        fh.write("\n# 人工注释：整份视图 PUT 也别动我\n")
+    src = cfg_path.read_text(encoding="utf-8")
+    old_path, old_cfg = m.CONFIG_PATH, m.config
+    m.CONFIG_PATH = cfg_path
+    try:
+        view = client.get("/config", headers=ah).json()["config"]
+        r = client.put("/config", headers=ah, json={"config": view})
+        assert r.status_code == 200, r.text
+        disk = cfg_path.read_text(encoding="utf-8")
+        assert disk == src, "整份视图 PUT 改动了文件（面板默认值被 materialize 进 providers）"
+    finally:
+        m.CONFIG_PATH, m.config = old_path, old_cfg
+        tmp.cleanup()
+
+
 def test_alias_panel_round_trip_and_save_validation():
     """面板是别名的编辑入口：GET 读出来带 aliases → 原样 PUT 不丢 → 非法目标 400（不写盘）。
     用临时配置文件，绝不碰生产 data/gateway.yaml。"""

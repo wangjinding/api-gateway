@@ -31,6 +31,7 @@ from typing import Any
 import yaml
 
 from app.config import (
+    DEFAULT_PROTOCOLS,
     ConfigError,
     GatewayConfig,
     PROTOCOLS,
@@ -200,6 +201,59 @@ def _default_endpoints_view() -> dict[str, Any]:
             for name, ep in _default_endpoints().items()}
 
 
+_MISSING = object()
+
+# 第三十二轮: 面板提交里的「默认值」不要写进文件。
+#   面板提交的是 `GET /config` 的视图，而视图是**填满默认值**的 —— 文件里根本没写的键
+#   （`providers[].rate_limit_rps` / `requires_session_header` / `endpoints`、模型的
+#   `type` / `vision` / `protocols`…）视图里都有值。`view_to_raw` 若照着它重建，这些
+#   "用户从没写过"的键就会被当成用户输入写进文件：段值因此变化 → 合并写盘判定该段要重写
+#   → 段内手写注释赔掉、文件越写越胖。实测（2026-09-20，生产配置）：把整份视图 PUT 回来，
+#   `providers` 段会被重写 530 行、`#` 标记 126 → 72。
+#   规则：键在文件原文里**没有** 且 值等于面板默认值 → 不写（详见 `_prune_defaults`）。
+_PROVIDER_KEY_DEFAULTS: dict[str, Any] = {
+    "auth": {},                            # 空 auth（token/token_env 都没给）
+    "rate_limit_rps": None,                # 不限速
+    "requires_session_header": False,      # 不要求 x-opencode-session
+    "extra_headers": {},
+    "media": {},                           # 媒体端点全空 = 该供应商不放媒体
+    "endpoints": _default_endpoints_view,  # callable：默认三条线（现算 —— 不能共享可变对象）
+}
+_MODEL_KEY_DEFAULTS: dict[str, Any] = {
+    "display_name": "",                    # ModelInfo.display_name 的默认值就是空串
+    "type": "text",
+    "vision": False,
+    "protocols": list(DEFAULT_PROTOCOLS),  # 不写 = 自动走默认线（chat/completions）
+}
+
+
+def _prune_defaults(sub: dict[str, Any], base: dict[str, Any],
+                    defaults: dict[str, Any]) -> dict[str, Any]:
+    """丢掉「面板替用户补出来的默认值」：键在文件原文里没有、且值等于面板默认值。
+
+    保留的三种情况：
+      · 文件里本来就有这个键 → 照写（值相同时写回去也等于没改）；
+      · 值**不等于**默认 → 用户真改过（如把 `rate_limit_rps` 明确设成 5）→ 照写；
+      · 默认值表里没有这个键 → 那是面板管理的真实输入（`base_url` 之类）→ 照写。
+
+    效果：「`GET /config` → 原样 `PUT` 回来」变成**零变化** —— 合并写盘比对后没有任何段
+    变了，文件一个字节都不动（含注释），也就不会把 `providers` 段重写成机器格式。
+    """
+    out: dict[str, Any] = {}
+    for k, v in sub.items():
+        if k in base:
+            out[k] = v
+            continue
+        dflt = defaults.get(k, _MISSING)
+        if dflt is _MISSING:
+            out[k] = v
+            continue
+        d = dflt() if callable(dflt) else dflt
+        if v != d:                          # 真改过 → 写
+            out[k] = v
+    return out
+
+
 def _as_dict(v: Any, field_name: str) -> dict[str, Any]:
     if v is None:
         return {}
@@ -294,8 +348,14 @@ def view_to_raw(cfg: GatewayConfig, raw: dict[str, Any], view: dict[str, Any]) -
                 if m.get("protocols"):
                     item["protocols"] = _parse_protocols_view(
                         m.get("protocols"), f"providers.{key}.models[{i}].protocols")
+                # 第三十二轮: 面板补出来的模型默认值（`type: text`、`vision: false`、
+                #   空 display_name、默认协议线）在文件里本来就没写 → 别写进文件（见
+                #   _prune_defaults）。否则整份视图 PUT 回来会给每个模型补齐这几个键，
+                #   providers 段被判「变了」，手写注释跟着赔掉。
+                item = _prune_defaults(item, base_models.get(mid) or {},
+                                       {**_MODEL_KEY_DEFAULTS, "display_name": ""})
                 models.append(item)
-            providers[key] = {
+            entry: dict[str, Any] = {
                 "name": str(pv.get("name") or key).strip(),
                 "base_url": str(pv.get("base_url") or "").strip(),
                 "auth": {
@@ -316,6 +376,16 @@ def view_to_raw(cfg: GatewayConfig, raw: dict[str, Any], view: dict[str, Any]) -
                 },
                 "models": models,
             }
+            # 第三十二轮: 把「面板替用户补出来的默认值」剔掉（见 _prune_defaults）——
+            #   auth 里的空 token/token_env、media 里没配的端点、以及 rate_limit_rps /
+            #   requires_session_header / endpoints 这些文件里根本没写的键，都不该在
+            #   GET→PUT 时落进文件。这样「整份视图 PUT 回来」= 零变化，合并写盘就不会
+            #   重写 providers 段（那段的行内注释与键序原样留住）。
+            entry["auth"] = _prune_defaults(entry["auth"], base_auth, {"token_env": "", "token": ""})
+            entry["media"] = {k: v for k, v in entry["media"].items()
+                              if k in base_media or v not in (None, "")}
+            entry = _prune_defaults(entry, base_p, {**_PROVIDER_KEY_DEFAULTS, "name": key})
+            providers[key] = entry
         out["providers"] = providers
 
     # ── server（逐键覆盖，缺的沿用原文）──
