@@ -407,7 +407,10 @@ server:
   hot_reload_interval: 15 # 重载检查间隔（秒）
   metrics_enabled: true   # 记录调用指标（/metrics）
   rate_limit_rps: null    # 全局单 user QPS 上限（null=不限；供应商级用 provider.rate_limit_rps）
-  max_body_size: 2000000  # 请求体字节上限（防 DDoS，约 2MB）
+  # 请求体字节上限。2026-09-24 从 2MB 提到 20MB：带图对话（生成/上传的 PNG 以
+  #   base64 内联进历史，单张 100KB~750KB）几张就顶爆 2MB → 上游 413
+  #   「请求体超过上限 2000000 字节」。内部网关 + nginx 两层把关，保留限制只调大数字。
+  max_body_size: 20000000
   cors_origins: ["*"]     # CORS 允许来源（生产收紧为具体域名）
   graceful_shutdown: 30   # 优雅关闭等待在途请求的秒数
   # ── 防滥用 / 安全 ──

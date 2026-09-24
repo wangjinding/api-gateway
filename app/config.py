@@ -312,7 +312,7 @@ class ServerConfig:
     hot_reload_interval: int = 15      # 重载检查间隔（秒）
     metrics_enabled: bool = True       # 是否记录调用指标
     rate_limit_rps: float | None = None  # 全局单 user QPS 上限（None=不限）
-    max_body_size: int = 2_000_000     # 请求体字节上限（防 DDoS）
+    max_body_size: int = 20_000_000    # 请求体字节上限（防 DDoS；2026-09-24 由 2MB 提到 20MB，见 gateway.yaml 注释）
     cors_origins: list[str] = field(default_factory=lambda: ["*"])
     graceful_shutdown: int = 30        # 优雅关闭等待秒
     # ── 防滥用 / 安全 ──
@@ -846,7 +846,7 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
         hot_reload_interval=_opt_int(srv_raw.get("hot_reload_interval"), "server.hot_reload_interval", 15, minimum=1),
         metrics_enabled=_opt_bool(srv_raw.get("metrics_enabled"), "server.metrics_enabled", True),
         rate_limit_rps=_opt_float(srv_raw.get("rate_limit_rps")),
-        max_body_size=_opt_int(srv_raw.get("max_body_size"), "server.max_body_size", 2_000_000, minimum=1),
+        max_body_size=_opt_int(srv_raw.get("max_body_size"), "server.max_body_size", 20_000_000, minimum=1),
         cors_origins=list(srv_raw.get("cors_origins", ["*"])),
         graceful_shutdown=_opt_int(srv_raw.get("graceful_shutdown"), "server.graceful_shutdown", 30, minimum=0),
         batch_max_concurrency=_opt_int(srv_raw.get("batch_max_concurrency"), "server.batch_max_concurrency", 16, minimum=1),

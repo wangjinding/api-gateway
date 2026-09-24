@@ -5174,6 +5174,26 @@ def test_sync_context_apply_is_idempotent_and_keeps_comments():
     assert cj.count("max_output_tokens:") == 1 and "max_output_tokens: 128000" in cj
 
 
+def test_server_max_body_size_is_20mb():
+    """请求体上限必须是 20MB（2026-09-24 由 2MB 提到）。
+
+    起因：带图对话把生成的 PNG 以 base64 内联进历史，单张 100KB~750KB，
+    几张就把 2MB 顶爆 → 上游 413「请求体超过上限 2000000 字节」。
+    内部网关（nginx 全局已 50m 放行）+ 保留限制只调大数字。
+    配置默认值与 YAML 现值必须一致 —— 改了一处忘了另一处就是这次要防的事。
+    """
+    sys.path.insert(0, str(_ROOT))
+    from app.config import ServerConfig, _opt_int           # noqa: F401
+    import yaml
+
+    assert ServerConfig().max_body_size == 20_000_000, "config.py 默认值没跟上"
+    raw = yaml.safe_load((_ROOT / "data" / "gateway.yaml").read_text())
+    yaml_val = (raw.get("server") or {}).get("max_body_size")
+    assert yaml_val == 20_000_000, f"gateway.yaml 里是 {yaml_val}，应为 20000000"
+    # 兜底解析（YAML 缺字段时走默认）也要是 20MB
+    assert _opt_int(None, "server.max_body_size", 20_000_000, minimum=1) == 20_000_000
+
+
 def test_models_payload_exposes_context_window():
     """GET /models 与 /v1/models 必须带出 context_window / max_output_tokens。
 

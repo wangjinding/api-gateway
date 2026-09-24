@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## 2026-09-24 · 模型接口加入上下文参数（context_window / max_output_tokens）
+
+老板要求：查两家文档有没有写上下文长度，有就改网关、接口加入上下文参数，并纳入每日同步。
+
+**数据来源（逐一核查，结论不同）**
+- **Agnes 有**：官方**每个文本模型详情页**的「限制与价格」表写明 `上下文窗口` / `最大输出`（定价页没有这两项）。
+  `agnes-3.0-flash` = 512K / 65,536、`agnes-2.5-flash` = 512K / 65.5K、`agnes-2.5-pro` 与 `agnes-2.5-pro-beta` = 1M / 65,536。图片/视频模型页无此表 → 留 0。
+- **OpenCode 没有**：官方文档（Zen 页、`v2/docs/console/go/`）**都不写**上下文长度；`/zen/go/v1/models` 实测只回 `id/object/created/owned_by`（单模型详情 404、`include` 参数被忽略）。
+  唯一机器可读来源是 **models.dev**（OpenCode 团队维护的模型目录），其 `opencode-go` / `opencode` 两供应商每条模型都带 `limit.context` / `limit.output`。
+  - **口径（老板拍板）**：只用于**更新网关已有模型**，**不拿它当增删依据**（models.dev 收录比官方 Go 文档多，含 `omen-alpha` 等文档未收录的）；同名模型跨源不一致时取**保守下限**（`minimax-m3` Go 1M / Zen 512K → 512,000；`qwen3.6-plus` → 262,144）——宁可早压缩，不能超窗口。
+  - models.dev 拉取失败 → 返回 `None`，**只跳过上下文同步**，不产生漂移、不写盘。
+
+**改动**
+- `app/config.py`：`ModelInfo` 新增 `context_window` / `max_output_tokens`（默认 0 = 未标注），解析 + 序列化一并带上。
+- `app/main.py`：`GET /models` 与 `/v1/models` 输出这两个字段；**别名继承目标模型的值**。
+- `app/settings.py`：「供应商与模型」面板往返不丢字段（默认 0 → 未配置的模型不会被补出 `context_window: 0` 污染 YAML）；页面提交了就以此为准，没提交则沿用文件原文。
+- `data/gateway.yaml`：37 个模型落盘（33 OpenCode + 4 Agnes 文本），**文本级插入保住全部手写注释**（注释行 162 → 236）。
+- `scripts/sync_models.py`：新增 `fetch_models_dev()`、`fetch_agnes_context()`（逐模型页解析「限制与价格」表），`diff()` 产出 `ctx_drift`，`apply_plan` 走 `_set_context`（块内改值、保留行尾注释、幂等），`verify()` 回读校验，报告显示漂移；`_DRIFT_KEYS` 与 `plan_is_empty` 认 `ctx_set`。
+- 测试 **201 passed / 0 failed**（新增 3 个），`ci_check.sh` 全绿。
+
+**上线**：`supervisorctl restart api-gateway:api-gateway_00`（pid 3492804）→ 实测 `/v1/models` 45 个模型、**38 个带 `context_window`**（含 `wjd` 别名继承 = 1,000,000 / 384,000），图片/视频模型正确为 0；health 200。代码已推 CNB（`08a4aee`，远端 = 本地）。
+
 ## 2026-09-24 · 修「QwenPaw 缓存命中率恒 0」：流式 usage 丢掉 `prompt_tokens_details`
 
 **现象**：老板在 QwenPaw 上用本网关（`wangjinding` 自定义供应商）调 `deepseek-v4.1-flash`
