@@ -1229,6 +1229,10 @@ def _models_payload():
                      "free": bool(m.get("free")),
                      # 2026-09-24: 免费是否带期限（限时免费）—— 前端标签文案据此切换
                      "free_limited": bool(m.get("free_limited")),
+                     # 第三十三轮（2026-09-24）: 上下文窗口 / 最大输出（token）。0 = 未标注
+                     #   （非文本模型、或上游/文档都没给这个数）。调用方据此规划单次请求规模。
+                     "context_window": int(m.get("context_window") or 0),
+                     "max_output_tokens": int(m.get("max_output_tokens") or 0),
                      # 第二十五轮: 暴露模型级强制参数（如 {"temperature": 1}）。前端据此标挂锁，
                      #   API 调用方也能提前知道自己传的采样参数会被上游要求覆盖。
                      "params": dict(m.get("params") or {}),
@@ -1259,6 +1263,9 @@ def _models_payload():
                      # 2026-09-21: 免费位随目标继承（与 vision / params 同一份事实来源）
                      "free": bool(aminfo.free),
                      "free_limited": bool(aminfo.free_limited),
+                     # 第三十三轮: 上下文窗口 / 最大输出随目标继承（与 vision / params 同一份事实来源）
+                     "context_window": int(aminfo.context_window or 0),
+                     "max_output_tokens": int(aminfo.max_output_tokens or 0),
                      "params": dict(aminfo.params or {}),
                      "protocols": list(ALIAS_PROTOCOLS),
                      "alias_of": aminfo.id, "alias_note": spec.note})

@@ -107,6 +107,50 @@ def fetch_opencode() -> dict[str, dict]:
     return models
 
 
+# ── models.dev（上下文窗口 / 最大输出）──────────────────────────
+# 第三十三轮（2026-09-24 老板要求：接口加入上下文参数）：
+#   OpenCode 官方文档（Zen / Go / v2）**都不写**上下文长度，`/zen/go/v1/models`
+#   也只回 id/object/created/owned_by（实测：单模型详情 404、include 参数被忽略）。
+#   唯一可用的机器可读来源是 models.dev（OpenCode 团队维护的模型目录），其
+#   `opencode-go` / `opencode` 两个供应商的每条模型都带 `limit.context` / `limit.output`。
+#   口径（老板拍板）：
+#     · 只用于**更新网关已有模型**的这两个字段，不拿它当增删依据
+#       （增删仍以官方 Go 文档表为准 —— models.dev 收录更多，含 omen-alpha 等文档未收的）；
+#     · 同名模型在两个供应商下不一致时（如 minimax-m3：Go 1M / Zen 512K）取**保守下限**
+#       （宁可早压缩，不能超窗口）；
+#     · models.dev 挂了/改版 → 只跳过上下文同步，不影响增删判定（返回 None）。
+MD_DEV_URL = "https://models.dev/api.json"
+
+
+def fetch_models_dev() -> dict[str, dict] | None:
+    """返回 {model_id: {"context": int, "output": int}}（两供应商合并取保守下限）。
+
+    拉不到就返回 None —— 调用方据此跳过上下文同步，不当成漂移。
+    """
+    try:
+        raw = _get(MD_DEV_URL, timeout=60)
+        data = json.loads(raw)
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"[warn] models.dev 拉取失败，跳过上下文同步：{exc}", file=sys.stderr)
+        return None
+    merged: dict[str, dict] = {}
+    for prov in ("opencode-go", "opencode"):
+        for mid, m in ((data.get(prov) or {}).get("models") or {}).items():
+            lim = (m or {}).get("limit") or {}
+            ctx, out = lim.get("context"), lim.get("output")
+            if not ctx:
+                continue
+            cur = merged.get(mid) or {"context": ctx, "output": out or 0}
+            cur["context"] = min(cur["context"], ctx)          # 保守下限
+            if out:
+                cur["output"] = min(cur["output"] or out, out) if cur["output"] else out
+            merged[mid] = cur
+    if not merged:
+        print("[warn] models.dev 解析出 0 个模型，跳过上下文同步", file=sys.stderr)
+        return None
+    return merged
+
+
 # ── Agnes ──────────────────────────────────────────────────────
 _MODEL_ID_RE = re.compile(r"[a-z][a-z0-9.\-]*[0-9][a-z0-9.\-]*")
 
@@ -208,6 +252,62 @@ def fetch_agnes() -> dict[str, dict]:
     return out
 
 
+# ── Agnes 上下文窗口（模型详情页「限制与价格」表）──────────────────
+# 第三十三轮（2026-09-24）: Agnes 官方**每个文本模型页**都有一张「限制与价格」表，
+#   写明 `上下文窗口`（如 `512K` / `1M tokens`）与 `最大输出`（如 `65,536 Token`）。
+#   定价页没有这两项 —— 所以要去逐个模型页抓。图片/视频模型页无此表 → 抓不到 = 留空。
+AGNES_MODEL_PAGES = {
+    "agnes-3.0-flash": "https://www.agnes-ai.cn/zh-Hans/docs/agnes-30-flash",
+    "agnes-2.5-flash": "https://www.agnes-ai.cn/zh-Hans/docs/agnes-25-flash",
+    "agnes-2.5-pro": "https://www.agnes-ai.cn/zh-Hans/docs/agnes-25-pro",
+    "agnes-2.5-pro-beta": "https://www.agnes-ai.cn/zh-Hans/docs/agnes-25-pro-beta",
+}
+
+
+def _parse_tokens(cell: str) -> int | None:
+    """`512K` / `1M tokens` / `65,536 Token` / `65536` → 整数 token 数。"""
+    s = _strip_tags(cell).lower().replace(",", "").replace(" ", "")
+    m = re.search(r"([0-9.]+)\s*([km])?", s)
+    if not m:
+        return None
+    val = float(m.group(1))
+    unit = m.group(2)
+    if unit == "k":
+        val *= 1000
+    elif unit == "m":
+        val *= 1_000_000
+    return int(val)
+
+
+def fetch_agnes_context() -> dict[str, dict]:
+    """逐个 Agnes 文本模型页抓 `上下文窗口` / `最大输出` → {id: {context, output}}。
+
+    单页抓失败只跳过该模型（不抛）—— 上下文同步是增量能力，不该拖垮整个同步任务。
+    """
+    out: dict[str, dict] = {}
+    for mid, url in AGNES_MODEL_PAGES.items():
+        try:
+            html = _get(url)
+        except Exception as exc:                               # noqa: BLE001
+            print(f"[warn] Agnes 模型页抓取失败 {mid}: {exc}", file=sys.stderr)
+            continue
+        ctx = out_tok = None
+        for row in re.findall(r"<tr>(.*?)</tr>", html, re.S):
+            cells = [_strip_tags(c) for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.S)]
+            if len(cells) < 2:
+                continue
+            label = cells[0].replace(" ", "")
+            if "上下文窗口" in label:
+                ctx = _parse_tokens(cells[1])
+            elif "最大输出" in label:
+                out_tok = _parse_tokens(cells[1])
+        if ctx:
+            out[mid] = {"context": ctx, "output": out_tok or 0}
+    if not out:
+        print("[warn] Agnes 模型页一个上下文都没解析出来（页面可能改版）", file=sys.stderr)
+    return out
+
+
 # ── 比对 ───────────────────────────────────────────────────────
 def _references(cfg: dict) -> dict[str, str]:
     """被别名 / media 指向的模型 id → 引用原因。删这些会直接打断功能，故永不自动删。"""
@@ -251,7 +351,9 @@ def _split_removed(prov: str, cur: dict, doc: dict, refs: dict) -> tuple[list[st
     return drop, keep
 
 
-def diff(cfg: dict, oc_doc: dict, agnes_doc: dict) -> dict:
+def diff(cfg: dict, oc_doc: dict, agnes_doc: dict,
+         md_dev: dict[str, dict] | None = None,
+         ag_ctx: dict[str, dict] | None = None) -> dict:
     providers = cfg.get("providers", {})
     pricing = (cfg.get("pricing") or {}).get("per_model") or {}
     refs = _references(cfg)
@@ -270,6 +372,19 @@ def diff(cfg: dict, oc_doc: dict, agnes_doc: dict) -> dict:
                   for mid, meta in sorted(oc_doc.items())
                   if mid in oc_cur and meta["free"] != bool(oc_cur[mid].get("free"))]
     oc_drop, oc_keep = _split_removed("opencode", oc_cur, oc_doc, refs)
+    # 第三十三轮: 上下文窗口漂移（models.dev 现值 vs 网关现值）。
+    #   只比对**网关已有模型**（不拿 models.dev 当增删依据）；md_dev 为 None（拉取失败）
+    #   时留空 → 不产生漂移、不写盘。
+    oc_ctx_drift = []
+    for mid, m in sorted(oc_cur.items()):
+        want = (md_dev or {}).get(mid)
+        if not want or not want.get("context"):
+            continue
+        have_ctx = int(m.get("context_window") or 0)
+        have_out = int(m.get("max_output_tokens") or 0)
+        if have_ctx != want["context"] or (want.get("output") and have_out != want["output"]):
+            oc_ctx_drift.append({"id": mid, "cfg_ctx": have_ctx, "doc_ctx": want["context"],
+                                 "cfg_out": have_out, "doc_out": want.get("output") or have_out})
     report["opencode"] = {
         "doc_count": len(oc_doc), "cfg_count": len(oc_cur),
         "added": [{"id": k, "name": v["name"], "protocol": v["protocol"], "free": v["free"]}
@@ -278,6 +393,7 @@ def diff(cfg: dict, oc_doc: dict, agnes_doc: dict) -> dict:
         "protected": oc_keep,
         "protocol_drift": proto_drift,
         "free_drift": free_drift,
+        "ctx_drift": oc_ctx_drift,
     }
 
     # Agnes
@@ -291,8 +407,20 @@ def diff(cfg: dict, oc_doc: dict, agnes_doc: dict) -> dict:
         if have != want:
             price_drift.append({"id": mid, "cfg": have, "doc": want})
     ag_drop, ag_keep = _split_removed("agnes", ag_cur, agnes_doc, refs)
+    # 第三十三轮: Agnes 上下文漂移（模型详情页 vs 网关现值），同 opencode 口径。
+    ag_ctx_drift = []
+    for mid, want in sorted((ag_ctx or {}).items()):
+        m = ag_cur.get(mid)
+        if not m or not want.get("context"):
+            continue
+        have_ctx = int(m.get("context_window") or 0)
+        have_out = int(m.get("max_output_tokens") or 0)
+        if have_ctx != want["context"] or (want.get("output") and have_out != want["output"]):
+            ag_ctx_drift.append({"id": mid, "cfg_ctx": have_ctx, "doc_ctx": want["context"],
+                                 "cfg_out": have_out, "doc_out": want.get("output") or have_out})
     report["agnes"] = {
         "doc_count": len(agnes_doc), "cfg_count": len(ag_cur),
+        "ctx_drift": ag_ctx_drift,
         "added": [{"id": k, "section": v["section"], "type": v["type"],
                    "display_name": pretty_name(k), "input": v["input"], "output": v["output"]}
                   for k, v in sorted(agnes_doc.items()) if k not in ag_cur],
@@ -343,7 +471,12 @@ def render(report: dict) -> str:
     if oc["free_drift"]:
         lines.append("  免费标记漂移 → 落盘时更新：")
         lines += [f"    ~ {d['id']}  文档={d['doc_free']}  网关={d['cfg_free']}" for d in oc["free_drift"]]
-    if not any(oc[k] for k in ("added", "removed", "protocol_drift", "free_drift")):
+    if oc.get("ctx_drift"):
+        lines.append("  上下文窗口漂移（models.dev vs 网关）→ 落盘更新：")
+        lines += [f"    ~ {d['id']}  网关={d['cfg_ctx']:,}/{d['cfg_out']:,}"
+                  f"  来源={d['doc_ctx']:,}/{d['doc_out']:,}" for d in oc["ctx_drift"]]
+    if not any(oc[k] for k in ("added", "removed", "protocol_drift", "free_drift",
+                               "ctx_drift")):
         lines.append("  无漂移 ✓")
 
     lines.append("")
@@ -369,6 +502,10 @@ def render(report: dict) -> str:
         label = {True: "免费", "limited": "限时免费", None: "（无标注）"}
         lines += [f"    ~ {d['id']}  网关={label.get(d['cfg'], d['cfg'])}"
                   f"  文档={label.get(d['doc'], d['doc'])}" for d in ag["free_drift"]]
+    if ag.get("ctx_drift"):
+        lines.append("  上下文窗口漂移（Agnes 模型页 vs 网关）→ 落盘更新：")
+        lines += [f"    ~ {d['id']}  网关={d['cfg_ctx']:,}/{d['cfg_out']:,}"
+                  f"  文档={d['doc_ctx']:,}/{d['doc_out']:,}" for d in ag["ctx_drift"]]
     vd = ag.get("video_default") or {}
     if vd.get("cfg"):
         mark = ("✓ 文档里还在" if vd.get("in_doc")
@@ -381,7 +518,8 @@ def render(report: dict) -> str:
     return "\n".join(lines)
 
 
-_DRIFT_KEYS = ("added", "removed", "protocol_drift", "free_drift", "price_drift")
+_DRIFT_KEYS = ("added", "removed", "protocol_drift", "free_drift", "price_drift",
+               "ctx_drift")
 
 
 def has_drift(report: dict) -> bool:
@@ -558,6 +696,37 @@ def _set_free(seg: list[str], want: bool, date: str) -> list[str]:
 _AGNES_FREE_LINE_RE = re.compile(r"^\s*(free|free_limited):\s*")
 
 
+_CTX_KEY_RE = re.compile(r"^\s*(context_window|max_output_tokens):")
+
+
+def _set_context(seg: list[str], ctx: int, out_tok: int, date: str) -> list[str]:
+    """块内设置 context_window / max_output_tokens（第三十三轮）。
+
+    · 已有该行 → 只改值，保留行尾注释；
+    · 没有 → 插在 `type:` 行之后（与手工插入的位置一致）。
+    只动这两行，其余原文（含手写注释）不动。
+    """
+    want = {"context_window": ctx, "max_output_tokens": out_tok}
+    seen: set[str] = set()
+    for i, ln in enumerate(seg):
+        m = _CTX_KEY_RE.match(ln)
+        if not m:
+            continue
+        key = m.group(1)
+        seen.add(key)
+        tail = ln.split("#", 1)[1] if "#" in ln else f"  # 同步 {date}（scripts/sync_models.py）"
+        seg[i] = f"        {key}: {want[key]}    #{tail}"
+    missing = [k for k in want if k not in seen]
+    if missing:
+        for i, ln in enumerate(seg):
+            if re.match(r'^\s{8}type:\s*"', ln):
+                extra = [f"        {k}: {want[k]}    # 同步 {date}（scripts/sync_models.py）\n"
+                         for k in missing]
+                seg[i + 1:i + 1] = extra
+                break
+    return seg
+
+
 def _set_agnes_free(seg: list[str], want: object, date: str) -> list[str]:
     """按文档写 Agnes 模型的免费标注（2026-09-24 老板要求 Agnes 也要标）。
 
@@ -589,7 +758,7 @@ def build_plan(report: dict, cfg: dict, oc_doc: dict, agnes_doc: dict) -> dict:
     docs = {"opencode": oc_doc, "agnes": agnes_doc}
     pricing = (cfg.get("pricing") or {}).get("per_model") or {}
     plan: dict = {"add": {}, "remove": {}, "price_set": {}, "price_add": {},
-                  "proto_add": {}, "free_set": {}, "agnes_free": {}}
+                  "proto_add": {}, "free_set": {}, "agnes_free": {}, "ctx_set": {}}
     for prov in SYNC_PROVIDERS:
         plan["add"][prov] = {m["id"]: m for m in report[prov]["added"]}
         plan["remove"][prov] = list(report[prov]["removed"])
@@ -597,6 +766,9 @@ def build_plan(report: dict, cfg: dict, oc_doc: dict, agnes_doc: dict) -> dict:
     plan["free_set"] = {d["id"]: d["doc_free"] for d in report["opencode"]["free_drift"]}
     # Agnes 的免费标注（True / "limited" / None）单独一条 plan，走 _set_agnes_free
     plan["agnes_free"] = {d["id"]: d["doc"] for d in report["agnes"]["free_drift"]}
+    # 第三十三轮: 上下文窗口 / 最大输出（models.dev + Agnes 文档）→ 块内改值
+    plan["ctx_set"] = {d["id"]: {"context": d["doc_ctx"], "output": d["doc_out"]}
+                       for d in report["opencode"]["ctx_drift"] + report["agnes"]["ctx_drift"]}
     for mid, meta in sorted(agnes_doc.items()):
         if meta["input"] is None:                     # 图片/视频模型文档没给单价
             continue
@@ -621,7 +793,8 @@ def plan_is_empty(plan: dict) -> bool:
         if plan["add"].get(prov) or plan["remove"].get(prov):
             return False
     return not any(plan.get(k) for k in
-                   ("price_set", "price_add", "proto_add", "free_set", "agnes_free"))
+                   ("price_set", "price_add", "proto_add", "free_set", "agnes_free",
+                    "ctx_set"))
 
 
 def render_plan(plan: dict, date: str) -> str:
@@ -638,6 +811,8 @@ def render_plan(plan: dict, date: str) -> str:
     _flabel = {True: "免费", "limited": "限时免费", None: "撤掉标注"}
     for mid, want in sorted(plan.get("agnes_free", {}).items()):
         lines.append(f"  免费标注 agnes/{mid} → {_flabel.get(want, want)}")
+    for mid, spec in sorted(plan.get("ctx_set", {}).items()):
+        lines.append(f"  上下文 {mid} → {spec['context']:,} 输入 / {spec['output']:,} 输出")
     for mid, spec in sorted(plan["price_set"].items()):
         lines.append(f"  改价 {mid} {spec['old']} → {spec['new']}")
     for mid, want in sorted(plan["price_add"].items()):
@@ -703,6 +878,16 @@ def apply_plan(text: str, plan: dict, date: str) -> str:
                 continue
             s, e = blocks[mid]
             lines[s:e] = _set_agnes_free(lines[s:e], plan["agnes_free"][mid], date)
+
+    # 3c) 上下文窗口 / 最大输出（第三十三轮）——同一套倒序处理，字段插在块的 type: 之后。
+    if plan.get("ctx_set"):
+        for prov in SYNC_PROVIDERS:
+            blocks = _find_model_blocks(lines, prov)
+            mids = [m for m in plan["ctx_set"] if m in blocks]
+            for mid in sorted(mids, key=lambda m: blocks[m][0], reverse=True):
+                s, e = blocks[mid]
+                spec = plan["ctx_set"][mid]
+                lines[s:e] = _set_context(lines[s:e], spec["context"], spec["output"], date)
 
     # 4) 定价：改价 / 补价 / 删掉被删模型的价
     gone = {m for prov in SYNC_PROVIDERS for m in plan["remove"].get(prov) or []}
@@ -779,6 +964,18 @@ def verify(new_text: str, cfg_before: dict, plan: dict) -> list[str]:
             problems.append(f"免费标记 {mid} 没改成 {want}")
     # Agnes 的免费标注：True（免费）/ "limited"（限时免费）/ None（该没有标注）
     ag2 = {m["id"]: m for m in (cfg2.get("providers", {}).get("agnes") or {}).get("models", [])}
+    # 第三十三轮: 上下文窗口 / 最大输出真写进去了
+    for prov, table in (("opencode", oc2), ("agnes", ag2)):
+        for mid, spec in plan.get("ctx_set", {}).items():
+            m = table.get(mid)
+            if m is None:
+                continue      # 该模型属于另一个 provider
+            got_ctx = int(m.get("context_window") or 0)
+            got_out = int(m.get("max_output_tokens") or 0)
+            if got_ctx != spec["context"] or got_out != spec["output"]:
+                problems.append(
+                    f"上下文 {prov}/{mid} 没写成 {spec['context']}/{spec['output']}"
+                    f"（实际 {got_ctx}/{got_out}）")
     for mid, want in plan.get("agnes_free", {}).items():
         got = _cfg_free_state(ag2.get(mid, {}))
         if got != want:
@@ -874,7 +1071,11 @@ def main() -> int:
             _append_log(args.log, msg, 2)
         return 2
 
-    report = diff(cfg, oc_doc, agnes_doc)
+    # 第三十三轮: 上下文来源（拉不到 = None/空 dict，只跳过上下文同步，不产生漂移）
+    md_dev = fetch_models_dev()
+    ag_ctx = fetch_agnes_context()
+
+    report = diff(cfg, oc_doc, agnes_doc, md_dev, ag_ctx)
     plan = build_plan(report, cfg, oc_doc, agnes_doc)
     drift = has_drift(report)
     code = 1 if drift else 0

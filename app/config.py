@@ -138,6 +138,16 @@ class ModelInfo:
     #   由 scripts/sync_models.py 按文档自动维护（撤标注时整行删掉）。
     #   同样只是标注：/v1/models 带出、前端标签文案据此切换，不参与路由/限流/计费。
     free_limited: bool = False
+    # 第三十三轮（2026-09-24，老板要求：接口加入上下文参数）: 模型的**上下文窗口**
+    #   与**最大输出**（单位 token）。0 = 未知/未标注（非文本模型天然没有）。
+    #   来源与维护：
+    #     · Agnes 文本模型 → 官方文档每个模型页「限制与价格」表（权威值）；
+    #     · OpenCode Go → models.dev 的 `opencode-go` 供应商 `limit.context` / `limit.output`
+    #       （OpenCode 官方文档与 /models 接口都不给这两个数，models.dev 是唯一可用来源）；
+    #     · 同名模型跨源不一致时取**保守下限**（宁可早压缩，不能超窗口）。
+    #   由 scripts/sync_models.py 每日同步；不参与路由/限流，仅作展示与调用方参考。
+    context_window: int = 0
+    max_output_tokens: int = 0
     # 第二十五轮（模型参数硬约束）: 该模型**必须用**的上游参数，发送前强制覆盖客户端传值。
     #   背景：OpenCode Go 的 kimi-k2.7-code 只接受 temperature=1，客户端传 0（含一键测速的
     #   探针，它固定发 temperature=0）会被上游 400：
@@ -401,6 +411,10 @@ class GatewayConfig:
                     # 2026-09-24: 「免费」还是「限时免费」—— 前端标签文案据此切换
                     #   （免费 / 限时免费），也带进 /v1/models 让接口调用方知道优惠可能到期。
                     "free_limited": bool(m.free_limited),
+                    # 第三十三轮（2026-09-24）: 上下文窗口 / 最大输出（token）。0 = 未标注。
+                    #   前端「能力」列与 /v1/models 均带出，调用方据此决定单次请求塞多长的对话。
+                    "context_window": int(m.context_window or 0),
+                    "max_output_tokens": int(m.max_output_tokens or 0),
                     "provider": pkey,
                     "provider_name": pconfig.name,
                     # 第二十五轮: 暴露模型级强制参数（如 {"temperature": 1}）。
@@ -793,6 +807,8 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
                       type=m.get("type", "text"), vision=_opt_bool(m.get("vision"), "providers.*.models.*.vision", False),
                       free=_opt_bool(m.get("free"), "providers.*.models.*.free", False),
                       free_limited=_opt_bool(m.get("free_limited"), "providers.*.models.*.free_limited", False),
+                      context_window=_opt_int(m.get("context_window"), "providers.*.models.*.context_window", 0),
+                      max_output_tokens=_opt_int(m.get("max_output_tokens"), "providers.*.models.*.max_output_tokens", 0),
                       params=_parse_model_params(
                           m.get("params"), f"providers.{pkey}.models[{idx}].params"),
                       protocols=_parse_protocols(

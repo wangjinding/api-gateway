@@ -111,7 +111,12 @@ def config_to_view(cfg: GatewayConfig) -> dict[str, Any]:
                  # 第二十七轮: 模型能走哪几条协议线。这一项**面板可编辑**
                  #   （「供应商与模型」页给每个模型打格式标签），所以两处都要认：
                  #   读回给页面显示、写盘时以页面提交的为准。
-                 "protocols": list(m.protocols)}
+                 "protocols": list(m.protocols),
+                 # 第三十三轮（2026-09-24）: 上下文窗口 / 最大输出。面板不提供编辑入口
+                 #   （由 scripts/sync_models.py 每日同步），但必须一路带着走 ——
+                 #   否则管理员在页面上随手保存一次，这两个值就被静默清成 0。
+                 "context_window": int(m.context_window or 0),
+                 "max_output_tokens": int(m.max_output_tokens or 0)}
                 for m in p.models
             ],
         }
@@ -224,6 +229,11 @@ _MODEL_KEY_DEFAULTS: dict[str, Any] = {
     "type": "text",
     "vision": False,
     "protocols": list(DEFAULT_PROTOCOLS),  # 不写 = 自动走默认线（chat/completions）
+    # 第三十三轮（2026-09-24）: 未标注的模型（图片/视频、或上游没给数的）**不写**这两个键。
+    #   默认 0 与 ModelInfo 一致 → _prune_defaults 会把面板补出来的 0 丢掉，
+    #   只有 sync_models.py 明确写入的非 0 值才留在文件里。
+    "context_window": 0,
+    "max_output_tokens": 0,
 }
 
 
@@ -343,6 +353,15 @@ def view_to_raw(cfg: GatewayConfig, raw: dict[str, Any], view: dict[str, Any]) -
                     "type": str(m.get("type") or "text").strip(),
                     "vision": bool(m.get("vision", False)),
                 })
+                # 第三十三轮（2026-09-24）: 上下文窗口 / 最大输出由 sync_models.py 维护，
+                #   面板不提供编辑入口 —— 提交了就以此为准，没提交则沿用文件原文
+                #   （旧前端/脚本提交时不至于把这两个值清成 0）。
+                for _k in ("context_window", "max_output_tokens"):
+                    if m.get(_k) is not None:
+                        try:
+                            item[_k] = int(m.get(_k) or 0)
+                        except (TypeError, ValueError):
+                            pass
                 # 第二十七轮: 协议线由面板管理（每个模型的格式标签），提交了就以此为准；
                 #   没提交则沿用文件原文里的值（避免旧前端/脚本提交时把 protocols 清空）。
                 if m.get("protocols"):

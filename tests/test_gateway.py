@@ -5099,6 +5099,110 @@ def test_sync_plan_is_empty_drills_into_provider_buckets():
     assert sm.plan_is_empty({**empty, "price_set": {"m": {"old": None, "new": None}}}) is False
     assert sm.plan_is_empty({**empty, "proto_add": {"m": "messages"}}) is False
     assert sm.plan_is_empty({**empty, "free_set": {"m": True}}) is False
+    # 第三十三轮: ctx_set 也必须是真动作（否则上下文漂移不会被落盘）
+    assert sm.plan_is_empty({**empty, "ctx_set": {"m": {"context": 1, "output": 2}}}) is False
+
+
+def test_sync_models_dev_context_merges_conservatively(monkeypatch=None):
+    """models.dev 上下文合并：两供应商同名模型取**保守下限**（第三十三轮）。
+
+    背景：minimax-m3 在 opencode-go 是 1M、opencode(Zen) 是 512K；qwen3.6-plus
+    Go 1M / Zen 262144。同一模型跨源不一致时取小的那个 —— 宁可早压缩，不能超窗口。
+    """
+    sys.path.insert(0, str(_ROOT / "scripts"))
+    import sync_models as sm
+
+    fake = json.dumps({
+        "opencode-go": {"models": {
+            "minimax-m3": {"limit": {"context": 1_000_000, "output": 131_072}},
+            "qwen3.6-plus": {"limit": {"context": 1_000_000, "output": 65_536}},
+            "only-in-go": {"limit": {"context": 500_000, "output": 128_000}},
+        }},
+        "opencode": {"models": {
+            "minimax-m3": {"limit": {"context": 512_000, "output": 128_000}},
+            "qwen3.6-plus": {"limit": {"context": 262_144, "output": 65_536}},
+        }},
+    })
+    monkey_ok = lambda url, timeout=30: fake          # noqa: E731
+    orig = sm._get
+    sm._get = monkey_ok
+    try:
+        got = sm.fetch_models_dev()
+    finally:
+        sm._get = orig
+    assert got is not None
+    assert got["minimax-m3"]["context"] == 512_000      # 保守下限
+    assert got["qwen3.6-plus"]["context"] == 262_144
+    assert got["only-in-go"]["context"] == 500_000      # 单源照样收
+    # 抓不到时必须返回 None（调用方据此跳过上下文同步，而不是当成"全部漂移"）
+    sm._get = lambda url, timeout=60: (_ for _ in ()).throw(RuntimeError("boom"))
+    try:
+        assert sm.fetch_models_dev() is None
+    finally:
+        sm._get = orig
+
+
+def test_sync_context_apply_is_idempotent_and_keeps_comments():
+    """上下文写盘：插在 type: 之后、保住手写注释、重复执行不叠加（第三十三轮）。"""
+    sys.path.insert(0, str(_ROOT / "scripts"))
+    import sync_models as sm
+
+    text = (
+        'providers:\n'
+        '  opencode:\n'
+        '    name: "OpenCode Go"\n'
+        '    models:\n'
+        '      - id: "glm-5.3"\n'
+        '        display_name: "GLM-5.3"\n'
+        '        type: "text"\n'
+        '        protocols: ["chat/completions"]\n'
+    )
+    seg = text.splitlines(keepends=True)[4:]            # 从这个模型块起
+    once = sm._set_context(list(seg), 1_000_000, 131_072, "2026-09-24")
+    joined = "".join(once)
+    assert "context_window: 1000000" in joined
+    assert "max_output_tokens: 131072" in joined
+    # 插在 type: 之后、protocols 之前
+    assert joined.index("type:") < joined.index("context_window") < joined.index("protocols")
+    # 幂等：再跑一次值不变、不叠加第二组
+    twice = sm._set_context(list(once), 1_000_000, 131_072, "2026-09-24")
+    assert "".join(twice).count("context_window:") == 1
+    # 改值：旧值被替换、不新增行
+    changed = sm._set_context(list(once), 512_000, 128_000, "2026-09-25")
+    cj = "".join(changed)
+    assert cj.count("context_window:") == 1 and "context_window: 512000" in cj
+    assert cj.count("max_output_tokens:") == 1 and "max_output_tokens: 128000" in cj
+
+
+def test_models_payload_exposes_context_window():
+    """GET /models 与 /v1/models 必须带出 context_window / max_output_tokens。
+
+    第三十三轮（老板要求「接口加入上下文参数」）：上下文窗口不只在 YAML 里，
+    客户端读接口时也得能看到，否则这个字段等于白加。
+    """
+    import app.main as m
+    from app.config import ModelInfo, ProviderConfig, AuthConfig
+
+    cfg = m._cfg()
+    key = "__ctx_test__"
+    try:
+        cfg.providers[key] = ProviderConfig(
+            key=key, name="CTX", base_url="https://example.com/v1", auth=AuthConfig(),
+            models=[
+                ModelInfo(id="ctx-with", type="text",
+                          context_window=1_000_000, max_output_tokens=131_072),
+                ModelInfo(id="ctx-without", type="image"),      # 未标注 → 0
+            ])
+        m._state.pop("_models_cache", None)                    # 绕开目录缓存
+        rows = {x["id"]: x for x in m._models_payload()["data"]}
+        assert rows["ctx-with"]["context_window"] == 1_000_000
+        assert rows["ctx-with"]["max_output_tokens"] == 131_072
+        # 未标注的模型不得瞎补数字（图片/视频模型天然没有上下文）
+        assert rows["ctx-without"]["context_window"] == 0
+        assert rows["ctx-without"]["max_output_tokens"] == 0
+    finally:
+        cfg.providers.pop(key, None)
+        m._state.pop("_models_cache", None)
 
 
 def test_agnes_free_map_rules():
