@@ -19,6 +19,9 @@ providers:
       video_create_endpoint: "/videos"
       video_poll_base: "https://api.agnes-ai.cn"
       video_poll_path: "/agnesapi"
+      # 视频默认模型（视频接口只用这一个）：同步脚本**只保它不被自动删**，并在每日报告里
+      #   列出文档的视频清单；换默认由人点模型名（2026-09-24 定：不自动挑）。
+      #   候选见 Agnes 文档视频段：agnes-video-2.5 / agnes-video-2.5-flash / agnes-video-v2.0
       video_model_name: "agnes-video-2.5-flash"
     models:
       - id: "agnes-3.0-flash"

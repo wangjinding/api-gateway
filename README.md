@@ -1354,6 +1354,10 @@ python scripts/sync_models.py --apply --log logs/model-sync.log
 - 边界：协议线**只加不砍**（文档给的新线补上，逐条实测出来的线不动）；`PROTECTED` 名单与被别名 /
   `media` 引用的模型 id **永不自动删**（官方文档表收录有滞后，实测 `deepseek-flash` / `omen-alpha`
   上游在服务、文档表还没补），只在报告里点名。
+- 视频默认模型 `agnes.media.video_model_name` **不自动换**：文档对视频模型没有「哪个最新 / 最好」的
+  机器可读标记（`agnes-video-v2.0` 当前免费、`agnes-video-2.5` 按输出分辨率计费、`agnes-video-2.5-flash`
+  限时免费），自动切会直接改变线上视频行为。脚本只做两件事：保证它不被自动删（`media` 引用的 id 受保护），
+  并在报告里列出文档的视频清单当候选（含 ✓ 文档里还在 / ✗ 已下线 标记）。换默认由人点模型名，改一行配置。
 - 定时：QwenPaw cron 每天 08:00（Asia/Shanghai）跑 `--apply`，简报投到控制台，报告同时追加到 `logs/model-sync.log`。
 
 ## 备注

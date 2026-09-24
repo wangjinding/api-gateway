@@ -16,6 +16,9 @@
   · 文档已下线的模型 → 删除（连它的 pricing 条目一起删）
   · 价格 / 免费标记变化 → 就地更新
   · 协议线只加不砍：文档给的新线会补进去，网关逐条实测出来的更宽的线不动
+  · 视频默认模型 media.video_model_name → **不自动换**：只保证它不被自动删（被 media 引用
+    的 id 永不自动删），并在报告里列出文档的视频清单当候选。文档对视频模型没有
+    「哪个最新 / 最好」的机器可读标记，自动切会直接改变线上视频行为，所以换默认由人点
   · PROTECTED 名单 + 被别名 / media 引用的 id → **永不自动删**，只在报告里点名
     （官方文档表有收录滞后：实测 deepseek-flash / omen-alpha 上游在服务、文档表还没补，
      照文档删等于把能用的模型删掉）
@@ -236,6 +239,16 @@ def diff(cfg: dict, oc_doc: dict, agnes_doc: dict) -> dict:
         "protected": ag_keep,
         "price_drift": price_drift,
     }
+    # 视频默认模型（media.video_model_name）：同步**只保它不死 + 把它摆在报告里**，
+    #   不自动换。文档对三个视频模型没有任何「哪个最新 / 最好」的机器可读标记
+    #   （v2.0 当前免费、2.5 按输出分辨率计费、2.5-flash 限时免费），自动挑一个切上去
+    #   会直接改变线上视频行为。换默认由老板点模型名，改一行配置。
+    vid_cfg = ((providers.get("agnes") or {}).get("media") or {}).get("video_model_name")
+    report["agnes"]["video_default"] = {
+        "cfg": vid_cfg,
+        "in_doc": bool(vid_cfg) and vid_cfg in agnes_doc,
+        "doc_videos": sorted(k for k, v in agnes_doc.items() if v["section"] == "视频模型"),
+    }
     return report
 
 
@@ -277,10 +290,20 @@ def render(report: dict) -> str:
     if ag.get("protected"):
         lines.append("  文档未收录但**受保护不删**（要删请说一声）：")
         lines += [f"    · {m} —— {why}" for m, why in ag["protected"].items()]
-    if ag["price_drift"]:
+    # 新增模型的价格已随「新增」块一起落盘，这里不再重复列为定价漂移
+    added_ids = {a["id"] for a in ag["added"]}
+    real_drift = [d for d in ag["price_drift"] if d["id"] not in added_ids]
+    if real_drift:
         lines.append("  定价漂移（网关 pricing.per_model vs 文档现价，¥/M）→ 落盘更新：")
-        for d in ag["price_drift"]:
+        for d in real_drift:
             lines.append(f"    ~ {d['id']}  网关={d['cfg']}  文档={d['doc']}")
+    vd = ag.get("video_default") or {}
+    if vd.get("cfg"):
+        mark = ("✓ 文档里还在" if vd.get("in_doc")
+                else "✗ 文档里已没有 → 需要指定新默认（当前值受保护，不会自动删）")
+        lines.append(f"  视频默认模型 media.video_model_name：{vd['cfg']} —— {mark}")
+        lines.append(f"    文档视频清单：{', '.join(vd.get('doc_videos') or []) or '（无）'}"
+                     "   ← 换默认由老板点模型名，改一行配置（不自动挑）")
     if not any(ag[k] for k in ("added", "removed", "price_drift")):
         lines.append("  无漂移 ✓")
     return "\n".join(lines)
