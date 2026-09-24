@@ -115,8 +115,14 @@ def test_load_config_routes():
 
 def test_pricing_estimate():
     cfg = load_config(CONFIG)
-    cost = cfg.pricing.estimate("agnes-3.0-flash", 1_000_000, 1_000_000)
-    assert cost is not None and abs(cost - (0.35 + 1.00)) < 1e-6
+    # 用火山方舟的价目：它不在每日同步脚本（scripts/sync_models.py）的范围内，价格稳定。
+    #   （Agnes 的价目会随官方文档改价被自动更新 —— 拿 agnes-3.0-flash 写死 0.35/1.00
+    #     会在文档改价那天变成假红灯。）
+    mid = "ark-code-latest"
+    price = cfg.pricing.per_model[mid]
+    assert abs(price["input"] - 0.50) < 1e-9 and abs(price["output"] - 2.00) < 1e-9
+    cost = cfg.pricing.estimate(mid, 1_000_000, 1_000_000)
+    assert cost is not None and abs(cost - (0.50 + 2.00)) < 1e-6
     assert cfg.pricing.estimate("unknown-model", 10, 10) is None
 
 

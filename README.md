@@ -1336,6 +1336,26 @@ python live_check.py --url http://127.0.0.1:8808
 
 > 当前状态：单元测试 **179 passed / 0 failed**（`python tests/test_gateway.py`，不需要 pytest）；冒烟 5/5 PASS；活体检查 14 PASS / 0 FAIL / 0 WARN。
 
+### 模型清单每日同步（`scripts/sync_models.py`）
+
+把网关的模型清单和上游官方文档对齐，避免文档新增 / 下线 / 改价之后配置慢慢走样。
+
+```bash
+# 只报告（默认，不写盘）：退出码 0=无漂移 / 1=有漂移 / 2=抓取或解析失败
+python scripts/sync_models.py
+# 真落盘同步（新增补进去 / 下线删掉 / 价格与免费标记就地更新），并把报告追加到日志
+python scripts/sync_models.py --apply --log logs/model-sync.log
+```
+
+- 数据源：OpenCode Go 官方文档 `https://opencode.ai/v2/docs/console/go/`（Endpoints 表 + 价格表）、
+  Agnes 定价页 `https://www.agnes-ai.cn/zh-Hans/docs/pricing`（取「现价」列，不是划掉的刊例价）。
+- 写盘是**文本级**增删改：只动该动的行，`data/gateway.yaml` 里逐条实测的手写注释不会被冲掉；
+  走网关自带的 `write_config`（备份 + 原子替换 + 权限 600），落盘后**回读校验**，不通过就中止、不写盘。
+- 边界：协议线**只加不砍**（文档给的新线补上，逐条实测出来的线不动）；`PROTECTED` 名单与被别名 /
+  `media` 引用的模型 id **永不自动删**（官方文档表收录有滞后，实测 `deepseek-flash` / `omen-alpha`
+  上游在服务、文档表还没补），只在报告里点名。
+- 定时：QwenPaw cron 每天 08:00（Asia/Shanghai）跑 `--apply`，简报投到控制台，报告同时追加到 `logs/model-sync.log`。
+
 ## 备注
 
 - 三家均为 OpenAI 兼容协议，统一 `OpenAICompatAdapter`，通过 `base_url` + `media` 区分

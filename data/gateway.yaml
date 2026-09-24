@@ -39,6 +39,32 @@ providers:
       - id: "agnes-video-2.5-flash"
         display_name: "Agnes Video 2.5 Flash"
         type: "video"
+      # 2026-09-24 自动同步：官方文档新增（scripts/sync_models.py）
+      - id: "agnes-2.5-pro"
+        display_name: "Agnes 2.5 Pro"
+        type: "text"
+        # 文档现价 ¥3/M 输入、¥6/M 输出
+      # 2026-09-24 自动同步：官方文档新增（scripts/sync_models.py）
+      - id: "agnes-2.5-pro-beta"
+        display_name: "Agnes 2.5 Pro Beta"
+        type: "text"
+        # 文档现价 ¥0.7/M 输入、¥2.1/M 输出
+      # 2026-09-24 自动同步：官方文档新增（scripts/sync_models.py）
+      - id: "agnes-image-2.0-flash"
+        display_name: "Agnes Image 2.0 Flash"
+        type: "image"
+      # 2026-09-24 自动同步：官方文档新增（scripts/sync_models.py）
+      - id: "agnes-image-2.1-flash"
+        display_name: "Agnes Image 2.1 Flash"
+        type: "image"
+      # 2026-09-24 自动同步：官方文档新增（scripts/sync_models.py）
+      - id: "agnes-video-2.5"
+        display_name: "Agnes Video 2.5"
+        type: "video"
+      # 2026-09-24 自动同步：官方文档新增（scripts/sync_models.py）
+      - id: "agnes-video-v2.0"
+        display_name: "Agnes Video V2.0"
+        type: "video"
 
   volc_engine:
     name: "火山方舟 Coding Plan"
@@ -335,9 +361,11 @@ observability:
 # 不配则该模型 estimated_cost_cny 不返回（不影响调用）。
 pricing:
   per_model:
-    agnes-3.0-flash:      { input: 0.35, output: 1.00 }
+    agnes-3.0-flash:      { input: 0, output: 0 }   # 同步 2026-09-24（原 0.35/1；文档现价 ¥0/M 输入、¥0/M 输出）
     agnes-2.5-flash:      { input: 0, output: 0 }   # 文档现价暂免（输入/输出/缓存命中均 ¥0/百万）
     ark-code-latest:      { input: 0.50, output: 2.00 }
+    agnes-2.5-pro:        { input: 3, output: 6 }   # 2026-09-24 自动同步（文档现价）
+    agnes-2.5-pro-beta:   { input: 0.7, output: 2.1 }   # 2026-09-24 自动同步（文档现价）
 
 # ── 媒体下载代理白名单（第十七轮）────────────────────────
 # 生成的图片/视频挂在第三方 CDN 上且不带 CORS 头，浏览器里既 fetch 不到 blob、
