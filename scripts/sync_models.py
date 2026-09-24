@@ -19,9 +19,9 @@
   · 视频默认模型 media.video_model_name → **不自动换**：只保证它不被自动删（被 media 引用
     的 id 永不自动删），并在报告里列出文档的视频清单当候选。文档对视频模型没有
     「哪个最新 / 最好」的机器可读标记，自动切会直接改变线上视频行为，所以换默认由人点
-  · PROTECTED 名单 + 被别名 / media 引用的 id → **永不自动删**，只在报告里点名
-    （官方文档表有收录滞后：实测 deepseek-flash / omen-alpha 上游在服务、文档表还没补，
-     照文档删等于把能用的模型删掉）
+  · 被别名 / media 引用的 id → **永不自动删**，只在报告里点名（删了会打断功能）
+  · PROTECTED 保护名单**当前为空**：2026-09-24 老板拍板，文档表没收录的
+    deepseek-flash / omen-alpha 照文档删（原先怕的是文档收录滞后，老板选择以上游文档为准）
 
 写盘走网关自带的 write_config（备份 + 原子替换 + 权限 600），落盘前后回读校验，
 校验不过就中止、不写盘。改的是**文本层**，手写注释不会被整份重渲染冲掉。
@@ -58,10 +58,10 @@ SYNC_PROVIDERS = ("opencode", "agnes")
 # 永不自动删的名单：官方文档表**收录滞后**，实测上游还在服务的模型。
 #   删了 = 白丢一个能用的模型，所以列在这里；每次报告都会点名，要删说一声就删。
 PROTECTED: dict[str, dict[str, str]] = {
-    "opencode": {
-        "deepseek-flash": "2026-09-21 上游新出现、文档表未收；实测 chat/messages/responses 三线全通",
-        "omen-alpha": "上游新模型、文档表未收；实测 chat 线可用",
-    },
+    # 2026-09-24 老板拍板「删了」：文档表没收录的 deepseek-flash / omen-alpha 已照文档删除，
+    # 名单清空（机制保留 —— 以后要临时护住某个 id 在这里登记即可；被别名 / media 引用的 id
+    # 本来就有独立保护，不依赖这张表）。
+    "opencode": {},
 }
 
 
@@ -233,8 +233,10 @@ def _cfg_free_state(m: dict) -> object:
 def _split_removed(prov: str, cur: dict, doc: dict, refs: dict) -> tuple[list[str], dict[str, str]]:
     """「网关有、文档没收录」的模型 → (该删的, 该保的 {id: 原因})。
 
-    文档没收录 ≠ 上游下线（实测有 deepseek-flash / omen-alpha 这种上游在服务、文档表
-    还没补的），所以保护名单和被引用的 id 一律不删，只在报告里点名。
+    文档没收录未必等于上游下线（文档表有收录滞后），所以：被别名 / media 引用的 id
+    一律不删（删了会打断功能），另留一张 PROTECTED 名单可临时护住某个 id。
+    2026-09-24 起 PROTECTED 为空 —— 老板拍板以上游文档为准（deepseek-flash /
+    omen-alpha 这两个文档未收录的已照文档删掉）。
     """
     guard = PROTECTED.get(prov, {})
     drop: list[str] = []
@@ -436,13 +438,34 @@ def _find_model_blocks(lines: list[str], provider: str) -> dict[str, tuple[int, 
             order.append(hit.group("id"))
 
     blocks: dict[str, tuple[int, int]] = {}
+    sec_end = stop                          # 供应商段结束：下一个 2 空格 key 或文件尾
     for n, mid in enumerate(order):
         start = starts[mid]
-        end = starts[order[n + 1]] if n + 1 < len(order) else stop
-        while end > start and not lines[end - 1].strip():
-            end -= 1
-        blocks[mid] = (start, end)
+        nxt = starts[order[n + 1]] if n + 1 < len(order) else sec_end
+        blocks[mid] = (start, _block_end(lines, start, nxt))
     return blocks
+
+
+# 「块头」注释：分组分隔线（`# ── …`）和同步自己写的「官方文档新增」标记 —— 这些行属于
+#   **下一个块**（本文件惯例：分组标题写在组里第一个模型上方）。
+#   2026-09-24 实测踩到过：删 deepseek-flash 时把 "# ── Anthropic Messages 线" 一起删了。
+#   同一注释组里落在第一行「块头」**之前**的行（例如同步写的 "# 文档现价 …" 尾注）仍算
+#   上一个块，跟着块一起删/留。
+_BLOCK_HEADER_RE = re.compile(r"^\s*#\s*(?:──|\d{4}-\d{2}-\d{2}\s*自动同步)")
+
+
+def _block_end(lines: list[str], start: int, stop: int) -> int:
+    """块尾收口：去掉尾空行，并把紧贴下一个块的「块头注释」让给下一个块（见上）。"""
+    end = stop
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    k = stop - 1
+    while k > start and lines[k].strip().startswith("#"):
+        k -= 1
+    for i in range(k + 1, stop):            # 紧贴下一个 `- id:` 的注释组
+        if _BLOCK_HEADER_RE.match(lines[i]):
+            return i if i < end else end
+    return end
 
 
 def _pricing_span(lines: list[str]) -> tuple[int, int] | None:

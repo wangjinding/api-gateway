@@ -5193,6 +5193,42 @@ def test_agnes_free_apply_and_revoke_round_trip():
         sm.apply_plan(text, plan, date)
 
 
+def test_remove_block_keeps_next_group_header_comment():
+    """删模型块不能吃掉下一个模型的分组标题注释（2026-09-24 实测踩到的坑）。
+
+    本文件惯例：`# ── …` 分组标题写在组里第一个模型上方，同步自己写的「官方文档新增」
+    标记同理 —— 这两类注释属于**下一个块**，删上一个模型时必须留下；而 `# 文档现价 …`
+    这种紧贴块尾的注释属于当前块，跟着一起删。
+    """
+    sys.path.insert(0, str(_ROOT / "scripts"))
+    import sync_models as sm
+
+    text = (
+        "providers:\n  opencode:\n    name: \"OpenCode Go\"\n    models:\n"
+        '      - id: "gone-alpha"\n'
+        '        display_name: "Gone Alpha"\n'
+        '        type: "text"\n'
+        "        # 文档现价 ¥1/M 输入、¥2/M 输出\n"
+        "      # ── 分组标题（属于下一个模型）────────\n"
+        '      - id: "kept-beta"\n'
+        '        display_name: "Kept Beta"\n'
+        '        type: "text"\n'
+        '        protocols: ["chat/completions"]\n'
+    )
+    lines = text.splitlines(keepends=True)
+    s, e = sm._find_model_blocks(lines, "opencode")["gone-alpha"]
+    seg = "".join(lines[s:e])
+    assert "文档现价" in seg, "块尾尾注要跟着块一起删"
+    assert "分组标题" not in seg, "分组标题必须让给下一个模型"
+
+    plan = {"add": {"opencode": {}, "agnes": {}}, "remove": {"opencode": ["gone-alpha"], "agnes": []},
+            "price_set": {}, "price_add": {}, "proto_add": {}, "free_set": {}, "agnes_free": {}}
+    new = sm.apply_plan(text, plan, "2026-09-24")
+    assert "gone-alpha" not in new and "文档现价" not in new
+    assert "分组标题（属于下一个模型）" in new, "分组标题被吃掉就是 bug"
+    assert "kept-beta" in new
+
+
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`
 # 之前的旁注：运行器只会收集执行到这一行时已经存在的 globals。
 if __name__ == "__main__":

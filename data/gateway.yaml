@@ -203,11 +203,6 @@ providers:
         display_name: "MiMo V2.6 Pro"
         type: "text"
         protocols: ["chat/completions"]
-      - id: "omen-alpha"
-        display_name: "Omen Alpha"
-        type: "text"
-        # 上游新模型（官方文档表还没收）；实测只有 chat 线可用
-        protocols: ["chat/completions"]
       - id: "space-bunny-free"
         display_name: "Space Bunny Free（免费）"
         type: "text"
@@ -271,11 +266,6 @@ providers:
         display_name: "DeepSeek V4 Flash Vision Exp"
         type: "text"
         vision: true   # 官方标 Vision，支持图像转 token 输入
-        protocols: ["chat/completions", "messages", "responses"]
-      - id: "deepseek-flash"
-        display_name: "DeepSeek Flash"
-        type: "text"
-        # 2026-09-21 上游新出现（官方文档表未收）；实测三线全通
         protocols: ["chat/completions", "messages", "responses"]
       # ── Anthropic Messages 线（文档主推这条）─────────────
       - id: "minimax-m2.7"
