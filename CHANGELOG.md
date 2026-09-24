@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## 2026-09-24 · 删除 deepseek-flash / omen-alpha + 立「上生产必推 CNB」规则
+
+**老板三条指令**：① 那两个受保护的模型「删了」；② 报告不用改发飞书；③ 记住并写进文件与记忆——**只要项目重启上线生产的代码都要推送到 CNB**。
+
+### ① 删除 `opencode/deepseek-flash` / `opencode/omen-alpha`
+- 此前在 `PROTECTED` 名单里护着（上游在服务、官方文档表未收录，怕收录滞后删错）；老板拍板以上游文档为准 → **名单清空**（机制保留：以后要临时护住某个 id 在此登记即可；被别名 / media 引用的 id 本来就有独立保护）。
+- `--apply` 落盘删除，opencode 网关 35 → **33 = 文档 33**（Agnes 10 = 10，无漂移）；两个模型块原文归档到 `/root/.trash/2026-09-24-opencode-models-doc-sync/removed-model-blocks.yaml`。
+- 线上确证：`hot_reload` 生效，`/models` 已不含这两个 id（总数 47 → 45），Agnes 的免费 / 限时免费标注不受影响。
+- 顺手修一个删块 bug（本次实测踩到）：`_find_model_blocks()` 用「下一个 `- id` 行」当块尾，会把**紧贴下一个模型的分组标题注释**（本文件惯例：`# ── …` 写在组里第一个模型上方；同步自己写的「官方文档新增」标记同理）一起吞掉 —— 删 `deepseek-flash` 时连带删了 `# ── Anthropic Messages 线（文档主推这条）`。现改为块尾只收口到「块头注释」之前（`_block_end` + `_BLOCK_HEADER_RE`），标题已恢复，回归用例 `test_remove_block_keeps_next_group_header_comment` 钉住。
+- 测试 **196 passed / 0 failed**。
+
+### ② 近两日积压提交全部推送 CNB（9 个 commit）
+本地领先远端 9 个（含模型同步、Agnes 免费标注、间距修复、本轮删除），一次性带 token 推送完成：
+`ecb99e6 → afd2f69 → 16d973c`，**远端 `master` tip = 本地 HEAD**，`.git/config` 无 token。
+
+### ③ 立「上生产必须同步推 CNB」规则（老板硬性要求）
+- `README.md` 新增段落：凡**重启上线生产**（`supervisorctl restart api-gateway:api-gateway_00`）或 **`npm run build` 覆盖 `frontend/dist`** 的代码改动，验证通过后**必须**推 CNB；顺序＝改代码 → 测试/CI → 上线 → 确证线上生效 → commit → push；纯注释/配置靠热重载生效的也照推。唯一原则：**线上跑着的代码 = 仓库里的代码**。
+- 新增 `scripts/push_cnb.sh`：一次性带 token 内嵌 URL 推送，推完自动核对「远端 = 本地」并复查 `.git/config` 无 token；无 token 退出 2、工作区不干净退出 3；**脚本内不内置 token**（凭据只在 `MEMORY.md`）。
+
 ## 2026-09-24 · Agnes 免费 / 限时免费标注 + 免费标签间距对齐
 
 **老板需求**：① Agnes 的模型也要标「免费」或「限时免费」；② 标注和模型名的间隔不一样，优化一下。
