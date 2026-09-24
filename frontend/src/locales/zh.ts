@@ -381,6 +381,8 @@ export default {
     loadErr: '加载模型失败',
     capability: '能力',
     visionTag: '视觉',
+    freeTag: '免费',
+    freeHint: '官方免费模型：不按 token 计费（额度以官方为准；当前 OpenCode Go 计划里只有 Space Bunny Free）',
     paramTag: '参数固定',
     paramLocked: '该模型参数由网关固定：{p}（上游硬约束，客户端与测速探针传的值都会被覆盖）',
     allTextModels: '全部文本模型',

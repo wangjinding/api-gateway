@@ -381,6 +381,8 @@ export default {
     loadErr: 'Failed to load models',
     capability: 'Capability',
     visionTag: 'Vision',
+    freeTag: 'Free',
+    freeHint: 'Officially free model: no token billing (quota is set by the vendor; only Space Bunny Free in the current OpenCode Go plan)',
     paramTag: 'Params locked',
     paramLocked: 'Parameters pinned by the gateway: {p} (upstream hard limit; values from clients and the speed test are overridden)',
     allTextModels: 'All text models',

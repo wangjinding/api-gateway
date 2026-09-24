@@ -33,6 +33,8 @@
             <!-- 第二十五轮：该模型的参数被上游固定（如 temperature 只能是 1），
                  挂锁标注 + 悬浮说明，省掉「为什么我传的参数不生效」这类困惑。 -->
             <Icon v-if="m.paramNote" name="lock" :size="12" class="plock" :title="m.paramNote" />
+            <!-- 2026-09-21：免费模型标一颗闪电（与下方表格「能力」列的「免费」同一份数据） -->
+            <Icon v-if="m.free" name="bolt" :size="12" class="free-ico" :title="t('models.freeHint')" />
             <span class="code">{{ m.id }}</span>
             <!-- 支持的格式不在这里铺标签：这行还要放供应商/延迟/测速按钮，窄卡放不下第三颗
                  （悬停整行可见格式 + 本次测速走的线，见 rowTitle）。权威展示在下方表格的
@@ -167,10 +169,14 @@
             <span v-if="row.vision" class="pill ok cap">
               <Icon name="eye" :size="12" />{{ t('models.visionTag') }}
             </span>
+            <!-- 2026-09-21：免费模型（后端 /v1/models 的 free 字段，配置在 models[].free） -->
+            <span v-if="row.free" class="pill free cap" :title="t('models.freeHint')">
+              <Icon name="bolt" :size="12" />{{ t('models.freeTag') }}
+            </span>
             <span v-if="paramKeys(row).length" class="pill warn cap" :title="paramNote(row)">
               <Icon name="lock" :size="12" />{{ t('models.paramTag') }}
             </span>
-            <span v-if="!row.vision && !paramKeys(row).length" class="muted-2">—</span>
+            <span v-if="!row.vision && !paramKeys(row).length && !row.free" class="muted-2">—</span>
           </template>
         </el-table-column>
         <el-table-column :label="t('models.keySet')" width="90">
@@ -374,6 +380,8 @@ const textModelRows = computed(() =>
     id: m.id,
     provider: m.provider_name || '—',
     vision: !!m.vision,
+    // 免费模型（2026-09-21）：与表格「能力」列同一份数据
+    free: !!m.free,
     // 模型级强制参数（第二十五轮）：被上游固定住的采样参数，用挂锁标注出来。
     paramNote: paramKeys(m).length ? paramNote(m) : '',
     // 支持的格式（第二十七轮）：悬浮这一行就能看到「能用哪几条线 + 本次测速走的哪条」
@@ -454,6 +462,9 @@ onMounted(load)
 .arrow { color: var(--muted-2); }
 .vision { color: var(--primary); }
 .plock { color: var(--warn); }
+/* 免费模型：绿色系，跟「视觉」(主题色) / 「参数固定」(橙) 区分开 */
+.free-ico { color: #059669; }
+.pill.free { background: rgba(16, 185, 129, 0.14); color: #059669; }
 /* 支持的格式：三条线是并列关系（没有谁更优），统一用主题色弱底，
    不用 ok/warn/err —— 否则「messages」看起来像警告、「responses」像被禁用。 */
 .proto {

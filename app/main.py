@@ -1224,6 +1224,9 @@ def _models_payload():
                      "type": m["type"], "provider": m["provider"], "provider_name": m["provider_name"],
                      # 第十三轮: 暴露「是否支持图像输入」，前端据此标注/告警（对话页带图时提示换模型）
                      "vision": bool(m.get("vision")),
+                     # 2026-09-21: 免费模型标注（官方标 Free）—— 前端「能力」列据此打「免费」标签，
+                     #   接口调用方也能提前知道这个模型不计费。
+                     "free": bool(m.get("free")),
                      # 第二十五轮: 暴露模型级强制参数（如 {"temperature": 1}）。前端据此标挂锁，
                      #   API 调用方也能提前知道自己传的采样参数会被上游要求覆盖。
                      "params": dict(m.get("params") or {}),
@@ -1251,6 +1254,8 @@ def _models_payload():
                      "display_name": aminfo.display_name,
                      "type": aminfo.type, "provider": apkey, "provider_name": apconfig.name,
                      "vision": bool(aminfo.vision),
+                     # 2026-09-21: 免费位随目标继承（与 vision / params 同一份事实来源）
+                     "free": bool(aminfo.free),
                      "params": dict(aminfo.params or {}),
                      "protocols": list(ALIAS_PROTOCOLS),
                      "alias_of": aminfo.id, "alias_note": spec.note})

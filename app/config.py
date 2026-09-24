@@ -127,6 +127,11 @@ class ModelInfo:
     # 其余文本模型（ark-code 等）文档未声明图像输入 → 默认 False。
     #   用途：① /v1/models 暴露给前端标注/告警；② 前端据此提示「换个支持视觉的模型」力的模型排到前面。
     vision: bool = False
+    # 2026-09-21: 是否**免费模型**（官方价格表标 Free、不按 token 计费）。
+    #   纯标注用途：/v1/models 带出 `free` 字段，前端「能力」列打「免费」标签；
+    #   不参与路由/限流/熔断，也不影响成本估算（额度由上游控制，网关无法感知）。
+    #   配置写法：`models[]` 里加 `free: true`（OpenCode Go 当前只有 space-bunny-free）。
+    free: bool = False
     # 第二十五轮（模型参数硬约束）: 该模型**必须用**的上游参数，发送前强制覆盖客户端传值。
     #   背景：OpenCode Go 的 kimi-k2.7-code 只接受 temperature=1，客户端传 0（含一键测速的
     #   探针，它固定发 temperature=0）会被上游 400：
@@ -384,6 +389,9 @@ class GatewayConfig:
                     "display_name": m.display_name or m.id,
                     "type": m.type,
                     "vision": m.vision,
+                    # 2026-09-21: 免费模型标注（官方标 Free）。前端「能力」列打「免费」标签，
+                    #   /v1/models 也带出该字段；不参与路由/限流/计费。
+                    "free": bool(m.free),
                     "provider": pkey,
                     "provider_name": pconfig.name,
                     # 第二十五轮: 暴露模型级强制参数（如 {"temperature": 1}）。
@@ -774,6 +782,7 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
         models = [
             ModelInfo(id=m.get("id", ""), display_name=m.get("display_name", ""),
                       type=m.get("type", "text"), vision=_opt_bool(m.get("vision"), "providers.*.models.*.vision", False),
+                      free=_opt_bool(m.get("free"), "providers.*.models.*.free", False),
                       params=_parse_model_params(
                           m.get("params"), f"providers.{pkey}.models[{idx}].params"),
                       protocols=_parse_protocols(

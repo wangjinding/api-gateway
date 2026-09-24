@@ -75,7 +75,8 @@ api-gateway/
 > 收录 **35 个**模型（2026-09-21 按上游 `GET /models` + 官方文档表刷新，每条线的可用性都真实调用验过）：
 >
 > - ⭐ **免费**：`space-bunny-free`（Space Bunny Free）—— 官方价格表标 Free / Free / Free、
->   额度 Unlimited（限时）；网关里 `display_name` 带「（免费）」标注，模型页一眼能认出来。
+>   额度 Unlimited（限时）。三处都标注了：配置里 `free: true`、`/v1/models` 带 `free` 字段、
+>   前端「模型与供应商」页在「能力」列打绿色「免费」标签（`display_name` 也带「（免费）」）。
 > - `chat/completions` 线：`glm-5.3-flash`、`glm-5.3`、`glm-5.2`、`glm-5.1`、`kimi-k2.7-code`、
 >   `kimi-k2.6`、`longcat-2.0`、`mimo-v2.5`、`mimo-v2.5-pro`、`mimo-v2.6-flash`、`mimo-v2.6-pro`、
 >   `omen-alpha`、`hy4-preview`、`hy3`

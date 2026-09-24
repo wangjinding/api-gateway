@@ -1667,6 +1667,20 @@ def test_models_endpoint_objects_are_all_model():
     assert all("created" in x and "owned_by" in x for x in j["data"]), j["data"][0]
 
 
+def test_models_payload_marks_free_models():
+    """2026-09-21: 免费模型要在 /v1/models 里带 free=true（前端「能力」列据此打「免费」标签）。"""
+    from fastapi.testclient import TestClient
+    import app.main as m
+    client = TestClient(m.app)
+    data = client.get("/v1/models").json()["data"]
+    free_ids = [x["id"] for x in data if x.get("free")]
+    assert "space-bunny-free" in free_ids, f"免费模型没标出来：{free_ids}"
+    # 反向：付费模型必须是 free=false（不能因为字段缺失而误标）
+    paid = next(x for x in data if x["id"] == "deepseek-v4.1-flash")
+    assert paid["free"] is False, paid
+    assert all("free" in x for x in data), "每个模型都要带 free 字段（缺字段=前端标签会闪）"
+
+
 def test_empty_messages_rejected_and_stream_strict():
     """P2: 空 messages / 拼错的 stream 类型应在入参处被拒（而非打到上游变 502）。"""
     from fastapi.testclient import TestClient
