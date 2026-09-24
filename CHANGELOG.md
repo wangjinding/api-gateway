@@ -1,5 +1,41 @@
 # CHANGELOG
 
+## 2026-09-24 · 修「QwenPaw 缓存命中率恒 0」：流式 usage 丢掉 `prompt_tokens_details`
+
+**现象**：老板在 QwenPaw 上用本网关（`wangjinding` 自定义供应商）调 `deepseek-v4.1-flash`
+（别名 `wjd`），网页显示的**缓存命中率一直是 0**；同一模型直连 OpenCode 是 94~99%。
+
+**排查（全部实测，逐层证伪）**
+1. ~~QwenPaw 组装 messages 有问题~~ → **证伪**：6 份连续请求逐条 diff，前面所有消息
+   逐字节一致、仅末尾追加 2 条（msgs 362→372 单调递增），tools 26 个逐字节相同 ——
+   **教科书级的递增前缀**。
+2. ~~网关发给上游的 payload 有问题~~ → **证伪**：出站 payload 的 model / stream /
+   stream_options 全同，session 稳定。
+3. ~~上游没给缓存 / 字段名非标准~~ → **证伪**：拿网关**真实出站 payload** 原样直打上游，
+   `cached_tokens = 126464 / 126848`（pt=126897 / 127648，≈99% 命中）。
+4. **真因** → 网关**流式响应**把上游 usage 重建成只含 `prompt_tokens` /
+   `completion_tokens` / `total_tokens` 的版本，**`prompt_tokens_details.cached_tokens`
+   在这一步被丢弃**，末尾又用这份残缺 usage 覆盖上游原始值发给客户端 —— QwenPaw 从未
+   收到缓存字段，只能记 0。（同一个 bug 也导致网关自己的控制台看不到缓存命中。）
+
+**修复**
+- 新增 `_merge_usage(dst, src)`：**整数字段累加、非整数字段（`prompt_tokens_details`
+  这类整份快照）覆盖**，实现 usage 全字段透传；流式累加改用它。
+- `_UsageScanner`（三线直传的记账扫描器）顺带收集 `cached_tokens`，`counts()` 多返回
+  该键（消费方按名取值，不改既有行为）—— 网关控制台的缓存口径同步修正。
+- 非流式路径本就原样透传 `result["usage"]`，无需改动。
+
+**回归**：`test_merge_usage_keeps_prompt_tokens_details`、
+`test_usage_scanner_collects_cached_tokens`；测试 **198 passed / 0 failed**。
+
+**上线验证**：流式请求第 2 次 usage 已带 `prompt_tokens_details.cached_tokens = 7168`
+（修复前该字段整个不存在）。
+
+**方法论留档**（下次遇到「某个量归零」）：网关的**流式与非流式是两条互不相干的代码
+路径**（QwenPaw 走流式 `_stream_response`），插探针必须插对分支；排查顺序应是
+**入站 payload → 出站 payload → 上游原始响应 → 最后才查网关有没有把它改坏**
+（这次真凶恰好就在最后一环）。
+
 ## 2026-09-24 · 删除 deepseek-flash / omen-alpha + 立「上生产必推 CNB」规则
 
 **老板三条指令**：① 那两个受保护的模型「删了」；② 报告不用改发飞书；③ 记住并写进文件与记忆——**只要项目重启上线生产的代码都要推送到 CNB**。
