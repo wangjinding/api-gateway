@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## 2026-09-21 · 免费标志跟随模型名 + 轮换 Agnes Key + 复测 Zen 免费档（结论：一个都用不了）
+
+**老板需求**：① 免费标志直接放在模型名称后面；② Agnes 供应商 API Key 换成新的那把；
+③ 把 models.dev 里那批 `*-free` 用 Go 的 key 测一遍，能用就都写进网关。
+
+### ① 免费标志位置（前端）
+`frontend/src/views/Models.vue`：绿色「免费」标签从「能力」列挪到**「模型」列、紧跟模型 id 后面**；
+左上「全部文本模型」测速行同样跟在名字后面（原先那枚闪电图标撤掉，避免同一件事标两遍）；
+「能力」列恢复成只标「视觉 / 参数固定」，免费模型那格显示「—」。
+
+### ② Agnes Key 轮换
+`data/.env` 的 `AGNES_API_KEY` 换新（**值不入库**，只写在服务器上 600 权限的 `.env` 里；
+`data/.env` 在 `.gitignore` 内）。重启后端后真实调用验证通过（见「验证」）。
+
+### ③ Zen 免费档复测（29 个 `*-free`）—— 结论：一个都不能用，**未写入任何模型**
+用 Go 的 key（`OPENCODE_API_KEY`）对 models.dev `opencode` 目录里 29 个 `*-free` 逐个打瘦请求
+（`max_tokens=1`，带 `x-opencode-session` 与专属 UA）：
+- 打 **Go 端点** `/zen/go/v1/chat/completions`：**29/29 全部 `400 Model is unavailable.`**；
+- 打 **Zen 端点** `/zen/v1/chat/completions`：同样全部失败 —— 一部分 `400 Model is unavailable.`，
+  另一部分是 **`403 FreeTierError: OpenCode's free tier can only be used from within OpenCode`**。
+
+**结论**：这批免费模型被**客户端锁定**（只允许 OpenCode 自己调用），不是 key 权限不够、
+也不是端点写错 —— 第三方网关（含本网关）**无论如何都调不到**。按老板「可以用才写入」的条件，
+**一个都没写入**。**以后不要再重复测这批**（结论已定；`space-bunny-free` 是 Go 计划里唯一真能用的免费模型）。
+
 ## 2026-09-21 · 刷新 OpenCode Go 模型清单（35 个，标注免费模型）
 
 **老板需求（原话）**：把 ai 网关的 OpenCode Go 的模型更新一下，**免费的也要标注出来**，弄好后重启上线。

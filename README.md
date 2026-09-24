@@ -76,7 +76,10 @@ api-gateway/
 >
 > - ⭐ **免费**：`space-bunny-free`（Space Bunny Free）—— 官方价格表标 Free / Free / Free、
 >   额度 Unlimited（限时）。三处都标注了：配置里 `free: true`、`/v1/models` 带 `free` 字段、
->   前端「模型与供应商」页在「能力」列打绿色「免费」标签（`display_name` 也带「（免费）」）。
+>   前端「模型与供应商」页把绿色「免费」标签**放在模型名后面**（`display_name` 也带「（免费）」）。
+> - ❌ **models.dev 里那批 `*-free`（Zen 免费档，约 29 个）网关用不了**：实测（2026-09-21，Go 的 key）
+>   打 Go 端点是 `400 Model is unavailable.`，打 Zen 端点是 `403 FreeTierError: OpenCode's free tier
+>   can only be used from within OpenCode` —— 免费档**客户端锁定**，第三方网关调不到，故未收录。
 > - `chat/completions` 线：`glm-5.3-flash`、`glm-5.3`、`glm-5.2`、`glm-5.1`、`kimi-k2.7-code`、
 >   `kimi-k2.6`、`longcat-2.0`、`mimo-v2.5`、`mimo-v2.5-pro`、`mimo-v2.6-flash`、`mimo-v2.6-pro`、
 >   `omen-alpha`、`hy4-preview`、`hy3`
