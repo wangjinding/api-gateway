@@ -479,8 +479,17 @@ def build_plan(report: dict, cfg: dict, oc_doc: dict, agnes_doc: dict) -> dict:
 
 
 def plan_is_empty(plan: dict) -> bool:
-    return not any(plan.get(k) for k in
-                   ("add", "remove", "price_set", "price_add", "proto_add", "free_set"))
+    """plan 里是不是真的一条动作都没有。
+
+    坑：`plan["add"] / plan["remove"]` 是按 provider 分桶的两层 dict，一个模型都没变时
+    也是 `{"opencode": {}, "agnes": {}}` —— 真值。早先这里直接 `any(plan[k] ...)` 判断，
+    结果「无漂移」也走写盘分支：每天白重写一次配置（还把上一份备份覆盖掉），
+    报告也会误报「已写盘：…N 字节」。所以必须先下钻到内层桶再判。
+    """
+    for prov in SYNC_PROVIDERS:
+        if plan["add"].get(prov) or plan["remove"].get(prov):
+            return False
+    return not any(plan.get(k) for k in ("price_set", "price_add", "proto_add", "free_set"))
 
 
 def render_plan(plan: dict, date: str) -> str:

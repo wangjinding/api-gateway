@@ -1,5 +1,32 @@
 # CHANGELOG
 
+## 2026-09-24 · 模型清单每日同步（全量落盘）+ 视频默认模型口径 + 修「空 plan 也写盘」
+
+**老板需求**：网关的模型清单要和上游官方文档**同步**——文档新增的加进去、下线的删掉、
+参数变了就更新；每天自动跑。
+
+### 交付
+| 部分 | 内容 |
+| --- | --- |
+| `scripts/sync_models.py` | 抓 OpenCode Go 文档 + Agnes 定价页，与 `data/gateway.yaml` 比对：默认只报告（退出码 0/1/2），`--apply` 真落盘 |
+| 落盘方式 | **文本级**增删改（`data/gateway.yaml` 里逐条实测的手写注释不被冲掉）+ 复用网关 `write_config`（备份 / 原子替换 / 600）+ 落盘后**回读校验**（模型集合、定价、协议线、别名目标、无关 provider 是否被碰），不过就中止、不写盘 |
+| 边界 | 协议线**只加不砍**；`PROTECTED` 名单与被**别名 / media 引用**的 id **永不自动删**，只在报告里点名（`deepseek-flash` / `omen-alpha` 上游在服务、文档表未收） |
+| 定时 | QwenPaw cron 每天 08:00（Asia/Shanghai）跑 `--apply`，简报投控制台，报告追加 `logs/model-sync.log` |
+| 首次同步 | Agnes +6（`agnes-2.5-pro` / `2.5-pro-beta` / `image-2.0-flash` / `image-2.1-flash` / `video-2.5` / `video-v2.0`）、`agnes-3.0-flash` 价目 0.35/1.00 → **0/0**（文档现价免费）、补 2 条价目；OpenCode 无漂移 |
+
+### 视频默认模型 `media.video_model_name`：不自动换
+文档对三个视频模型**没有**「哪个最新 / 最好」的机器可读标记（`agnes-video-v2.0` 当前免费、
+`agnes-video-2.5` 按输出分辨率计费、`agnes-video-2.5-flash` 限时免费），自动挑一个切上去
+等于直接改线上视频行为。所以脚本只做两件事：**保证它不被自动删**（`media` 引用的 id 受保护）
++ **报告里列文档视频清单当候选**（✓ 文档里还在 / ✗ 已下线）。换默认由人点模型名、改一行配置
+（脚本 docstring、README、`data/gateway.yaml` 注释、cron 提示词四处都写明，防后手擅自切）。
+
+### 修 bug：空 plan 也走写盘分支
+`plan_is_empty()` 只看外层结构，而 `plan["add"] = {"opencode": {}, "agnes": {}}` 这种两层
+dict 即使一个模型都没变也是**真值** → 每天无漂移也重写一次配置（并覆盖上一份备份），
+报告还误报「已写盘：…N 字节」。改为下钻到 provider 桶判断，并加回归用例
+`test_sync_plan_is_empty_drills_into_provider_buckets`。单测 192 → **193 passed / 0 failed**。
+
 ## 2026-09-21 · 用另一把 Zen API Key 再验免费档（结论不变：客户端锁定，写不进去）
 
 **老板需求**：用新给的 `oc_sk_…` 这把 key 去调免费档试试。

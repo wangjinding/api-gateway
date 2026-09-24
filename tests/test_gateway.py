@@ -5079,6 +5079,28 @@ def test_structured_save_only_touches_submitted_section():
     assert render_yaml(new).startswith("#"), "整份重渲染路径仍在（回退用）"
 
 
+def test_sync_plan_is_empty_drills_into_provider_buckets():
+    """sync_models.plan_is_empty 必须下钻到 provider 桶，无漂移时不得判成「有动作」。
+
+    回归（2026-09-24 实测踩到）：`plan["add"] = {"opencode": {}, "agnes": {}}` 这种
+    两层结构即使一个模型都没变也是**真值**，早先直接 `any(plan[k] ...)` → 每天无漂移
+    也走写盘分支：白重写配置、覆盖上一份备份，报告还误报「已写盘：…」。
+    """
+    sys.path.insert(0, str(_ROOT / "scripts"))
+    import sync_models as sm
+
+    empty = {"add": {"opencode": {}, "agnes": {}},
+             "remove": {"opencode": [], "agnes": []},
+             "price_set": {}, "price_add": {}, "proto_add": {}, "free_set": {}}
+    assert sm.plan_is_empty(empty) is True
+    assert sm.plan_is_empty({**empty, "add": {"opencode": {"x": {}}, "agnes": {}}}) is False
+    assert sm.plan_is_empty({**empty, "remove": {"opencode": [], "agnes": ["y"]}}) is False
+    assert sm.plan_is_empty({**empty, "price_add": {"m": {"input": 1.0, "output": 2.0}}}) is False
+    assert sm.plan_is_empty({**empty, "price_set": {"m": {"old": None, "new": None}}}) is False
+    assert sm.plan_is_empty({**empty, "proto_add": {"m": "messages"}}) is False
+    assert sm.plan_is_empty({**empty, "free_set": {"m": True}}) is False
+
+
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`
 # 之前的旁注：运行器只会收集执行到这一行时已经存在的 globals。
 if __name__ == "__main__":
