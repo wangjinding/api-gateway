@@ -5229,6 +5229,67 @@ def test_remove_block_keeps_next_group_header_comment():
     assert "kept-beta" in new
 
 
+def test_merge_usage_keeps_prompt_tokens_details():
+    """流式 usage 必须**全字段**透传，尤其 `prompt_tokens_details.cached_tokens`。
+
+    2026-09-24 老板报「QwenPaw 上缓存命中率恒 0」：真因是网关流式响应把上游 usage
+    重建成只含 prompt/completion/total_tokens 三个字段，把 `prompt_tokens_details`
+    （缓存命中量就在里面）丢了 —— 上游明明命中（同一 payload 直打上游
+    cached_tokens=126464），经网关回给客户端却没了这个字段。
+    修复：_merge_usage() 整数累加、非整数覆盖（details 是整份快照，累加会算错）。
+    """
+    sys.path.insert(0, str(_ROOT / "app"))
+    import importlib
+    main = importlib.import_module("main")
+
+    # 典型上游 chunk：usage 带 prompt_tokens_details
+    dst: dict = {}
+    main._merge_usage(dst, {"prompt_tokens": 100, "completion_tokens": 5,
+                            "total_tokens": 105,
+                            "prompt_tokens_details": {"cached_tokens": 64}})
+    assert dst["prompt_tokens"] == 100
+    assert dst["prompt_tokens_details"] == {"cached_tokens": 64}, "缓存字段不能丢"
+
+    # 分多个 chunk 上报：计数累加、details 覆盖到最新
+    main._merge_usage(dst, {"prompt_tokens": 50, "completion_tokens": 3,
+                            "total_tokens": 53,
+                            "prompt_tokens_details": {"cached_tokens": 80}})
+    assert dst["prompt_tokens"] == 150, "整数字段应累加"
+    assert dst["completion_tokens"] == 8
+    assert dst["total_tokens"] == 158
+    assert dst["prompt_tokens_details"]["cached_tokens"] == 80, "details 取最新快照而非累加"
+
+    # 布尔不能被当成整数累加
+    main._merge_usage(dst, {"is_cached": True})
+    main._merge_usage(dst, {"is_cached": True})
+    assert dst["is_cached"] is True
+
+    # 空 dict 不炸
+    assert main._merge_usage({}, {}) == {}
+
+
+def test_usage_scanner_collects_cached_tokens():
+    """直传线的记账扫描器也要收 `prompt_tokens_details.cached_tokens`（网关控制台口径）。"""
+    sys.path.insert(0, str(_ROOT / "app"))
+    import importlib
+    main = importlib.import_module("main")
+
+    sc = main._UsageScanner("chat/completions")
+    assert sc.counts()["cached_tokens"] == 0
+    sc.feed(b'data: {"usage": {"prompt_tokens": 900, "completion_tokens": 12, '
+            b'"prompt_tokens_details": {"cached_tokens": 768}}}\n\n')
+    assert sc.seen
+    c = sc.counts()
+    assert c["prompt_tokens"] == 900
+    assert c["completion_tokens"] == 12
+    assert c["cached_tokens"] == 768, "控制台也应当能看到缓存命中"
+
+    # 没有 details 时不能炸、保持原值
+    sc2 = main._UsageScanner("chat/completions")
+    sc2.feed(b'data: {"usage": {"prompt_tokens": 10, "completion_tokens": 1}}\n\n')
+    assert sc2.counts()["cached_tokens"] == 0
+
+
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`
 # 之前的旁注：运行器只会收集执行到这一行时已经存在的 globals。
 if __name__ == "__main__":

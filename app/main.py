@@ -1345,6 +1345,7 @@ class _UsageScanner:
         self.protocol = protocol
         self.prompt = 0
         self.completion = 0
+        self.cached = 0
         self.seen = False
         self._buf = ""
 
@@ -1384,9 +1385,40 @@ class _UsageScanner:
             if out is not None:
                 self.completion = int(out)
                 self.seen = True
+            # 第三十三轮：顺带把缓存命中量也收进来（此前只记 prompt/completion，
+            #   网关自己的控制台因此也看不到缓存命中；不改变对客户端的任何字节）。
+            det = u.get("prompt_tokens_details")
+            if isinstance(det, dict) and det.get("cached_tokens") is not None:
+                try:
+                    self.cached = int(det["cached_tokens"])
+                except (TypeError, ValueError):
+                    pass
 
     def counts(self) -> dict[str, int]:
-        return {"prompt_tokens": self.prompt, "completion_tokens": self.completion}
+        return {"prompt_tokens": self.prompt, "completion_tokens": self.completion,
+                "cached_tokens": self.cached}
+
+
+def _merge_usage(dst: dict, src: dict) -> dict:
+    """把上游 chunk 的 usage 合并进 dst —— **全字段透传**，不再只挑三个计数。
+
+    第三十三轮修复（2026-09-24，老板报「QwenPaw 缓存命中率恒 0」）：
+    此前流式只累加 prompt/completion/total_tokens，**丢掉 `prompt_tokens_details`
+    （`cached_tokens` 就在里面）**，末尾又用这份残废 usage 覆盖上游原始值发给客户端
+    —— 于是 QwenPaw 永远收不到缓存字段，命中率只能记 0（实测：同一 payload 直接打
+    上游 `cached_tokens=126464`，经网关回给客户端却没了这字段）。
+
+    规则：
+      · 整数字段 → 累加（上游可能分多个 chunk 报，语义是增量）
+      · 非整数（dict/list/str/bool/None，如 `prompt_tokens_details`）→ 后到的覆盖先到的
+        （这类是"整份快照"，累加会立刻算错）
+    """
+    for k, v in (src or {}).items():
+        if isinstance(v, int) and not isinstance(v, bool):
+            dst[k] = int(dst.get(k, 0)) + v
+        else:
+            dst[k] = v
+    return dst
 
 
 def _resolve_passthrough(cfg: GatewayConfig, body: dict, protocol: str):
@@ -1930,11 +1962,11 @@ def _stream_response(request, req, model_id, messages, tools):
                     if chunk.get("done"):
                         break
                     # 功能 8: 累计上游 chunk 的 usage（若有）
+                    # 第三十三轮：改为**全字段**合并 —— 此前只挑 3 个计数，把
+                    #   `prompt_tokens_details.cached_tokens` 丢了，导致客户端（QwenPaw）
+                    #   拿不到缓存字段、命中率恒 0。见 _merge_usage() 的说明。
                     if chunk.get("usage"):
-                        u = chunk["usage"]
-                        stream_usage["prompt_tokens"] = stream_usage.get("prompt_tokens", 0) + int(u.get("prompt_tokens", 0))
-                        stream_usage["completion_tokens"] = stream_usage.get("completion_tokens", 0) + int(u.get("completion_tokens", 0))
-                        stream_usage["total_tokens"] = stream_usage.get("total_tokens", 0) + int(u.get("total_tokens", 0))
+                        _merge_usage(stream_usage, chunk["usage"])
                     # Bug 5 修复: meta 帧在首个 content 到达时才发送 —— 第六轮补齐为合法 chunk
                     #   （缺 id/created/choices 的"元信息帧"会被严格校验的 SDK 直接拒掉）。
                     if chunk.get("choices") and not emitted_meta:
