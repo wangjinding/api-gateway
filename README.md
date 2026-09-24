@@ -46,7 +46,7 @@ api-gateway/
 |---|---|---|---|
 | Agnes AI | `https://api.agnes-ai.cn/v1` | Bearer | `agnes-3.0-flash`、`agnes-2.5-flash`(text，支持图像输入)、`agnes-image-2.5-flash`(image)、`agnes-video-2.5-flash`(video) |
 | 火山方舟 Coding | `https://ark.cn-beijing.volces.com/api/coding/v3` | Bearer | `ark-code-latest`（text） |
-| OpenCode Go | `https://opencode.ai/zen/go/v1` | Bearer + `x-opencode-session` | 17 个文本模型（见下方小节） |
+| OpenCode Go | `https://opencode.ai/zen/go/v1` | Bearer + `x-opencode-session` | 35 个模型，含 **1 个免费**（`space-bunny-free`，见下方小节） |
 
 > OpenCode Go 是每月订阅的编程模型入口（不在订阅内按 token 额外计费）。官方硬性要求每个
 > `/chat/completions` 带 **`x-opencode-session`**（缺失直接 400），并建议专属 `User-Agent`。
@@ -72,12 +72,24 @@ api-gateway/
 >   并重试 3 次、最终回 502（第二十六轮已修：这类非法值入站即 **422**，且**一次都不发上游**）。
 > - 建议用 `uuid4().hex`，或用 `用户:对话` 这类你自己可控且稳定的值。
 >
-> 收录的 17 个文本模型（OpenAI 兼容 `/chat/completions` 线，真实 key 实测 200）：
-> `glm-5.3-flash`、`glm-5.3`、`glm-5.2`、`glm-5.1`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、
-> `longcat-2.0`、`deepseek-v4-pro`、`deepseek-v4-flash`、`deepseek-flash`、`deepseek-v4.1-flash`（视觉）、
-> `deepseek-v4-flash-vision-exp`（视觉）、`mimo-v2.5`、`mimo-v2.5-pro`、`hy4-preview`、`hy3`。
-> OpenCode Go 其余模型走 Anthropic `messages` 或 OpenAI `responses` 契约（本网关为 OpenAI 兼容
-> 转发，暂未接入）；`glm-5`、`kimi-k2.5`、`hy3-preview` 实测上游返回「Model is unavailable」未收录。
+> 收录 **35 个**模型（2026-09-21 按上游 `GET /models` + 官方文档表刷新，每条线的可用性都真实调用验过）：
+>
+> - ⭐ **免费**：`space-bunny-free`（Space Bunny Free）—— 官方价格表标 Free / Free / Free、
+>   额度 Unlimited（限时）；网关里 `display_name` 带「（免费）」标注，模型页一眼能认出来。
+> - `chat/completions` 线：`glm-5.3-flash`、`glm-5.3`、`glm-5.2`、`glm-5.1`、`kimi-k2.7-code`、
+>   `kimi-k2.6`、`longcat-2.0`、`mimo-v2.5`、`mimo-v2.5-pro`、`mimo-v2.6-flash`、`mimo-v2.6-pro`、
+>   `omen-alpha`、`hy4-preview`、`hy3`
+> - `chat/completions` + `messages`：`kimi-k3`、`minimax-m3`、`minimax-m2.5`、`qwen3.8-max`、
+>   `qwen3.8-flash`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`space-bunny-free`
+> - `messages` 线：`minimax-m2.7`
+> - `responses` 线：`grok-4.6`、`grok-4.7`、`gpt-5.6-luna`、`gpt-6-luna`、
+>   `muse-spark-1.3-contributor`、`muse-spark-1.2-contributor`
+> - 三线全通：`deepseek-v4.1-flash`（视觉）、`deepseek-v4-pro`、`deepseek-v4-flash`、
+>   `deepseek-v4-flash-vision-exp`（视觉）、`deepseek-flash`
+>
+> 本轮变化：新增 7 个（`deepseek-flash` / `grok-4.7` / `omen-alpha` / `gpt-6-luna` /
+> `mimo-v2.6-flash` / `mimo-v2.6-pro` / `space-bunny-free`），下线 1 个（`union-alpha`，上游已 retire）。
+> 文档未收但上游有的（`deepseek-flash` / `omen-alpha`）按实测收录并注明。
 
 > Agnes 的图像/视频走自有端点，通过供应商配置里的 `media` 段指定。
 
@@ -173,9 +185,9 @@ providers:
 | `responses` | `POST /v1/responses` | `Authorization: Bearer` |
 
 模型支持哪几条线写在各供应商的 `models[].protocols`；**不声明 = 只认 `chat/completions`**
-（Agnes / 火山方舟即如此，行为与改造前完全一致）。OpenCode Go 的 29 个文档模型按**实测**逐一
-标线（`deepseek-v4.1-flash` / `deepseek-v4-pro` / `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`
-三线全通）。`GET /v1/models` 会回 `protocols`，前端据此标格式。
+（Agnes / 火山方舟即如此，行为与改造前完全一致）。OpenCode Go 的 **35 个模型**按**实测**逐一
+标线（`deepseek-v4.1-flash` / `deepseek-v4-pro` / `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` /
+`deepseek-flash` 三线全通）。`GET /v1/models` 会回 `protocols`，前端据此标格式。
 
 **路由别名 `wjd` 已于第二十七轮（2026-09-18）整体删除**：不再有 `routes` 配置段、不再有
 多模型 fallback、`/v1/models` 里也没有 `type: "route"` 条目。理由：三线直传下模型 id 必须与

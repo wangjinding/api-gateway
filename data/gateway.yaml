@@ -91,6 +91,10 @@ providers:
     # ── 模型 ─────────────────────────────────────────────────
     # models[].protocols = 该模型**能用哪几条线**（入站格式必须与出站一致）。
     #   取值：chat/completions | messages | responses；不写 = 只认 chat/completions。
+    #   **2026-09-21 更新**：按上游 `GET /models`（35 个）+ 官方文档表刷新 —— 新增 7 个
+    #   （deepseek-flash / grok-4.7 / omen-alpha / gpt-6-luna / mimo-v2.6-flash /
+    #   mimo-v2.6-pro / space-bunny-free），下线 1 个（union-alpha），**免费模型标注在
+    #   display_name 里带「（免费）」**（当前只有 space-bunny-free）。
     #   实测口径（2026-09-18 全量扫描 29 个文档模型 × 3 条线，非文档线另做
     #   「流式 + 工具调用」复核，全部 200）：官方文档标注的线**一定**可用；
     #   另外有一批模型实测能走多条线（OpenCode 侧自带跨格式适配），按实测多标：
@@ -152,6 +156,30 @@ providers:
         display_name: "Hy3"
         type: "text"
         protocols: ["chat/completions"]
+      # ── 2026-09-21 按上游 /models + 官方文档表补录 ──────────
+      - id: "mimo-v2.6-flash"
+        display_name: "MiMo V2.6 Flash"
+        type: "text"
+        # 实测：chat 200；messages / responses 都是 503「Endpoint is unavailable」
+        protocols: ["chat/completions"]
+      - id: "mimo-v2.6-pro"
+        display_name: "MiMo V2.6 Pro"
+        type: "text"
+        protocols: ["chat/completions"]
+      - id: "omen-alpha"
+        display_name: "Omen Alpha"
+        type: "text"
+        # 上游新模型（官方文档表还没收）；实测只有 chat 线可用
+        protocols: ["chat/completions"]
+      - id: "space-bunny-free"
+        display_name: "Space Bunny Free（免费）"
+        type: "text"
+        # ★ 免费模型：官方文档价格表 Free / Free / Free，额度 Unlimited（限时）。
+        #   接替已下线的 union-alpha（Union Alpha Free）。
+        #   实测 chat 200、messages 200、responses 503 → 标两条线。
+        #   （models.dev 里另有个 ox-alpha-free 也是 cost 0，但上游 /models 与官方文档
+        #     都没有它，故不收录。）
+        protocols: ["chat/completions", "messages"]
       # ── Chat + Messages 两条线都实测可用 ─────────────────
       - id: "kimi-k3"
         display_name: "Kimi K3"
@@ -206,28 +234,39 @@ providers:
         type: "text"
         vision: true   # 官方标 Vision，支持图像转 token 输入
         protocols: ["chat/completions", "messages", "responses"]
+      - id: "deepseek-flash"
+        display_name: "DeepSeek Flash"
+        type: "text"
+        # 2026-09-21 上游新出现（官方文档表未收）；实测三线全通
+        protocols: ["chat/completions", "messages", "responses"]
       # ── Anthropic Messages 线（文档主推这条）─────────────
       - id: "minimax-m2.7"
         display_name: "MiniMax M2.7"
         type: "text"
         # 实测：messages 线 200，chat / responses 都是 500 → 只标 messages
         protocols: ["messages"]
-      - id: "union-alpha"
-        display_name: "Union Alpha Free"
-        type: "text"
-        # 文档标的 messages 线，但实测上游回 400「Model is unavailable.」
-        #   （限时免费模型，额度/可用性由上游控制）。先按文档收录并标注真实线，
-        #   调用时上游的不可用会原样回给客户端（网关不替它编文案）。
-        protocols: ["messages"]
+      # 2026-09-21：`union-alpha`（Union Alpha Free）已从上游 Go 计划下线（/models 不再返回，
+      #   实测 messages 线回 400「Model is unavailable.」）→ 条目移除；免费位由
+      #   `space-bunny-free` 接替（见上面 chat 段，带「免费」标注）。
       # ── OpenAI Responses 线 ───────────────────────────────
       - id: "grok-4.6"
         display_name: "Grok 4.6"
         type: "text"
         # 实测：responses 200；chat / messages 都是 401 "not supported for format"
         protocols: ["responses"]
+      - id: "grok-4.7"
+        display_name: "Grok 4.7"
+        type: "text"
+        # 2026-09-21 新增；实测 responses 200，chat / messages 都是 503「Endpoint is unavailable」
+        protocols: ["responses"]
       - id: "gpt-5.6-luna"
         display_name: "GPT 5.6 Luna"
         type: "text"
+        protocols: ["responses"]
+      - id: "gpt-6-luna"
+        display_name: "GPT 6 Luna"
+        type: "text"
+        # 2026-09-21 新增；实测 responses 200（官方文档表同样标 responses）
         protocols: ["responses"]
       - id: "muse-spark-1.3-contributor"
         display_name: "Muse Spark 1.3 Contributor"

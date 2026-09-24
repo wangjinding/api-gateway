@@ -1,5 +1,38 @@
 # CHANGELOG
 
+## 2026-09-21 · 刷新 OpenCode Go 模型清单（35 个，标注免费模型）
+
+**老板需求（原话）**：把 ai 网关的 OpenCode Go 的模型更新一下，**免费的也要标注出来**，弄好后重启上线。
+
+### 数据来源
+1. 上游活列表 `GET https://opencode.ai/zen/go/v1/models`（真实 key，35 条）；
+2. 官方文档价格表 / 模型-端点表（`opencode.ai/docs/go`，给出每个模型的**原生线**与**价格**，`Space Bunny Free` 一行价格是 `Free / Free / Free`、额度 `Unlimited`（限时））；
+3. models.dev 的 `opencode-go` 目录（36 条，用于交叉核对价格；其中 `ox-alpha-free` 也是 cost 0，但上游 `/models` 与官方文档都没有它 → 未收录）。
+
+### 变更
+- **新增 7 个**：`deepseek-flash`（三线全通）、`grok-4.7`（responses）、`omen-alpha`（chat）、
+  `gpt-6-luna`（responses）、`mimo-v2.6-flash`（chat）、`mimo-v2.6-pro`（chat）、
+  `space-bunny-free`（chat + messages）。
+- **下线 1 个**：`union-alpha`（Union Alpha Free）—— 上游 `/models` 已不再返回，实测回
+  `400 Model is unavailable.`；条目移除，免费位由 `space-bunny-free` 接替。
+- **免费标注**：`space-bunny-free` 的 `display_name` 写成 `Space Bunny Free（免费）`，模型页/接口
+  一眼可见；yaml 里同时写了官方价格表证据的注释。
+- **协议线**：7 个新模型逐条真实调用验过（chat / messages / responses 各一只瘦请求，
+  `max_tokens=1`，带 `x-opencode-session` 与专属 UA）——上游对不可用的线回
+  `503 {"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable"}}`，
+  据此定 `protocols`。顺手复核了 3 个存量多线模型（`kimi-k3` / `minimax-m3` / `deepseek-v4.1-flash`），
+  标注仍然正确。
+- **README**：供应商表模型数 17 → 35、模型清单小节按「线 + 免费」重写、三线直传小节数字同步。
+
+### 踩坑记录（下次别再犯）
+- 探测上游必须带**专属 UA**（`api-gateway/2.4.0 (jakon opencode-go)`）：用 python urllib 的默认 UA
+  会被 Cloudflare 拦成 `403 error code: 1010`，看起来像"模型不可用"，其实是 UA 被 ban。
+
+### 验证
+- `yaml.safe_load` 通过、`providers.opencode.models` = 35、带「免费」标注 1 个；
+- 全量单测与 `scripts/ci_check.sh` 六道门禁；
+- 重启后线上 `/v1/models` 抽查新模型与免费标注（见提交说明）。
+
 ## 2026-09-18 · 第三十一轮：虚拟模型 id（别名 `wjd`）—— 客户端固定一个模型名，实际打给谁由页面决定
 
 **老板需求（原话）**：设一个 `wjd` 模型 id，路由到指定的模型上（不是"跨格式"）；**管理员**在
