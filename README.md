@@ -44,7 +44,7 @@ api-gateway/
 
 | 供应商 | Base URL | 认证 | 模型 |
 |---|---|---|---|
-| Agnes AI | `https://api.agnes-ai.cn/v1` | Bearer | `agnes-3.0-flash`、`agnes-2.5-flash`(text，支持图像输入)、`agnes-image-2.5-flash`(image)、`agnes-video-2.5-flash`(video) |
+| Agnes AI | `https://api.agnes-ai.cn/v1` | Bearer | 10 个模型：4 text（`agnes-3.0-flash` 旗舰、`agnes-2.5-flash` 支持图像输入）、3 image、3 video；其中 **6 个免费 + 1 个限时免费**（`agnes-video-2.5-flash`，见「模型清单同步」） |
 | 火山方舟 Coding | `https://ark.cn-beijing.volces.com/api/coding/v3` | Bearer | `ark-code-latest`（text） |
 | OpenCode Go | `https://opencode.ai/zen/go/v1` | Bearer + `x-opencode-session` | 35 个模型，含 **1 个免费**（`space-bunny-free`，见下方小节） |
 
@@ -1354,6 +1354,14 @@ python scripts/sync_models.py --apply --log logs/model-sync.log
 - 边界：协议线**只加不砍**（文档给的新线补上，逐条实测出来的线不动）；`PROTECTED` 名单与被别名 /
   `media` 引用的模型 id **永不自动删**（官方文档表收录有滞后，实测 `deepseek-flash` / `omen-alpha`
   上游在服务、文档表还没补），只在报告里点名。
+- **免费标注**（2026-09-24 老板要求：Agnes 也要标）：配置里 `free: true` → 「免费」标签，
+  再加 `free_limited: true` → 「限时免费」标签；`/v1/models` 带出这两个字段，前端「模型与供应商」
+  页把标签放在模型名后面（左右间距统一交给行内 flex `gap`，别再加 margin，否则 14px vs 8px 不齐）。
+  判定源是官方措辞：OpenCode 价格表 `Input/Output = Free`；Agnes 定价页「### 当前优惠」小节里
+  的「当前（均）免费」→ 免费、「限时免费」→ 限时。**注意** Agnes 视频 `agnes-video-2.5` 那条
+  bullet 里的「输入图片前 5 张免费」是计费公式的免费额度、**不算**模型免费，所以判定按 bullet
+  切块 + 只认严格措辞，且只认反引号里的完整 id（`agnes-video-2.5` 是 `agnes-video-2.5-flash` 的
+  子串，字符串包含会串味）。优惠到期 / 官方改口径时，同步会自动把标注**整行撤掉**。
 - 视频默认模型 `agnes.media.video_model_name` **不自动换**：文档对视频模型没有「哪个最新 / 最好」的
   机器可读标记（`agnes-video-v2.0` 当前免费、`agnes-video-2.5` 按输出分辨率计费、`agnes-video-2.5-flash`
   限时免费），自动切会直接改变线上视频行为。脚本只做两件事：保证它不被自动删（`media` 引用的 id 受保护），

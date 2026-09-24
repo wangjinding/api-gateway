@@ -132,6 +132,12 @@ class ModelInfo:
     #   不参与路由/限流/熔断，也不影响成本估算（额度由上游控制，网关无法感知）。
     #   配置写法：`models[]` 里加 `free: true`（OpenCode Go 当前只有 space-bunny-free）。
     free: bool = False
+    # 2026-09-24（老板要求：Agnes 也要标免费 / 限时免费）: 免费是否**带期限**。
+    #   语义：`free: true` + `free_limited: false` → 免费；`free_limited: true` → 限时免费。
+    #   来源是 Agnes 定价页「### 当前优惠」小节的措辞（「当前免费」vs「当前限时免费」），
+    #   由 scripts/sync_models.py 按文档自动维护（撤标注时整行删掉）。
+    #   同样只是标注：/v1/models 带出、前端标签文案据此切换，不参与路由/限流/计费。
+    free_limited: bool = False
     # 第二十五轮（模型参数硬约束）: 该模型**必须用**的上游参数，发送前强制覆盖客户端传值。
     #   背景：OpenCode Go 的 kimi-k2.7-code 只接受 temperature=1，客户端传 0（含一键测速的
     #   探针，它固定发 temperature=0）会被上游 400：
@@ -392,6 +398,9 @@ class GatewayConfig:
                     # 2026-09-21: 免费模型标注（官方标 Free）。前端「能力」列打「免费」标签，
                     #   /v1/models 也带出该字段；不参与路由/限流/计费。
                     "free": bool(m.free),
+                    # 2026-09-24: 「免费」还是「限时免费」—— 前端标签文案据此切换
+                    #   （免费 / 限时免费），也带进 /v1/models 让接口调用方知道优惠可能到期。
+                    "free_limited": bool(m.free_limited),
                     "provider": pkey,
                     "provider_name": pconfig.name,
                     # 第二十五轮: 暴露模型级强制参数（如 {"temperature": 1}）。
@@ -783,6 +792,7 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
             ModelInfo(id=m.get("id", ""), display_name=m.get("display_name", ""),
                       type=m.get("type", "text"), vision=_opt_bool(m.get("vision"), "providers.*.models.*.vision", False),
                       free=_opt_bool(m.get("free"), "providers.*.models.*.free", False),
+                      free_limited=_opt_bool(m.get("free_limited"), "providers.*.models.*.free_limited", False),
                       params=_parse_model_params(
                           m.get("params"), f"providers.{pkey}.models[{idx}].params"),
                       protocols=_parse_protocols(

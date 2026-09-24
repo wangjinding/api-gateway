@@ -27,21 +27,26 @@ providers:
       - id: "agnes-3.0-flash"
         display_name: "Agnes 3.0 Flash"
         type: "text"
+        free: true     # 2026-09-24 自动同步：文档「当前优惠」写当前免费（scripts/sync_models.py）
         # 第十三轮: Agnes 3.0 Flash 文档「输入模态：文本、图像 URL」→ 支持视觉（对话带图）。
         #   实测 data:image/png;base64,... 也能识别。
         vision: true
       - id: "agnes-2.5-flash"
         display_name: "Agnes 2.5 Flash"
         type: "text"
+        free: true     # 2026-09-24 自动同步：文档「当前优惠」写当前免费（scripts/sync_models.py）
         # Agnes 2.5 Flash（2.0 升级版）：OpenAI 兼容 /v1/chat/completions，支持图像 URL 输入与工具调用，
         #   上下文 512K / 最大输出 65.5K；当前定价暂免（¥0/百万）。参见官方文档 agnes-25-flash。
         vision: true
       - id: "agnes-image-2.5-flash"
         display_name: "Agnes Image 2.5 Flash"
         type: "image"
+        free: true     # 2026-09-24 自动同步：文档「当前优惠」写当前免费（scripts/sync_models.py）
       - id: "agnes-video-2.5-flash"
         display_name: "Agnes Video 2.5 Flash"
         type: "video"
+        free: true     # 2026-09-24 自动同步：文档「当前优惠」写当前限时免费（scripts/sync_models.py）
+        free_limited: true   # 限时免费；文档改口径后同步会自动撤掉这行
       # 2026-09-24 自动同步：官方文档新增（scripts/sync_models.py）
       - id: "agnes-2.5-pro"
         display_name: "Agnes 2.5 Pro"
@@ -56,10 +61,12 @@ providers:
       - id: "agnes-image-2.0-flash"
         display_name: "Agnes Image 2.0 Flash"
         type: "image"
+        free: true     # 2026-09-24 自动同步：文档「当前优惠」写当前免费（scripts/sync_models.py）
       # 2026-09-24 自动同步：官方文档新增（scripts/sync_models.py）
       - id: "agnes-image-2.1-flash"
         display_name: "Agnes Image 2.1 Flash"
         type: "image"
+        free: true     # 2026-09-24 自动同步：文档「当前优惠」写当前免费（scripts/sync_models.py）
       # 2026-09-24 自动同步：官方文档新增（scripts/sync_models.py）
       - id: "agnes-video-2.5"
         display_name: "Agnes Video 2.5"
@@ -68,6 +75,7 @@ providers:
       - id: "agnes-video-v2.0"
         display_name: "Agnes Video V2.0"
         type: "video"
+        free: true     # 2026-09-24 自动同步：文档「当前优惠」写当前免费（scripts/sync_models.py）
 
   volc_engine:
     name: "火山方舟 Coding Plan"

@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## 2026-09-24 · Agnes 免费 / 限时免费标注 + 免费标签间距对齐
+
+**老板需求**：① Agnes 的模型也要标「免费」或「限时免费」；② 标注和模型名的间隔不一样，优化一下。
+
+### 交付
+| 部分 | 内容 |
+| --- | --- |
+| 判定口径 | Agnes 定价页「### 当前优惠」小节：`当前（均）免费` → 免费；`当前限时免费` → 限时免费。按 bullet 切块 + 严格措辞，**只认反引号里的完整 id**（`agnes-video-2.5` 是 `agnes-video-2.5-flash` 的子串），`输入图片前 5 张免费` 这类计费额度不算模型免费 |
+| 配置 | `free: true`（免费）+ 新增 `free_limited: true`（限时免费）。落盘 7 条：`3.0-flash` / `2.5-flash` / 3 个 `image-*-flash` / `video-v2.0` = 免费，`video-2.5-flash` = 限时免费；只 +8 行，手写注释一行未动 |
+| 每日同步 | `scripts/sync_models.py` 新增 `_agnes_free_map()` / `_set_agnes_free()`：免费标注纳入漂移比对与 `--apply` 落盘（`free` + `free_limited`），官方改口径时**整行撤掉**标注；回读校验新增 Agnes 免费位检查 |
+| 后端 | `ModelInfo.free_limited` 字段 + `/v1/models` 带出 `free_limited`（别名随目标继承） |
+| 前端 | 标签文案 `免费` / `限时免费`（中英各 2 个新键，i18n 755/755 对称）；间距修正：`.st-row .name-free { margin-left: 0 }` |
+| 测试 | 新增 `test_agnes_free_map_rules`、`test_agnes_free_apply_and_revoke_round_trip`（加标注 / 限时 / 撤标注 / 幂等 / 相邻注释不被碰）；**195 passed / 0 failed** |
+
+### 间距问题的实测根因
+`.st-row` 是 flex（`gap: 8px`），而 `.name-free` 又给了 `margin-left: 6px` —— 标签左侧 8+6=**14px**、
+右侧只有 **8px**，跟其它行「模型名 → 供应商名」的 8px 节奏对不上。用同源最小页实测：
+修前 `14 / 8`，修后 `8 / 8`（且与无标签行的 8px 一致）。表格单元格是行内排布、没有 flex gap，
+所以那边保留 `margin-left: 6px`，只对测速行归零。
+
+### 上线
+- 配置：`--apply` 落盘（备份 `data/gateway.yaml.bak`，权限 600，回读校验通过），`hot_reload` 自动生效。
+- 后端：`supervisorctl restart api-gateway:api-gateway_00`（pid 3465113，health 200）。
+- 前端：`npm run build` 覆盖 `frontend/dist`，线上 `/web` 已换 `index-CkVhRx-u.js` / `Models-RN5bN2Hd.js`（旧 chunk 404），入口包里能查到「限时免费」。
+- 实测 `/v1/models` 载荷：Agnes 6 个免费 + `agnes-video-2.5-flash` 限时免费 + 3 个付费档无标注；`space-bunny-free` 免费标注不受影响。
+
 ## 2026-09-24 · 模型清单每日同步（全量落盘）+ 视频默认模型口径 + 修「空 plan 也写盘」
 
 **老板需求**：网关的模型清单要和上游官方文档**同步**——文档新增的加进去、下线的删掉、

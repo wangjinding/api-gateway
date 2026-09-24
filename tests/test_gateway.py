@@ -5101,6 +5101,98 @@ def test_sync_plan_is_empty_drills_into_provider_buckets():
     assert sm.plan_is_empty({**empty, "free_set": {"m": True}}) is False
 
 
+def test_agnes_free_map_rules():
+    """Agnes 免费标注解析（2026-09-24 老板要求 Agnes 也标免费 / 限时免费）。
+
+    只用文档里的**严格措辞**判定，且必须按 bullet/段落切块 + 只认反引号里的完整 id：
+      · 「当前均免费」「当前免费」→ 免费；「限时免费」→ 限时免费
+      · 「输入图片前 5 张免费」这种计费公式附注 **不算** 模型免费（视频 2.5 就是这样）
+      · `agnes-video-2.5` 是 `agnes-video-2.5-flash` 的子串，不能互相串味
+    """
+    sys.path.insert(0, str(_ROOT / "scripts"))
+    import sync_models as sm
+
+    ids = {"agnes-3.0-flash", "agnes-2.5-flash", "agnes-video-2.5", "agnes-video-2.5-flash",
+           "agnes-video-v2.0", "agnes-2.5-pro"}
+
+    real = ("## 视频模型\n### 当前优惠\n"
+            "* `agnes-video-v2.0` 当前免费。\n"
+            "* `agnes-video-2.5` 按输出视频分辨率和总计费时长计费；输入图片前 5 张免费，第 6 张起计费。\n"
+            "* `agnes-video-2.5-flash` 采用相同计费公式，当前限时免费。\n"
+            "### 计费规则\n输入图片前 5 张免费。\n")
+    got = sm._agnes_free_map(real, ids)
+    assert got == {"agnes-video-v2.0": True, "agnes-video-2.5-flash": "limited"}, got
+
+    # 改口径 → 不再免费（否则同步会一直把「免费」标签留在配置里）
+    changed = ("### 当前优惠\n* `agnes-3.0-flash` 当前按刊例价计费，暂无折扣。\n"
+               "* `agnes-2.5-flash` 当前均免费。\n")
+    assert sm._agnes_free_map(changed, ids) == {"agnes-2.5-flash": True}
+
+    # 下一小节里的「免费」不能串进本轮判定
+    boundary = "### 当前优惠\n* `agnes-video-v2.0` 当前免费。\n### 计费规则\n输入图片前 5 张免费。\n"
+    assert sm._agnes_free_map(boundary, ids) == {"agnes-video-v2.0": True}
+
+
+def test_agnes_free_apply_and_revoke_round_trip():
+    """agnes 免费标注落盘：加标注 / 限时 / 撤标注都要能改对，且不碰相邻手写注释。"""
+    import yaml as _yaml
+    sys.path.insert(0, str(_ROOT / "scripts"))
+    import sync_models as sm
+
+    text = (
+        "providers:\n"
+        "  agnes:\n"
+        '    name: "Agnes"\n'
+        "    models:\n"
+        '      - id: "agnes-3.0-flash"\n'
+        '        display_name: "Agnes 3.0 Flash"\n'
+        '        type: "text"\n'
+        "        # 手写注释：别动我\n"
+        '      - id: "agnes-video-2.5-flash"\n'
+        '        display_name: "Agnes Video 2.5 Flash"\n'
+        '        type: "video"\n'
+        '      - id: "agnes-video-v2.0"\n'
+        '        display_name: "Agnes Video V2.0"\n'
+        '        type: "video"\n'
+        "        free: true     # 旧标注\n"
+    )
+    date = "2026-09-24"
+
+    def run(src, free_map):
+        plan = {"add": {"opencode": {}, "agnes": {}}, "remove": {"opencode": [], "agnes": []},
+                "price_set": {}, "price_add": {}, "proto_add": {}, "free_set": {},
+                "agnes_free": dict(free_map)}
+        new = sm.apply_plan(src, plan, date)
+        assert sm.verify(new, _yaml.safe_load(src), plan) == [], "回读校验必须全过"
+        return new, _yaml.safe_load(new)["providers"]["agnes"]["models"]
+
+    # ① 加标注：普通免费 + 限时免费
+    text, models = run(text, {"agnes-3.0-flash": True, "agnes-video-2.5-flash": "limited"})
+    by = {m["id"]: m for m in models}
+    assert sm._cfg_free_state(by["agnes-3.0-flash"]) is True
+    assert "free_limited" not in by["agnes-3.0-flash"]
+    assert sm._cfg_free_state(by["agnes-video-2.5-flash"]) == "limited"
+    assert "别动我" in text, "相邻手写注释必须原样保留"
+    assert "旧标注" in text, "没在本次动作里的模型，标注行不许动"
+
+    # ② 撤标注（文档改口径）+ 限时 → 普通免费
+    text, models = run(text, {"agnes-video-v2.0": None, "agnes-video-2.5-flash": True})
+    by = {m["id"]: m for m in models}
+    assert sm._cfg_free_state(by["agnes-video-v2.0"]) is None
+    assert not [k for k in by["agnes-video-v2.0"] if k.startswith("free")], "撤标注要整行删干净"
+    assert "旧标注" not in text
+    assert sm._cfg_free_state(by["agnes-video-2.5-flash"]) is True
+    assert "free_limited" not in by["agnes-video-2.5-flash"], "限时行要跟着删"
+    assert sm._cfg_free_state(by["agnes-3.0-flash"]) is True, "不相关的模型不能被顺手改掉"
+
+    # ③ 幂等：同一份动作重放，结果逐字节一致
+    plan = {"add": {"opencode": {}, "agnes": {}}, "remove": {"opencode": [], "agnes": []},
+            "price_set": {}, "price_add": {}, "proto_add": {}, "free_set": {},
+            "agnes_free": {"agnes-3.0-flash": True}}
+    assert sm.apply_plan(sm.apply_plan(text, plan, date), plan, date) == \
+        sm.apply_plan(text, plan, date)
+
+
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`
 # 之前的旁注：运行器只会收集执行到这一行时已经存在的 globals。
 if __name__ == "__main__":

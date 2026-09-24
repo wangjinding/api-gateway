@@ -34,8 +34,9 @@
                  挂锁标注 + 悬浮说明，省掉「为什么我传的参数不生效」这类困惑。 -->
             <Icon v-if="m.paramNote" name="lock" :size="12" class="plock" :title="m.paramNote" />
             <span class="code">{{ m.id }}</span>
-            <!-- 2026-09-21（老板要求）：免费标志直接跟在模型名后面 -->
-            <span v-if="m.free" class="pill free name-free" :title="t('models.freeHint')">{{ t('models.freeTag') }}</span>
+            <!-- 2026-09-21（老板要求）：免费标志直接跟在模型名后面
+                 2026-09-24：区分「免费」与「限时免费」（Agnes 视频 2.5 Flash 是限时档） -->
+            <span v-if="m.free" class="pill free name-free" :title="freeHint(m)">{{ freeText(m) }}</span>
             <!-- 支持的格式不在这里铺标签：这行还要放供应商/延迟/测速按钮，窄卡放不下第三颗
                  （悬停整行可见格式 + 本次测速走的线，见 rowTitle）。权威展示在下方表格的
                  「支持的格式」列。 -->
@@ -136,8 +137,9 @@
         <el-table-column :label="t('models.id')" min-width="215">
           <template #default="{ row }">
             <span class="code">{{ row.id }}</span>
-            <!-- 2026-09-21（老板要求）：免费标志直接跟在模型名后面 -->
-            <span v-if="row.free" class="pill free name-free" :title="t('models.freeHint')">{{ t('models.freeTag') }}</span>
+            <!-- 2026-09-21（老板要求）：免费标志直接跟在模型名后面
+                 2026-09-24：区分「免费」与「限时免费」 -->
+            <span v-if="row.free" class="pill free name-free" :title="freeHint(row)">{{ freeText(row) }}</span>
           </template>
         </el-table-column>
         <el-table-column :label="t('models.type')" width="90">
@@ -383,6 +385,8 @@ const textModelRows = computed(() =>
     vision: !!m.vision,
     // 免费模型（2026-09-21）：与表格「能力」列同一份数据
     free: !!m.free,
+    // 免费是否带期限（2026-09-24）：Agnes 的限时免费档，标签文案换成「限时免费」
+    free_limited: !!m.free_limited,
     // 模型级强制参数（第二十五轮）：被上游固定住的采样参数，用挂锁标注出来。
     paramNote: paramKeys(m).length ? paramNote(m) : '',
     // 支持的格式（第二十七轮）：悬浮这一行就能看到「能用哪几条线 + 本次测速走的哪条」
@@ -398,6 +402,16 @@ function rowTitle(m: any): string {
   return p
     ? `${t('models.protocolHintRow', { lines })}· ${t('models.probedLine', { p })}`
     : t('models.protocolHintRow', { lines })
+}
+
+// ── 免费标注（2026-09-24 老板：Agnes 也要标免费 / 限时免费）──
+// 后端 /v1/models 给 free（是否免费）+ free_limited（免费是否带期限，来自官方
+// 「当前限时免费」措辞）。限时档文案单独一个，别让人以为它会一直免费。
+function freeText(m: any): string {
+  return m && m.free_limited ? t('models.freeLimitedTag') : t('models.freeTag')
+}
+function freeHint(m: any): string {
+  return m && m.free_limited ? t('models.freeLimitedHint') : t('models.freeHint')
 }
 
 // ── 模型级强制参数（第二十五轮）──
@@ -465,7 +479,12 @@ onMounted(load)
 .plock { color: var(--warn); }
 /* 免费模型：绿色系，跟「视觉」(主题色) / 「参数固定」(橙) 区分开；跟在模型名后面 */
 .pill.free { background: rgba(16, 185, 129, 0.14); color: #059669; }
+/* 免费标注的间距（2026-09-24 老板：间隔不一样）——
+   表格单元格里是行内排布、没有 flex gap，靠这个 margin 与模型名分开；
+   测速行是 flex（.st-row gap: 8px），必须把 margin 归零：否则标签左侧 8+6=14px、
+   右侧只有 8px，跟其它行「模型名 → 供应商名」的节奏对不上。左右统一由 gap 决定。 */
 .name-free { margin-left: 6px; vertical-align: middle; }
+.st-row .name-free { margin-left: 0; }
 /* 支持的格式：三条线是并列关系（没有谁更优），统一用主题色弱底，
    不用 ok/warn/err —— 否则「messages」看起来像警告、「responses」像被禁用。 */
 .proto {

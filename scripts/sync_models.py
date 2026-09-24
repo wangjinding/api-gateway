@@ -116,11 +116,61 @@ def _price_of(cell: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
+# 免费状态判定用的严格措辞（2026-09-24 老板要求 Agnes 也标免费 / 限时免费）
+_AGNES_LIMITED_RE = re.compile(r"限时免费")
+_AGNES_FREE_RE = re.compile(r"(当前免费|当前均免费|均免费)")
+_AGNES_BULLET_RE = re.compile(r"^\s*[*\-]\s+")
+_AGNES_TICKED_RE = re.compile(r"`([a-z][a-z0-9.\-]*)`")
+
+
+def _agnes_free_map(md: str, known: set[str]) -> dict[str, object]:
+    """从 Agnes 文档的「### 当前优惠」小节判定每个模型的免费状态。
+
+    返回 `{model_id: True | "limited"}`，**只收录文档明说免费的**；没提的模型不在结果里
+    （= 按收费处理，前端不打标）。
+
+    判定口径（按 bullet / 段落**切块**，块内用**严格措辞**）：
+      ① 块里出现「限时免费」                    → "limited"（限时免费）
+      ② 块里出现「当前免费 / 当前均免费 / 均免费」 → True（免费）
+      ③ 其它（含「按…计费」「刊例价」等）        → 不算免费
+
+    为什么不能全文扫「免费」：视频 `agnes-video-2.5` 那条 bullet 写着「输入图片前 5 张免费」——
+    那是计费公式里的免费额度说明，不是模型免费。所以必须按块 + 严格措辞，不能关键词泛扫。
+    另外块内提 id 必须取**反引号里的完整 id**：`agnes-video-2.5` 是 `agnes-video-2.5-flash`
+    的子串，用字符串包含会把两者搞混。
+    """
+    out: dict[str, object] = {}
+    # 逐个「### 当前优惠」小节（正文到下一个标题为止）
+    for m in re.finditer(r"^#{3,4}\s*当前优惠\s*$", md, flags=re.M):
+        body = md[m.end():]
+        nxt = re.search(r"^#{2,4}\s+\S", body, flags=re.M)
+        if nxt:
+            body = body[:nxt.start()]
+        chunk: list[str] = []
+        for ln in body.splitlines() + [""]:
+            if _AGNES_BULLET_RE.match(ln) or not ln.strip():
+                if chunk:                       # 块结束 → 判定
+                    text = " ".join(chunk)
+                    state: object = ("limited" if _AGNES_LIMITED_RE.search(text)
+                                     else True if _AGNES_FREE_RE.search(text) else None)
+                    if state is not None:
+                        for mid in _AGNES_TICKED_RE.findall(text):
+                            if mid in known:
+                                out[mid] = state
+                    chunk = []
+                if _AGNES_BULLET_RE.match(ln):
+                    chunk = [ln]
+            else:
+                chunk.append(ln)
+    return out
+
+
 def fetch_agnes() -> dict[str, dict]:
-    """返回 {model_id: {section, type, input, output}}（input/output = 现价，¥/M，仅文本模型有）。
+    """返回 {model_id: {section, type, input, output, free}}（input/output = 现价，¥/M，仅文本模型有）。
 
     页面是 JSX 风格的 HTML 表：模型列有的带 rowSpan（一行跨多行计费项）、有的单行自带，
     所以按 `<tr>` 块解析，**第一格是模型 id 就认模型行，否则归到上一个模型**。
+    `free`（免费标注）另从「### 当前优惠」小节判定，见 `_agnes_free_map`。
     """
     md = _get(AGNES_PRICING_URL)
     out: dict[str, dict] = {}
@@ -140,7 +190,7 @@ def fetch_agnes() -> dict[str, dict]:
             if _MODEL_ID_RE.fullmatch(first):
                 cur = first
                 out.setdefault(cur, {"section": title, "type": AGNES_SECTION_TYPE[title],
-                                     "input": None, "output": None})
+                                     "input": None, "output": None, "free": None})
                 continue
             if not cur:
                 continue
@@ -153,6 +203,8 @@ def fetch_agnes() -> dict[str, dict]:
                 out[cur]["output"] = price
     if not out:
         raise RuntimeError("Agnes 定价页没解析出模型（页面可能改版）")
+    for mid, state in _agnes_free_map(md, set(out)).items():
+        out[mid]["free"] = state
     return out
 
 
@@ -169,6 +221,13 @@ def _references(cfg: dict) -> dict[str, str]:
             if isinstance(val, str) and val:
                 refs[val] = f"{prov}.media.{key}"
     return refs
+
+
+def _cfg_free_state(m: dict) -> object:
+    """配置里一个模型的免费状态：True（免费）/ "limited"（限时免费）/ None（没标）。"""
+    if m.get("free_limited"):
+        return "limited"
+    return True if m.get("free") else None
 
 
 def _split_removed(prov: str, cur: dict, doc: dict, refs: dict) -> tuple[list[str], dict[str, str]]:
@@ -243,7 +302,13 @@ def diff(cfg: dict, oc_doc: dict, agnes_doc: dict) -> dict:
     #   不自动换。文档对三个视频模型没有任何「哪个最新 / 最好」的机器可读标记
     #   （v2.0 当前免费、2.5 按输出分辨率计费、2.5-flash 限时免费），自动挑一个切上去
     #   会直接改变线上视频行为。换默认由老板点模型名，改一行配置。
+    # 免费标注漂移（2026-09-24 老板要求：Agnes 也要标免费 / 限时免费）——
+    #   口径见 _agnes_free_map；这里只比「文档明说免费」的那批，文档没提的不打标。
+    ag_free_drift = [{"id": mid, "cfg": _cfg_free_state(ag_cur[mid]), "doc": meta["free"]}
+                     for mid, meta in sorted(agnes_doc.items())
+                     if mid in ag_cur and _cfg_free_state(ag_cur[mid]) != meta["free"]]
     vid_cfg = ((providers.get("agnes") or {}).get("media") or {}).get("video_model_name")
+    report["agnes"]["free_drift"] = ag_free_drift
     report["agnes"]["video_default"] = {
         "cfg": vid_cfg,
         "in_doc": bool(vid_cfg) and vid_cfg in agnes_doc,
@@ -297,6 +362,11 @@ def render(report: dict) -> str:
         lines.append("  定价漂移（网关 pricing.per_model vs 文档现价，¥/M）→ 落盘更新：")
         for d in real_drift:
             lines.append(f"    ~ {d['id']}  网关={d['cfg']}  文档={d['doc']}")
+    if ag.get("free_drift"):
+        lines.append("  免费标注漂移（文档「当前优惠」vs 网关 free / free_limited）→ 落盘更新：")
+        label = {True: "免费", "limited": "限时免费", None: "（无标注）"}
+        lines += [f"    ~ {d['id']}  网关={label.get(d['cfg'], d['cfg'])}"
+                  f"  文档={label.get(d['doc'], d['doc'])}" for d in ag["free_drift"]]
     vd = ag.get("video_default") or {}
     if vd.get("cfg"):
         mark = ("✓ 文档里还在" if vd.get("in_doc")
@@ -304,7 +374,7 @@ def render(report: dict) -> str:
         lines.append(f"  视频默认模型 media.video_model_name：{vd['cfg']} —— {mark}")
         lines.append(f"    文档视频清单：{', '.join(vd.get('doc_videos') or []) or '（无）'}"
                      "   ← 换默认由老板点模型名，改一行配置（不自动挑）")
-    if not any(ag[k] for k in ("added", "removed", "price_drift")):
+    if not (any(ag[k] for k in ("added", "removed", "free_drift")) or real_drift):
         lines.append("  无漂移 ✓")
     return "\n".join(lines)
 
@@ -421,6 +491,12 @@ def _render_model_block(provider: str, mid: str, meta: dict, date: str) -> list[
             out.append("        free: true     # 官方价格表标 Free\n")
     elif meta.get("input") is not None:
         out.append(f"        # 文档现价 ¥{meta['input']:g}/M 输入、¥{meta['output']:g}/M 输出\n")
+    if provider == "agnes" and meta.get("free"):
+        limited = meta["free"] == "limited"
+        out.append(f"        free: true     # {date} 自动同步：文档「当前优惠」写当前"
+                   f"{'限时' if limited else ''}免费\n")
+        if limited:
+            out.append("        free_limited: true   # 限时免费；文档改口径后同步会自动撤掉这行\n")
     return out
 
 
@@ -455,17 +531,49 @@ def _set_free(seg: list[str], want: bool, date: str) -> list[str]:
     return seg
 
 
+# Agnes 的免费标注行（撤标注时要整行删掉，注释是行内的，跟着走）
+_AGNES_FREE_LINE_RE = re.compile(r"^\s*(free|free_limited):\s*")
+
+
+def _set_agnes_free(seg: list[str], want: object, date: str) -> list[str]:
+    """按文档写 Agnes 模型的免费标注（2026-09-24 老板要求 Agnes 也要标）。
+
+    want = `True`（免费）/ `"limited"`（限时免费）/ `None`（文档没说免费 → 撤掉标注）。
+    写法：`free: true`，限时再加一行 `free_limited: true`（前端据此显示「限时免费」）。
+    撤标注时**整行删掉**（不留 `free: false` 垃圾行 —— Agnes 十个模型里大多数不免费，
+    留 false 会把配置撑起来）；原行内的手写注释也随行删除，报告里会说明这次撤了哪些。
+    """
+    out = [ln for ln in seg if not _AGNES_FREE_LINE_RE.match(ln)]
+    if want is None:
+        return out
+    limited = want == "limited"
+    note = (f"{date} 自动同步：文档「当前优惠」写当前{'限时' if limited else ''}免费"
+            "（scripts/sync_models.py）")
+    extra = [f"        free: true     # {note}\n"]
+    if limited:
+        extra.append("        free_limited: true   # 限时免费；文档改口径后同步会自动撤掉这行\n")
+    for i, ln in enumerate(out):
+        if re.match(r"^\s*type:\s*", ln):
+            return out[:i + 1] + extra + out[i + 1:]
+    for i, ln in enumerate(out):
+        if re.match(r"^\s*-\s*id:\s*", ln):
+            return out[:i + 1] + extra + out[i + 1:]
+    return out
+
+
 def build_plan(report: dict, cfg: dict, oc_doc: dict, agnes_doc: dict) -> dict:
     """把报告翻成可执行动作（纯计算，不碰磁盘）。"""
     docs = {"opencode": oc_doc, "agnes": agnes_doc}
     pricing = (cfg.get("pricing") or {}).get("per_model") or {}
     plan: dict = {"add": {}, "remove": {}, "price_set": {}, "price_add": {},
-                  "proto_add": {}, "free_set": {}}
+                  "proto_add": {}, "free_set": {}, "agnes_free": {}}
     for prov in SYNC_PROVIDERS:
         plan["add"][prov] = {m["id"]: m for m in report[prov]["added"]}
         plan["remove"][prov] = list(report[prov]["removed"])
     plan["proto_add"] = {d["id"]: d["doc"] for d in report["opencode"]["protocol_drift"]}
     plan["free_set"] = {d["id"]: d["doc_free"] for d in report["opencode"]["free_drift"]}
+    # Agnes 的免费标注（True / "limited" / None）单独一条 plan，走 _set_agnes_free
+    plan["agnes_free"] = {d["id"]: d["doc"] for d in report["agnes"]["free_drift"]}
     for mid, meta in sorted(agnes_doc.items()):
         if meta["input"] is None:                     # 图片/视频模型文档没给单价
             continue
@@ -489,7 +597,8 @@ def plan_is_empty(plan: dict) -> bool:
     for prov in SYNC_PROVIDERS:
         if plan["add"].get(prov) or plan["remove"].get(prov):
             return False
-    return not any(plan.get(k) for k in ("price_set", "price_add", "proto_add", "free_set"))
+    return not any(plan.get(k) for k in
+                   ("price_set", "price_add", "proto_add", "free_set", "agnes_free"))
 
 
 def render_plan(plan: dict, date: str) -> str:
@@ -503,6 +612,9 @@ def render_plan(plan: dict, date: str) -> str:
         lines.append(f"  补协议线 opencode/{mid} += {proto}")
     for mid, want in sorted(plan["free_set"].items()):
         lines.append(f"  免费标记 opencode/{mid} → {want}")
+    _flabel = {True: "免费", "limited": "限时免费", None: "撤掉标注"}
+    for mid, want in sorted(plan.get("agnes_free", {}).items()):
+        lines.append(f"  免费标注 agnes/{mid} → {_flabel.get(want, want)}")
     for mid, spec in sorted(plan["price_set"].items()):
         lines.append(f"  改价 {mid} {spec['old']} → {spec['new']}")
     for mid, want in sorted(plan["price_add"].items()):
@@ -558,6 +670,16 @@ def apply_plan(text: str, plan: dict, date: str) -> str:
             if mid in plan["free_set"]:
                 seg = _set_free(seg, plan["free_set"][mid], date)
             lines[s:e] = seg
+
+    # 3b) Agnes 的免费标注（免费 / 限时免费 / 撤标注）——同一套倒序处理，
+    #     字段插在块的 type: 之后，撤标注整行删。放在 3) 之后重取块表，避免下标串位。
+    if plan.get("agnes_free"):
+        blocks = _find_model_blocks(lines, "agnes")
+        for mid in sorted(plan["agnes_free"], key=lambda m: blocks.get(m, (0, 0))[0], reverse=True):
+            if mid not in blocks:
+                continue
+            s, e = blocks[mid]
+            lines[s:e] = _set_agnes_free(lines[s:e], plan["agnes_free"][mid], date)
 
     # 4) 定价：改价 / 补价 / 删掉被删模型的价
     gone = {m for prov in SYNC_PROVIDERS for m in plan["remove"].get(prov) or []}
@@ -632,6 +754,14 @@ def verify(new_text: str, cfg_before: dict, plan: dict) -> list[str]:
     for mid, want in plan["free_set"].items():
         if bool(oc2.get(mid, {}).get("free")) != bool(want):
             problems.append(f"免费标记 {mid} 没改成 {want}")
+    # Agnes 的免费标注：True（免费）/ "limited"（限时免费）/ None（该没有标注）
+    ag2 = {m["id"]: m for m in (cfg2.get("providers", {}).get("agnes") or {}).get("models", [])}
+    for mid, want in plan.get("agnes_free", {}).items():
+        got = _cfg_free_state(ag2.get(mid, {}))
+        if got != want:
+            problems.append(
+                f"免费标注 {mid} 没写成 {{True: '免费', 'limited': '限时免费', None: '无标注'}}"
+                f"[{want!r}]（现 {got!r}）")
 
     # 定价
     pr2 = ((cfg2.get("pricing") or {}).get("per_model") or {})
