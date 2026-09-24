@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## 2026-09-21 · 用另一把 Zen API Key 再验免费档（结论不变：客户端锁定，写不进去）
+
+**老板需求**：用新给的 `oc_sk_…` 这把 key 去调免费档试试。
+
+### 实测（三组对照，同一台机器、同一时段）
+| 端点 / 模型 | 结果 |
+| --- | --- |
+| `GET https://opencode.ai/zen/v1/models`（新 key） | **200，80 个模型**（含 9 个 `*-free`）→ key 本身有效 |
+| Zen 端点调 8 个 `*-free`（`mimo-v2.5-free`、`mimo-v2.6-flash-free`、`ling-3.0-flash-fin-free`、`muse-spark-1.2/1.3-contributor-free`、`nemotron-3-ultra-free`、`nemotron-3.5-lightning-free`、`jev-1.13-free`） | **全部 `403 FreeTierError: OpenCode's free tier can only be used from within OpenCode`** |
+| Zen 端点调付费模型（`deepseek-v4.1-flash` / `kimi-k3` / `minimax-m3`） | **全部 `402 Insufficient account funds`**（Zen 账户没余额） |
+| Go 端点（同一把新 key）调 `space-bunny-free` / `deepseek-v4.1-flash` | **都 200**（这把 key 同样在 Go 计划内） |
+
+### 结论（与上一轮一致，这次换 key 复核过）
+1. **免费档（`*-free`）是服务端「客户端锁定」**：换 key 无效，只认 OpenCode 自己的客户端 ——
+   不是权限配置问题。**本网关永远调不到**，所以**一个都没写入**（按老板「可以用才写入」的条件）。
+2. **在线免费清单只有 9 个**（models.dev 那 29 个里大部分已下线，实测 `400 Model is unavailable`）；
+   其中**唯一能用的 `space-bunny-free` 之所以能用，是因为它在 Go 计划里**（已经收录，`free: true`）。
+3. Zen 账户**余额为 0**，付费 Zen 模型一律 402 → 现在加 Zen 供应商也没意义。
+4. **没有尝试**伪装 OpenCode 客户端的 UA/签名去绕过 —— 那是官方明写的使用限制，绕过不合适。
+
 ## 2026-09-21 · 免费标志跟随模型名 + 轮换 Agnes Key + 复测 Zen 免费档（结论：一个都用不了）
 
 **老板需求**：① 免费标志直接放在模型名称后面；② Agnes 供应商 API Key 换成新的那把；
