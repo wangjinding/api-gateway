@@ -80,10 +80,6 @@ providers:
         display_name: "Agnes Video 2.5"
         type: "video"
       # 2026-09-24 自动同步：官方文档新增（scripts/sync_models.py）
-      - id: "agnes-video-v2.0"
-        display_name: "Agnes Video V2.0"
-        type: "video"
-        free: true     # 2026-09-24 自动同步：文档「当前优惠」写当前免费（scripts/sync_models.py）
 
   volc_engine:
     name: "火山方舟 Coding Plan"
@@ -271,7 +267,7 @@ providers:
       - id: "qwen3.8-max"
         display_name: "Qwen3.8 Max"
         type: "text"
-        context_window: 1000000    # 第三十三轮（2026-09-24）：上下文窗口（token），每日同步维护
+        context_window: 262144    # 第三十三轮（2026-09-24）：上下文窗口（token），每日同步维护
         max_output_tokens: 131072    # 最大输出（token）
         protocols: ["chat/completions", "messages"]
       - id: "qwen3.8-flash"
@@ -381,6 +377,15 @@ providers:
         context_window: 1048576    # 第三十三轮（2026-09-24）：上下文窗口（token），每日同步维护
         max_output_tokens: 131072    # 最大输出（token）
         protocols: ["responses"]
+      # 2026-09-27 自动同步：官方文档新增（scripts/sync_models.py）
+      - id: "longcat-2.5-preview-free"
+        display_name: "Longcat 2.5 Preview Free"
+        type: "text"
+        context_window: 1000000    # 同步 2026-09-28（scripts/sync_models.py）
+        max_output_tokens: 131072    # 同步 2026-09-28（scripts/sync_models.py）
+        # 协议线取自官方 Endpoints 表，未逐线实测（现网其它模型是实测过的）
+        protocols: ["chat/completions"]
+        free: true     # 官方价格表标 Free
 # ── 虚拟模型 id（别名，第三十一轮）──────────────────────────
 # 客户端固定写 model: wjd，实际转发到哪个真实模型由**管理员在模型页选**（也可以改这里）。
 #   · 只走 chat/completions（OpenAI）格式：用 /v1/messages、/v1/responses 打 wjd 会在入口
