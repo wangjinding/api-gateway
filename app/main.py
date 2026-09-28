@@ -1337,6 +1337,30 @@ def _usage_counts(protocol: str, data: Any) -> dict[str, int]:
             "completion_tokens": int(u.get("completion_tokens") or 0)}
 
 
+def _usage_detail(usage) -> tuple[int, int, int, int]:
+    """从一份 usage 里抽 (prompt, completion, cached, reasoning)，兼容三家字段名。
+
+    第三十四轮：cached / reasoning 是**细分项** —— 分别已包含在 prompt / completion 里，
+    只用于展示（求解「缓存命中多少、思考烧了多少」），求和时不要再与总数相加。
+    """
+    if not isinstance(usage, dict):
+        return (0, 0, 0, 0)
+    prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    pd = usage.get("prompt_tokens_details")
+    cd = usage.get("completion_tokens_details")
+    cached = int((pd or {}).get("cached_tokens") or 0) if isinstance(pd, dict) else 0
+    reasoning = int((cd or {}).get("reasoning_tokens") or 0) if isinstance(cd, dict) else 0
+    return (prompt, completion, cached, reasoning)
+
+
+def _record_usage_metrics(usage) -> None:
+    """把一份 usage 记进指标（含缓存命中 / 推理细分）；全 0 时不打扰指标。"""
+    p, c, cached, reasoning = _usage_detail(usage)
+    if p or c or cached or reasoning:
+        _metrics.record_tokens(p, c, cached=cached, reasoning=reasoning)
+
+
 class _UsageScanner:
     """流式直传的 usage 扫描器（只读，不改一个字节）。
 
@@ -1353,6 +1377,7 @@ class _UsageScanner:
         self.prompt = 0
         self.completion = 0
         self.cached = 0
+        self.reasoning = 0
         self.seen = False
         self._buf = ""
 
@@ -1400,10 +1425,17 @@ class _UsageScanner:
                     self.cached = int(det["cached_tokens"])
                 except (TypeError, ValueError):
                     pass
+            # 第三十四轮：输出里的思考量（completion_tokens_details.reasoning_tokens）
+            cdet = u.get("completion_tokens_details")
+            if isinstance(cdet, dict) and cdet.get("reasoning_tokens") is not None:
+                try:
+                    self.reasoning = int(cdet["reasoning_tokens"])
+                except (TypeError, ValueError):
+                    pass
 
     def counts(self) -> dict[str, int]:
         return {"prompt_tokens": self.prompt, "completion_tokens": self.completion,
-                "cached_tokens": self.cached}
+                "cached_tokens": self.cached, "reasoning_tokens": self.reasoning}
 
 
 def _merge_usage(dst: dict, src: dict) -> dict:
@@ -1519,7 +1551,7 @@ async def _passthrough(request: Request, protocol: str):
     _metrics.record_latency(model_in, time.time() - t0)
     usage = _usage_counts(protocol, data)
     if ok:
-        _metrics.record_tokens(usage["prompt_tokens"], usage["completion_tokens"])
+        _record_usage_metrics(data.get("usage") if isinstance(data, dict) else None)
     _access.add({"method": "POST", "kind": "chat", "path": f"/v1/{protocol}", "rid": rid,
                  "model": model_in, "served": model_in, "provider": pkey,
                  "caller": caller, "ok": ok, "stream": False,
@@ -1593,7 +1625,9 @@ async def _passthrough_stream(request, rid, caller, protocol, adapter, cb,
             _metrics.record_latency(model_in, time.time() - t0)
             counts = scanner.counts()
             if ok and scanner.seen:
-                _metrics.record_tokens(counts["prompt_tokens"], counts["completion_tokens"])
+                _metrics.record_tokens(counts["prompt_tokens"], counts["completion_tokens"],
+                                       cached=counts["cached_tokens"],
+                                       reasoning=counts["reasoning_tokens"])
             _access.add({"method": "POST", "kind": "chat", "path": f"/v1/{protocol}", "rid": rid,
                          "model": model_in, "served": model_in, "provider": pkey,
                          "caller": caller, "ok": ok, "stream": True, "response": ""})
@@ -1879,7 +1913,7 @@ async def _chat_once(cfg, rid, caller, request, req, model_id, messages, tools):
 
     usage = result.get("usage") or {}
     _metrics.record_call(model_id, pkey, ok=True)
-    _metrics.record_tokens(int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0)))
+    _record_usage_metrics(usage)
     _metrics.record_latency(model_id, time.time() - t0)
     _access.add({"method": "POST", "kind": "chat", "path": "/v1/chat/completions", "rid": rid,
                  "model": req.model, "served": model_id, "provider": pkey,
@@ -2002,6 +2036,11 @@ def _stream_response(request, req, model_id, messages, tools):
                 cb.record(True)
                 _metrics.record_call(model_id, pkey, ok=True)
                 _metrics.record_latency(model_id, time.time() - t0)
+                # ★ 第三十四轮修复（老板报「token 一直是 0」）：这条 managed 流式路径
+                #   此前只把 usage **转发给客户端**、从没写进指标 —— 上游明明每轮都发了
+                #   usage（实测 chunk 里带 prompt_tokens/cached_tokens），但网关的
+                #   token 统计恒为 0（663 次调用、tokens=0）。这里补上记账（含缓存/推理细分）。
+                _record_usage_metrics(stream_usage)
                 _access.add({"method": "POST", "kind": "chat", "path": "/v1/chat/completions", "rid": rid,
                              "model": req.model, "served": model_id, "provider": pkey,
                              "caller": caller, "ok": True, "stream": True,
@@ -2869,6 +2908,8 @@ async def metrics_prometheus(request: Request, _auth=Depends(require_auth)):
         #   快照里已没有 fallback_total 字段，这里再读就是 KeyError（曾被 live_check 抓到 500）。
         f'api_gateway_tokens_prompt_total {snap["tokens"]["prompt"]}',
         f'api_gateway_tokens_completion_total {snap["tokens"]["completion"]}',
+        f'api_gateway_tokens_cached_total {snap["tokens"].get("cached", 0)}',
+        f'api_gateway_tokens_reasoning_total {snap["tokens"].get("reasoning", 0)}',
         # 功能 11: 在途请求 gauge
         f'api_gateway_in_flight {snap.get("in_flight", 0)}',
         f'api_gateway_in_flight_peak {snap.get("in_flight_peak", 0)}',
@@ -2899,6 +2940,10 @@ async def metrics_prometheus(request: Request, _auth=Depends(require_auth)):
         "# TYPE api_gateway_tokens_prompt_total counter",
         "# HELP api_gateway_tokens_completion_total 上游 completion token 累计",
         "# TYPE api_gateway_tokens_completion_total counter",
+        "# HELP api_gateway_tokens_cached_total 其中命中缓存的输入 token 累计（含在 prompt 内）",
+        "# TYPE api_gateway_tokens_cached_total counter",
+        "# HELP api_gateway_tokens_reasoning_total 其中推理输出 token 累计（含在 completion 内）",
+        "# TYPE api_gateway_tokens_reasoning_total counter",
         "# HELP api_gateway_in_flight 在途请求数（进入 → 响应头生成完毕）",
         "# TYPE api_gateway_in_flight gauge",
         "# HELP api_gateway_in_flight_peak 在途请求峰值",

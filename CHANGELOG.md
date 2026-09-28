@@ -1,5 +1,46 @@
 # CHANGELOG
 
+## 2026-09-28 · 修「token 统计恒 0」+ token 细分（缓存命中 / 推理）
+
+老板报「token 数统计有问题，一直都是 0」。
+
+**真因**：`/v1/chat/completions` 的 **managed 流式路径**（改写分支 —— QwenPaw 实际走的就是它）
+只把累计出来的 usage **转发给客户端**，**从没写进指标**。上游明明每轮都发 usage
+（实测 chunk 里带 `prompt_tokens` / `prompt_tokens_details.cached_tokens`）。
+现场取证：网关记了 **663 次调用、`tokens` 恒为 `{prompt: 0, completion: 0}`**。
+
+对照确认：直传路径（messages/responses）与非流式路径本来就有记账 —— 只有
+"流式 + 改写"这一条漏了，而它恰好是最常走的一条。
+
+**修复**：该路径补 `_record_usage_metrics(stream_usage)`。
+
+**顺带做 token 细分**（上游 usage 本来就有，此前只记总数）：
+
+| 细分 | 来源 | 含义 |
+| --- | --- | --- |
+| `cached` | `prompt_tokens_details.cached_tokens` | 命中缓存的**输入**量（已含在 prompt 内） |
+| `reasoning` | `completion_tokens_details.reasoning_tokens` | 输出里的**思考**量（已含在 completion 内） |
+
+- `Metrics.record_tokens(prompt, completion, cached=0, reasoning=0)`：全局与按账号两条桶都细分；
+- 四处记录点全接上：managed 流式（本轮修的）、managed 非流式、直传非流式、直传流式
+  （扫描器补采 `reasoning_tokens`）；
+- Prometheus 新增 `api_gateway_tokens_cached_total` / `api_gateway_tokens_reasoning_total`（含 HELP/TYPE）；
+- 前端「指标」页新增两张卡：**缓存命中 Token**（附「占输入 x%」）与**推理 Token**（附「占输出 x%」）。
+
+**上线实测**（生产重启后）：
+
+```
+同一瘦请求（managed 流式）→ tokens {prompt: 62, completion: 2, cached: 0, reasoning: 1}
+带 4k token 前缀的同一请求发两次：
+  第 1 次 cached_tokens=0（未命中）；第 2 次 cached_tokens=1920 / prompt_tokens=4076
+网关累计：cached=1920（输入命中率 22.9%）
+Prometheus：api_gateway_tokens_cached_total 1920 / api_gateway_tokens_reasoning_total 5
+```
+
+**测试**：新增「managed 流式必须记账（含细分）」「细分累加互不干扰」两条回归；
+测试数 202 → **204 全过**；`ci_check.sh` 全绿；i18n 中英 759/759 对称。
+
+
 ## 2026-09-24 · 模型接口加入上下文参数（context_window / max_output_tokens）
 
 老板要求：查两家文档有没有写上下文长度，有就改网关、接口加入上下文参数，并纳入每日同步。

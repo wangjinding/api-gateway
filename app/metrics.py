@@ -65,6 +65,11 @@ class Metrics:
         self.providers: dict[str, dict[str, int]] = {}      # provider -> {ok, fail}
         self.tokens_prompt: int = 0
         self.tokens_completion: int = 0
+        # 第三十四轮: token 细分 —— 上游 usage 里本来就有这两项，之前只记了总数：
+        #   cached = prompt_tokens_details.cached_tokens（命中前缀缓存的输入量）
+        #   reasoning = completion_tokens_details.reasoning_tokens（输出里的思考量）
+        self.tokens_cached: int = 0
+        self.tokens_reasoning: int = 0
         self.latency_samples: dict[str, deque[float]] = {}  # model -> 最近 N 次耗时
         # 功能 11: 在途请求计数
         self.in_flight: int = 0
@@ -81,7 +86,7 @@ class Metrics:
         if acc is None:
             acc = {
                 "calls": {}, "providers": {},
-                "tokens": {"prompt": 0, "completion": 0},
+                "tokens": {"prompt": 0, "completion": 0, "cached": 0, "reasoning": 0},
                 "latency": {},
             }
             self.by_account[account] = acc
@@ -128,17 +133,29 @@ class Metrics:
                     self._bucket(acc["providers"], provider)["ok" if ok else "fail"] += 1
 
 
-    def record_tokens(self, prompt: int, completion: int, account: str | None = None) -> None:
+    def record_tokens(self, prompt: int, completion: int, account: str | None = None,
+                      cached: int = 0, reasoning: int = 0) -> None:
+        """记一次调用的 token。
+
+        第三十四轮新增 cached / reasoning 细分（默认 0，老调用点不受影响）：
+        `cached` 是输入里命中缓存的部分（**已含在 prompt 里**，不是额外的量），
+        `reasoning` 是输出里的思考部分（**已含在 completion 里**）——两者都只作细分展示，
+        求和时不要与 prompt/completion 相加。
+        """
         if not self.enabled:
             return
         a = account or ACCOUNT.get()
         with self._lock:
             self.tokens_prompt += prompt
             self.tokens_completion += completion
+            self.tokens_cached += cached
+            self.tokens_reasoning += reasoning
             if a and a != "anonymous":
                 acc = self._acc(a)
                 acc["tokens"]["prompt"] += prompt
                 acc["tokens"]["completion"] += completion
+                acc["tokens"]["cached"] += cached
+                acc["tokens"]["reasoning"] += reasoning
 
     def record_latency(self, model: str, seconds: float, account: str | None = None) -> None:
         if not self.enabled:
@@ -177,7 +194,8 @@ class Metrics:
                     return dict(uptime_seconds=round(time.time() - self.started_at, 1),
                                 in_flight=self.in_flight, in_flight_peak=self.in_flight_peak,
                                 calls={}, providers={},
-                                tokens={"prompt": 0, "completion": 0}, latency={})
+                                tokens={"prompt": 0, "completion": 0, "cached": 0, "reasoning": 0},
+                                latency={})
                 lat = {}
                 for m, dq in acc["latency"].items():
                     if dq:
@@ -188,7 +206,7 @@ class Metrics:
                     "in_flight_peak": self.in_flight_peak,
                     "calls": {k: dict(v) for k, v in acc["calls"].items()},
                     "providers": {k: dict(v) for k, v in acc["providers"].items()},
-                    "tokens": dict(acc["tokens"]),
+                    "tokens": _tokens_out(acc["tokens"]),
                     "latency": lat,
                 }
         return self._snapshot_global()
@@ -207,11 +225,22 @@ class Metrics:
                 "in_flight_peak": self.in_flight_peak,
                 "calls": {k: dict(v) for k, v in self.calls.items()},
                 "providers": {k: dict(v) for k, v in self.providers.items()},
-                "tokens": {"prompt": self.tokens_prompt, "completion": self.tokens_completion},
+                "tokens": {"prompt": self.tokens_prompt, "completion": self.tokens_completion,
+                           "cached": self.tokens_cached, "reasoning": self.tokens_reasoning},
                 "latency": latency_out,
             }
 
 
+
+
+def _tokens_out(t: dict) -> dict[str, int]:
+    """token 细分输出的统一形状（老桶可能缺 cached/reasoning，这里补 0）。"""
+    return {
+        "prompt": int(t.get("prompt", 0) or 0),
+        "completion": int(t.get("completion", 0) or 0),
+        "cached": int(t.get("cached", 0) or 0),
+        "reasoning": int(t.get("reasoning", 0) or 0),
+    }
 
 
 def _latency_summary(dq: deque) -> dict[str, float]:

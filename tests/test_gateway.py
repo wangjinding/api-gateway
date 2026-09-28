@@ -5414,6 +5414,65 @@ def test_usage_scanner_collects_cached_tokens():
     assert sc2.counts()["cached_tokens"] == 0
 
 
+def test_managed_stream_records_tokens_with_breakdown():
+    """第三十四轮修复（老板报「token 统计一直是 0」）：
+
+    **managed 流式路径**（`/v1/chat/completions` 的改写分支 —— QwenPaw 实际走的就是它）
+    此前只把累计 usage **转发给客户端**，从没写进指标；上游明明每轮都发 usage。
+    表现：网关记了 663 次调用、`tokens` 恒为 `{prompt: 0, completion: 0}`。
+
+    这里端到端断言：流式一轮结束后指标里真的有数，且**缓存命中 / 推理**两项也细分记下。
+    """
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    class FakeAdapter:
+        async def chat_stream(self, model=None, messages=None, **kw):
+            yield {"id": "c1", "object": "chat.completion.chunk", "model": model,
+                   "choices": [{"index": 0, "delta": {"content": "hi"}}]}
+            yield {"id": "c1", "choices": [], "usage": {
+                "prompt_tokens": 100, "completion_tokens": 40,
+                "prompt_tokens_details": {"cached_tokens": 70},
+                "completion_tokens_details": {"reasoning_tokens": 12},
+            }}
+            yield {"done": True}
+
+    orig = m._get_adapter
+    m._get_adapter = lambda model_id, timeout=None, cfg=None: (
+        FakeAdapter(), "agnes", m._cfg().providers["agnes"])
+    try:
+        before = m._metrics.snapshot()["tokens"]
+        client = TestClient(m.app)
+        with client.stream("POST", "/v1/chat/completions", json={
+            "model": "agnes-3.0-flash",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }) as r:
+            assert r.status_code == 200
+            body = "".join(r.iter_text())
+        assert "[DONE]" in body
+        after = m._metrics.snapshot()["tokens"]
+        assert after["prompt"] - before["prompt"] == 100, after
+        assert after["completion"] - before["completion"] == 40, after
+        assert after["cached"] - before["cached"] == 70, after
+        assert after["reasoning"] - before["reasoning"] == 12, after
+    finally:
+        m._get_adapter = orig
+
+
+def test_metrics_record_tokens_breakdown_accumulates():
+    """指标层：cached / reasoning 与 prompt / completion 累加互不干扰（细分项只做展示）。"""
+    from app.metrics import Metrics
+
+    m = Metrics()
+    m.record_tokens(100, 40, cached=70, reasoning=12)
+    m.record_tokens(10, 5)                     # 老调用点不传细分 → 默认 0
+    t = m.snapshot()["tokens"]
+    assert t == {"prompt": 110, "completion": 45, "cached": 70, "reasoning": 12}, t
+    # 细分是「已含在总数里」的部分，不能相加
+    assert t["cached"] <= t["prompt"] and t["reasoning"] <= t["completion"]
+
+
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`
 # 之前的旁注：运行器只会收集执行到这一行时已经存在的 globals。
 if __name__ == "__main__":

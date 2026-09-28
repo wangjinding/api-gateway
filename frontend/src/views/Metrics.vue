@@ -145,6 +145,13 @@ const totals = computed(() => {
   return { ok, fail, all: ok + fail }
 })
 
+/** 占比（分母为 0 时返回 0，避免 NaN 显示） */
+function pct(part: unknown, whole: unknown): string {
+  const p = Number(part) || 0
+  const w = Number(whole) || 0
+  return w > 0 ? ((p / w) * 100).toFixed(1) : '0.0'
+}
+
 const cards = computed(() => {
   void resolved.value
   const tk = data.value.tokens || {}
@@ -154,6 +161,9 @@ const cards = computed(() => {
     { k: t('metrics.requests'), v: all, note: t('dashboard.noteOkFail', { ok, fail }) },
     { k: t('metrics.failCount'), v: fail, note: t('metrics.failRateNote', { v: rate.toFixed(1) }) },
     { k: t('metrics.tokenUsage'), v: (tk.prompt || 0) + (tk.completion || 0), note: t('metrics.tokenNote', { p: tk.prompt ?? 0, c: tk.completion ?? 0 }) },
+    // 第三十四轮: token 细分 —— 缓存命中（含在输入里）与推理（含在输出里），各给一个占比
+    { k: t('metrics.cachedTokens'), v: tk.cached || 0, note: t('metrics.cachedNote', { v: pct(tk.cached, tk.prompt) }) },
+    { k: t('metrics.reasoningTokens'), v: tk.reasoning || 0, note: t('metrics.reasoningNote', { v: pct(tk.reasoning, tk.completion) }) },
     // 第二十七轮: fallback 计数随路由功能删除 → 这张卡片的注脚改成运行时长
     { k: t('metrics.inflightPeak'), v: `${data.value.in_flight ?? 0} / ${data.value.in_flight_peak ?? 0}`, note: t('metrics.uptime') + ' ' + fmtUptime.value },
   ]
