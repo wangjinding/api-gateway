@@ -5473,6 +5473,92 @@ def test_metrics_record_tokens_breakdown_accumulates():
     assert t["cached"] <= t["prompt"] and t["reasoning"] <= t["completion"]
 
 
+def test_upstream_session_priority_and_account_isolation():
+    """第三十五轮：上游会话 id 的取值优先级 + 账号隔离。
+
+    ① 入站 `x-opencode-session` 优先（客户端最清楚哪几次算同一个会话）；
+    ② 没带才依次回退 conversation_id → API Key → 账号；
+    ③ 带了客户端会话时仍**按账号哈希** —— 否则两个账号用同一个值就会共用上游缓存作用域
+       （第二十六轮定下的账号隔离被绕过）。
+    """
+    import hashlib
+    import app.main as m
+
+    h = lambda x: hashlib.sha256(x.encode("utf-8")).hexdigest()[:32]   # noqa: E731
+
+    # ① 客户端显式会话优先，且不受 conversation_id 影响
+    a = m._upstream_session(None, "acct", "tok", "conv-abc")
+    b = m._upstream_session("conv-xyz", "acct", "tok", "conv-abc")
+    assert a == b, "带了入站会话头时不该再被 conversation_id 改写"
+    assert a == h("s:acct:conv-abc"), a
+    # ③ 同值不同账号必须隔离
+    assert a != m._upstream_session(None, "other", "tok", "conv-abc"), "账号隔离不能绕过"
+    # ② 没带则按原优先级回退
+    assert m._upstream_session("c1", "acct", "tok") == h("acct:c1")
+    assert m._upstream_session(None, "acct", "tok") == h("k:tok")
+    assert m._upstream_session(None, "acct", None) == h("u:acct")
+    # 都稳定（缓存要靠它），且都是 32 位十六进制
+    for v in (a, m._upstream_session("c1", "acct", "tok"), m._upstream_session(None, "acct", None)):
+        assert len(v) == 32 and all(c in "0123456789abcdef" for c in v), v
+
+
+def test_inbound_opencode_session_header_reaches_upstream():
+    """第三十五轮端到端：入站的 `x-opencode-session` 真的决定了发给上游的会话 id。
+
+    - 同一个头 → 稳定（缓存前提）；
+    - 换头 → 换会话；
+    - 不带头 → 回退到 Key 派生（结果与带头不同）；
+    - 非法头（非 ASCII / 过长）→ 丢弃并回退，绝不把脏值带去上游。
+    """
+    from fastapi.testclient import TestClient
+    import app.main as m
+
+    seen: list[str | None] = []
+
+    class FakeAdapter:
+        async def chat_stream(self, model=None, messages=None, session_id=None, **kw):
+            seen.append(session_id)
+            yield {"id": "c1", "choices": [{"index": 0, "delta": {"content": "hi"}}]}
+            yield {"done": True}
+
+    orig = m._get_adapter
+    m._get_adapter = lambda model_id, timeout=None, cfg=None: (
+        FakeAdapter(), "agnes", m._cfg().providers["agnes"])
+    body = {"model": "agnes-3.0-flash", "messages": [{"role": "user", "content": "hi"}],
+            "stream": True}
+    try:
+        client = TestClient(m.app)
+
+        def run(headers):
+            with client.stream("POST", "/v1/chat/completions", headers=headers, json=body) as r:
+                assert r.status_code == 200, r.read()
+                "".join(r.iter_text())
+
+        run({"x-opencode-session": "conv-A"})
+        run({"x-opencode-session": "conv-A"})
+        run({"x-opencode-session": "conv-B"})
+        run({})
+        run({"x-opencode-session": "x" * 500})        # 过长（ASCII）→ 丢弃并回退
+        assert len(seen) == 5, seen
+        assert seen[0] == seen[1], "同一个入站会话头必须映射到稳定的上游会话"
+        assert seen[0] != seen[2], "换会话头应换上游会话"
+        assert seen[0] != seen[3], "带了会话头就不该再用 Key 派生"
+        assert seen[4] == seen[3], "过长会话头应等同没带（回退到派生）"
+        assert all(isinstance(x, str) and len(x) == 32 for x in seen), seen
+
+        # 非 ASCII 值在 HTTP 层就发不出去（httpx 直接拒），所以用桩验门口的校验：
+        class _S:
+            rid = "t"
+
+        class _Req:
+            headers = {"x-opencode-session": "中文会话"}
+            state = _S()
+
+        assert m._inbound_session(_Req()) is None, "非 ASCII 会话头必须被丢弃（不能带进上游 header）"
+    finally:
+        m._get_adapter = orig
+
+
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`
 # 之前的旁注：运行器只会收集执行到这一行时已经存在的 globals。
 if __name__ == "__main__":

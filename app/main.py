@@ -1524,7 +1524,8 @@ async def _passthrough(request: Request, protocol: str):
 
     # 定点改写：model 换成真实 id（别名场景）+ 盖模型级强制参数；其余字段一个不动
     payload = adapter.prepare_payload(model_in, clean)
-    session = _upstream_session(conv, caller, getattr(request.state, "key_token", None))
+    session = _upstream_session(conv, caller, getattr(request.state, "key_token", None),
+                               _inbound_session(request))
 
     if stream:
         return await _passthrough_stream(request, rid, caller, protocol, adapter, cb,
@@ -1824,23 +1825,59 @@ async def chat_completions(request: Request, req: ChatRequest, _auth=Depends(req
     return await _chat_once(cfg, rid, caller, request, req, model_id, messages, tools)
 
 
-def _upstream_session(conversation_id: str | None, account: str, key_token: str | None = None) -> str:
-    """把调用的标识派生成**稳定**的上游 session id（第二十六轮 + 第二十九轮强化）。
+# 入站显式会话头（第三十五轮）：客户端自己指定的上游会话 id。
+SESSION_HEADER = "x-opencode-session"
+
+
+def _inbound_session(request) -> str | None:
+    """读入站的 `x-opencode-session`（客户端显式指定的会话 id）。
+
+    与 `conversation_id` 走**同一套入口校验**（非 ASCII / 过长一律丢弃）—— 两者最终都会
+    成为发往上游的 header，脏值不能在这里放过。校验不过时**静默回退**（当作没带）：
+    一个可选头不该把请求打回 400。
+    """
+    raw = request.headers.get(SESSION_HEADER)
+    if not raw:
+        return None
+    try:
+        return normalize_conversation_id(raw)
+    except ValueError as e:
+        log.warning("[rid=%s] 入站 %s 非法（%s），忽略并回退到派生会话",
+                    getattr(request.state, "rid", "-"), SESSION_HEADER, e)
+        return None
+
+
+def _upstream_session(conversation_id: str | None, account: str, key_token: str | None = None,
+                      client_session: str | None = None) -> str:
+    """把调用的标识派生成**稳定**的上游 session id（第二十六轮 + 第二十九轮 + 第三十五轮）。
 
     上游（OpenCode Go）的提示词缓存以 `x-opencode-session` 为作用域 —— 实测：同一 session
     的第二次请求 `cached_tokens` 全量命中，换成另一个 session 则恒为 0（换 session = 完全不
     吃缓存）。所以这个值**必须在一次最近的重复调用间恒定**。取值优先级：
 
-    ① 客户端带了 `conversation_id`（第二十六轮）：first 「账号:会话」后哈希 —— 同一段对话
-       恒定 → 该对话内反复出现的前缀命中；不同账号天然隔离。
-    ② 没带（QwenPaw / 多数 agent 不发这个字段，第二十九轮老板决策）：用**这个 API Key
+    ① **客户端显式带了 `x-opencode-session`（第三十五轮，老板要求）**：客户端最清楚
+       "哪几次调用算同一个会话"，带了就听它的（比网关用 Key 兜底更贴合它的会话划分）。
+       仍然**按账号哈希**（`s:账号:客户端值`）—— 保持第二十六轮定下的账号隔离：两个账号
+       即便写了同一个值，也不会被绑到同一个上游会话标识上（上游按它记会话/日志；缓存那层
+       见下注，别指望靠它做隔离）。
+    ② 客户端带了 `conversation_id`（第二十六轮）：按「账号:会话」哈希 —— 同一段对话恒定
+       → 该对话内反复出现的前缀命中；不同账号天然隔离。
+    ③ 没带（QwenPaw / 多数 agent 不发这些字段，第二十九轮老板决策）：用**这个 API Key
        自己**派生 —— 一个 Key 一个稳定会话，比"每调随机"命中率高得多。但**先哈希再传**：
        直接把 `wjd-` 后面那串原样发给上游等于泄露 Key 凭证内容给第三方（见 _key_token）。
-    ③ 连 Key 都没有（登录页面会话，kind=session）：按账号稳定兜底，同样不再随机。
+    ④ 连 Key 都没有（登录页面会话，kind=session）：按账号稳定兜底，同样不再随机。
 
-    这三级都**不再回退成每个调用一个随机 UUID** —— 随机=缓存命中率恒为 0。上游只看到
+    这四级都**不再回退成每个调用一个随机 UUID** —— 随机=缓存命中率恒为 0。上游只看到
     32 位十六进制串，不暴露账号名、业务命名或 Key 明文。
+
+    ★ 2026-09-28 实测更正：上游的提示词缓存**并不是严格按 session 隔离的** ——
+    同一段 4k 前缀，用同一个会话头连打（0 → 1920 命中）能命中；**换成另一个会话头**
+    再打同一段前缀，照样命中（1920）。所以「稳定会话 id」是**吃到缓存的前提之一、但不是隔离边界**，
+    更不是保证（2026-09-18 还观测到同一 session 连打 6 次才陆续命中）。
+    别把缓存命中率当成会话隔离的判据。
     """
+    if client_session:
+        return hashlib.sha256(f"s:{account}:{client_session}".encode("utf-8")).hexdigest()[:32]
     if conversation_id:
         return hashlib.sha256(f"{account}:{conversation_id}".encode("utf-8")).hexdigest()[:32]
     if key_token:
@@ -1892,7 +1929,9 @@ async def _chat_once(cfg, rid, caller, request, req, model_id, messages, tools):
                 max_tokens=req.max_tokens, stop=req.stop,
                 tools=tools, tool_choice=tool_choice,
                 extra=req.upstream_extra() or None,
-                session_id=_upstream_session(req.conversation_id, caller, getattr(request.state, "key_token", None)),
+                session_id=_upstream_session(req.conversation_id, caller,
+                                             getattr(request.state, "key_token", None),
+                                             _inbound_session(request)),
             )
             ok = True
             break
@@ -1997,7 +2036,9 @@ def _stream_response(request, req, model_id, messages, tools):
                     max_tokens=req.max_tokens, stop=req.stop,
                     tools=tools, tool_choice=req.tool_choice,
                     extra=req.upstream_extra() or None,
-                    session_id=_upstream_session(req.conversation_id, caller, getattr(request.state, "key_token", None)),
+                    session_id=_upstream_session(req.conversation_id, caller,
+                                             getattr(request.state, "key_token", None),
+                                             _inbound_session(request)),
                 )
                 async for chunk in stream_gen:
                     if chunk.get("done"):
