@@ -20,6 +20,19 @@
   --radius: 12px;
   --radius-l: 16px;
   --gap: 14px;
+
+  /* ── 间距阶梯（第三十七轮立：spacing scale）────────────────────────
+     目的：页面四周上下左右一致、卡片之间间距统一，别再各写各的数字。
+     用法：
+       --pad-page  页面四周留白（上下左右必须相同！）
+       --gap-lg    块与块之间（卡片、栅格行）
+       --gap       卡片内部小节之间
+       --gap-sm    行内元素之间
+     旧写法 `padding: 16px 20px` 的横纵不等已全部替换为 --pad-page。 */
+  --pad-page: 16px;
+  --gap-lg: 14px;   /* 块与块之间（= --gap，等价别名，新代码统一用它） */
+  --gap-sm: 8px;    /* 行内元素之间 */
+
   --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
           "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
 
@@ -344,26 +357,33 @@ body {
 .avatar.alt { background: var(--chart-b); color: #fff; }
 
 .gw-body { flex: 1; min-height: 0; overflow: auto; }
-.page { padding: 16px 20px; }
+/* 第三十七轮：页面四周一律 --pad-page（上下左右相同）。
+   旧写法是 `16px 20px` —— 上 16 左 20，卡片看着总像"左边空一点"，已弃用。 */
+.page { padding: var(--pad-page); }
 /* 全高页（对话 / 图像 / 视频）：自己不滚，由内部区域滚 */
 .page-fill {
-  padding: 16px 20px; height: 100%; min-height: 0;
+  padding: var(--pad-page); height: 100%; min-height: 0;
   display: flex; flex-direction: column;
 }
 
 /* ── 卡片 / KPI ─────────────────────────────────────────────────────── */
+/* 第三十七轮：让"页面里纵向堆叠的卡片"自动有间距，不用每个页面手写 margin-top。
+   用法：把这类容器加 class="page-col"（或已有的栅格类）。
+   相邻卡片之间 = --gap-lg，横纵一致。 */
+.page-col > * + * { margin-top: var(--gap-lg); }
+
 .card {
   background: var(--surface); border: 1px solid var(--line);
   border-radius: var(--radius); padding: 14px; min-width: 0;
 }
-.card-h { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.card-h { display: flex; align-items: center; gap: var(--gap-sm); margin-bottom: 10px; }
 .card-h b { font-size: 13.5px; }
 .card-h .sub { font-size: 11.5px; color: var(--muted-2); }
 .legend { margin-left: auto; display: flex; gap: 12px; font-size: 11.5px; color: var(--muted); }
 .legend i { width: 8px; height: 8px; border-radius: 3px; display: inline-block; margin-right: 5px; }
 .pager { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 12px; color: var(--muted); }
 
-.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); }
+.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap-lg); }
 .kpi { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 13px 14px; min-width: 0; }
 .kpi .k { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
 .kpi .v { font-size: 24px; font-weight: 700; margin-top: 7px; font-variant-numeric: tabular-nums; letter-spacing: -.4px; }
@@ -376,9 +396,10 @@ body {
 .spark i { width: 4px; border-radius: 2px; background: var(--primary); opacity: .32; display: block; }
 .spark i.hi { opacity: .9; }
 
-.grid2 { display: grid; grid-template-columns: 1.55fr 1fr; gap: var(--gap); margin-top: var(--gap); }
-.grid3 { display: grid; grid-template-columns: 1.35fr 1fr; gap: var(--gap); margin-top: var(--gap); }
-.grid-eq { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); margin-top: var(--gap); }
+/* 栅格行：行间 = 块间距，列间 = 块间距（横纵一致） */
+.grid2 { display: grid; grid-template-columns: 1.55fr 1fr; gap: var(--gap-lg); margin-top: var(--gap-lg); }
+.grid3 { display: grid; grid-template-columns: 1.35fr 1fr; gap: var(--gap-lg); margin-top: var(--gap-lg); }
+.grid-eq { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap-lg); margin-top: var(--gap-lg); }
 
 /* 供应商状态 / 路由链这类「名称 + 条 + 状态」的竖排列表 */
 .pv { display: flex; flex-direction: column; gap: 9px; }
@@ -412,7 +433,7 @@ body {
 .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; letter-spacing: .2px; }
 
 /* ── 设置 / 用户页共用的行式布局与主题卡 ────────────────────────────── */
-.set-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+.set-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap-lg); }
 .set-row {
   display: flex; align-items: center; gap: 12px; padding: 10px 0;
   border-bottom: 1px solid var(--line-2); font-size: 13px; min-width: 0;
@@ -592,7 +613,7 @@ body {
 .m-kpi { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 11px 12px; }
 .m-kpi .k { font-size: 11.5px; color: var(--muted); }
 .m-kpi .v { font-size: 19px; font-weight: 700; margin-top: 5px; font-variant-numeric: tabular-nums; }
-.m-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.m-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap-lg); }
 
 /* 抽屉导航（el-drawer teleport 到 body，样式写在全局层） */
 .nav-drawer .el-drawer__body { padding: 0; overflow: hidden; background: var(--surface); }
@@ -621,9 +642,10 @@ body {
 /* ── 窄屏：只做全局兜底，结构切换（侧栏 → 抽屉 + 底部 Tab）在 JS 里 ────
    断点须与 src/lib/ui.ts 的 MOBILE_MAX=768 保持一致。 */
 @media (max-width: 768px) {
-  .page { padding: 12px 14px; }
-  .page-fill { padding: 12px 14px; }
-  .kpis { grid-template-columns: 1fr 1fr; gap: 10px; }
+  /* 窄屏同样取等距的收窄值（12px 四周） */
+  .page { padding: 12px; }
+  .page-fill { padding: 12px; }
+  .kpis { grid-template-columns: 1fr 1fr; gap: var(--gap-sm); }
   .kpi .v { font-size: 19px; }
   .grid2, .grid3, .grid-eq { grid-template-columns: 1fr; }
   .top { padding: 0 12px; }

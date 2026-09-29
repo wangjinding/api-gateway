@@ -38,6 +38,13 @@ data/*.bak
 # 说明：data/gateway.yaml 不含明文 Key —— 三家供应商密钥统一在 .env（已被上面忽略），
 # 由 yaml 各供应商的 token_env 引用。只要 .env 不提交，密钥就不会进版本库。
 
+# ── 设计稿（不入库，历史上从未入库）──────────────────────────────────
+# design/v1、v2、v3 是"出设计图"用的脚本 + 渲染出的 PNG（约 11MB）。
+# 它们与产品构建、网关运行完全无关，且 2026-09-13 曾被清理归档到
+# /root/.trash/2026-09-13-api-gateway-cleanup/design/（cp -a 可恢复）。
+# 需要时本地恢复即可，不进版本库。
+design/
+
 # ── 依赖与构建产物（不入库，均可重新生成：npm ci && npm run build）──
 node_modules/
 frontend/node_modules/

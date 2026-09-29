@@ -1360,6 +1360,45 @@ curl "http://localhost:8808/v1/videos/<video_id>?model=agnes-video-2.5-flash&wai
 >   拉线上产物实测含胶囊计数与空结果提示（`Logs`）、新版卡片结构（`Videos`）与窄屏缩略拉伸规则（`Videos` CSS）。
 >   注意：**重启会踢掉所有网页会话，需重新登录**。
 
+## 版本号与发布纪律（★ 硬性，2026-09-29 老板立）
+
+### 1. 每次改动都要把版本号往上加
+
+| 改动规模 | 版本号动作 | 例 |
+|---|---|---|
+| 小改动（修 bug、调样式、小优化） | **加小版本号** | `2.4.0 → 2.4.1` |
+| 较大改动 / 大版本 | **加大版本号** | `2.4.1 → 2.5.0` |
+
+**唯一权威定义处**：`app/main.py` 的
+
+```python
+VERSION = "2.4.0"     # ← 只改这一处
+```
+
+它已被 `FastAPI(version=...)`、`GET /`、`GET /healthz`、`POST /auth/login` 的
+`gateway_version` 共用（第三十三轮收敛为单一常量）——**不要再在别处硬编码版本号**。
+
+> **别混淆**：`frontend/package.json` 的 `"version": "0.1.0"` 与设计稿脚本里的 `v2.4.0`
+> （`design/design/v2/build.py`、`design/design/v3/agents.py`）是**独立的东西**，不随 app 版本走。
+
+### 2. 发布流程（改完照这个顺序走）
+
+```
+改代码 → 跑测试（python tests/test_gateway.py 或 bash scripts/ci_check.sh）
+       → 纯前端：npm run build（dist 即线上目录）
+         后端/代码：supervisorctl restart api-gateway:api-gateway_00
+       → 真机验证（线上 healthz / 页面 / 接口）
+       → git commit
+       → 推 CNB（scripts/push_cnb.sh，仓库 Jidekin/api-gateway 分支 master）
+```
+
+**「只要上生产就必须推 CNB」** 是既有硬性规矩（老板 2026-09-24 原话：「只要项目重启上线生产的
+代码都要推送到 cnb 上」）：保持"线上跑着的代码 = 仓库里的代码"。**凡是重启上线（后端 restart）
+或 `npm run build` 覆盖 `frontend/dist` 的代码改动，验证通过后都必须推 CNB**；纯注释/配置靠
+`hot_reload` 生效的也照推。落地脚本 `scripts/push_cnb.sh`（一次性带 token 内嵌 URL；不带 token
+退出 2 / 工作区不干净退出 3 / 推完核对远端=本地并复查 `.git/config` 无 token；**token 不内置进
+任何文件**）。仓库 `https://cnb.cool/Jidekin/api-gateway.git`、分支 `master`。
+
 ## 测试
 
 ```bash

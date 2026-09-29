@@ -332,7 +332,9 @@ _docs_on = config.server.docs_enabled   # 安全默认关（report: /docs、/ope
 
 # 本轮修复: 版本号收敛到单一常量。此前 "2.4.0" 硬编码在 FastAPI / / 导航 / /auth/login
 #   三处，/health 干脆没返回版本 —— 前端「网关版本」一直显示 v-。
-VERSION = "2.4.0"
+# 2026-09-29: 2.4.0 → 2.4.1（前端间距规范统一：页面四周等距 + 卡片间距走令牌）。
+#   ★ 版本号纪律：每次改动都要往上加，小改动加小版本号、大改动加大版本号（README 有专章）。
+VERSION = "2.4.1"
 
 app = FastAPI(
     title="API Gateway",
