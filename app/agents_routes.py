@@ -343,12 +343,13 @@ def install(app: FastAPI, *, store: AgentStore,
 
         p = a.params or {}
         suffix = str(p.get("system_suffix") or "")
-        # 第四十轮（计量打标）：让日志能一眼看出"这次调用是网关的智能体发出的"，
-        #   与管理员在「对话」页直接聊区分开。明细（谁/哪个智能体/多少 token）落 agent_runs。
-        log.info("agent chat: slug=%s account=%s session=%s rounds=%d",
-                 slug, account, session_id, rounds)
         started = time.time()
         rounds = len([m for m in messages if isinstance(m, dict) and m.get("role") == "user"])
+        # 计量打标：让日志能一眼看出"这次调用是网关的智能体发出的"，
+        #   与管理员在「对话」页直接聊区分开。明细（谁/哪个智能体/多少 token）落 agent_runs。
+        # 注意：这行必须在 rounds 赋值**之后**（曾因前置引用 rounds 导致 500）。
+        log.info("agent chat: slug=%s account=%s session=%s rounds=%d",
+                 slug, account, session_id, rounds)
         tool_count = 0
         total_tokens = 0
         status = "ok"

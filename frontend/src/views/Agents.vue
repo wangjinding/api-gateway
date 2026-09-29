@@ -171,6 +171,10 @@
                     </template>
                   </div>
 
+                  <div v-if="m.images && m.images.length" class="msg-imgs">
+                    <img v-for="(u, i) in m.images" :key="i" :src="u" alt="" />
+                  </div>
+
                   <div v-if="m.text" v-html="render(m.text)" />
                   <div v-else-if="streaming && m.role === 'assistant'" class="typing">…</div>
 
@@ -189,10 +193,22 @@
                   :placeholder="t('agents.inputPlaceholder')"
                   @keydown.enter.exact.prevent="send"
                 />
+                <div v-if="pendingImgs.length" class="pending">
+                  <div v-for="(im, i) in pendingImgs" :key="i" class="pend-i">
+                    <img :src="im.thumb || im.uri" alt="" />
+                    <span class="pend-x" @click="removeImg(i)">×</span>
+                  </div>
+                  <span class="pend-hint">{{ t('agents.imgCount', { n: pendingImgs.length, max: MAX_IMGS }) }}</span>
+                </div>
                 <div class="bar">
+                  <input ref="fileInput" type="file" accept="image/*" multiple hidden @change="onFiles" />
+                  <button class="clip-btn" :disabled="streaming" :title="t('agents.attach')" @click="fileInput?.click()">
+                    <Icon name="clip" :size="15" />
+                  </button>
                   <span class="tok">{{ cur.engine_model || '—' }}</span>
                   <span style="flex:1" />
-                  <el-button v-if="!streaming" type="primary" size="small" :disabled="!input.trim()" @click="send">
+                  <el-button v-if="!streaming" type="primary" size="small"
+                             :disabled="!input.trim() && !pendingImgs.length" @click="send">
                     <Icon name="send" :size="13" />{{ t('chat.send') }}
                   </el-button>
                   <el-button v-else size="small" class="stop-btn" @click="stopLocal">
@@ -351,6 +367,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { ElMessage } from 'element-plus'
 import Icon from '../components/Icon.vue'
 import {
   type AgentEvent, type AgentItem, type AgentRun,
@@ -358,10 +375,11 @@ import {
   restoreAgent, retireAgent, streamAgentChat, testAgent, updateAgent,
 } from '../lib/agents'
 import { renderMarkdown } from '../lib/markdown'
+import { PRESETS, pickImage } from '../lib/upload'
 
 const { t } = useI18n()
 
-interface Msg { id: number; role: 'user' | 'assistant'; text: string; steps: Step[]; open?: boolean; meta?: string }
+interface Msg { id: number; role: 'user' | 'assistant'; text: string; steps: Step[]; open?: boolean; meta?: string; images?: string[] }
 interface Step { id: string; name?: string; args?: any; status: 'running' | 'done'; ms?: number; output?: any }
 
 const err = ref('')
@@ -378,6 +396,9 @@ const messages = ref<Msg[]>([])
 const sessions = ref<any[]>([])
 const sessionId = ref('')
 const input = ref('')
+const pendingImgs = ref<{ uri: string; name: string; thumb: string }[]>([])
+const MAX_IMGS = 4
+const fileInput = ref<HTMLInputElement | null>(null)
 const streaming = ref(false)
 const stepsDone = ref(0)
 const lastUsage = ref<any>(null)
@@ -503,9 +524,12 @@ async function persistSession() {
 
 function send() {
   const text = input.value.trim()
-  if (!text || streaming.value || !current.value) return
+  // 允许"只发图不带字"
+  if ((!text && !pendingImgs.value.length) || streaming.value || !current.value) return
   err.value = ''
-  messages.value.push({ id: Date.now(), role: 'user', text, steps: [] })
+  const imgs = pendingImgs.value.map((x) => x.uri)
+  pendingImgs.value = []
+  messages.value.push({ id: Date.now(), role: 'user', text, steps: [], images: imgs })
   const reply: Msg = { id: Date.now() + 1, role: 'assistant', text: '', steps: [], open: true, meta: '' }
   messages.value.push(reply)
   input.value = ''
@@ -518,7 +542,14 @@ function send() {
 
   const history = messages.value
     .filter((m) => m !== reply)
-    .map((m) => ({ role: m.role, content: m.text }))
+    .map((m) => {
+      const im = (m.images || []).filter(Boolean)
+      if (!im.length) return { role: m.role, content: m.text }
+      const parts: any[] = []
+      if (m.text) parts.push({ type: 'text', text: m.text })
+      for (const url of im) parts.push({ type: 'image', image_url: url })
+      return { role: m.role, content: parts }
+    })
 
   abort = streamAgentChat(current.value, history, sessionId.value || `agent-${current.value}-${Date.now()}`, (ev: AgentEvent) => {
     if (ev.type === 'start') { sessionId.value = ev.session_id }
@@ -545,6 +576,24 @@ function send() {
     }
   })
 }
+
+async function onFiles(ev: Event) {
+  const el = ev.target as HTMLInputElement
+  for (const f of Array.from(el.files || [])) {
+    if (pendingImgs.value.length >= MAX_IMGS) {
+      ElMessage.warning(t('agents.imgMax', { n: MAX_IMGS }))
+      break
+    }
+    try {
+      const m = await pickImage(f, PRESETS.chat)
+      pendingImgs.value.push({ uri: m.uri, name: m.name, thumb: m.thumb })
+    } catch (e: any) {
+      ElMessage.error(t('agents.imgErr', { msg: (e && e.message) || e }))
+    }
+  }
+  if (fileInput.value) fileInput.value.value = ''
+}
+function removeImg(i: number) { pendingImgs.value.splice(i, 1) }
 
 function finish() {
   streaming.value = false
@@ -690,6 +739,16 @@ onMounted(load)
 .tok { font-size: 11.5px; color: var(--muted-2); font-family: ui-monospace, Menlo, monospace; }
 .stop-btn { background: var(--err-soft); color: var(--err); border-color: transparent; }
 .typing { color: var(--muted-2); }
+.msg-imgs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.msg-imgs img { max-width: 132px; max-height: 132px; border-radius: var(--radius-s); border: 1px solid var(--line); display: block; }
+.pending { display: flex; align-items: center; gap: 8px; margin-top: var(--gap-sm); }
+.pend-i { position: relative; }
+.pend-i img { width: 46px; height: 46px; object-fit: cover; border-radius: var(--radius-sm, 8px); border: 1px solid var(--line); display: block; }
+.pend-x { position: absolute; top: -6px; right: -6px; width: 17px; height: 17px; border-radius: 50%; background: var(--err); color: #fff; font-size: 12px; line-height: 17px; text-align: center; cursor: pointer; }
+.pend-hint { font-size: 11px; color: var(--muted-2); }
+.clip-btn { background: transparent; border: 0; color: var(--muted-2); cursor: pointer; padding: 4px; display: grid; place-items: center; }
+.clip-btn:disabled { opacity: .4; cursor: not-allowed; }
+.clip-btn:hover:not(:disabled) { color: var(--primary); }
 .cfg-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap-lg); align-items: start; }
 .cfg-grid > .card:first-child { grid-column: 1 / -1; }
 .frow { display: flex; align-items: center; gap: 10px; margin-top: var(--gap-s); }

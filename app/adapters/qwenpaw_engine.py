@@ -11,6 +11,7 @@
 - 回 SSE（前缀固定 `data: `，**没有 event: 行**）
 - 事件：`text` / `plugin_call` / `plugin_call_output` / `data` / `message` / `response` / `turn_usage`
 - `role: "system"` 的输入消息**被接受且生效**（实测）→ `system_suffix` 走这条
+- **图片输入**：`{"type":"image", "image_url":"<data-URI/URL>"}`（实测可识别）
 - `model` 字段**被忽略**（实测）→ 模型是 profile 级，不在请求里指定
 
 网关对前端的输出形状（自定义、简单）：
@@ -67,7 +68,9 @@ def build_input(messages: list[dict[str, Any]], system_suffix: str = "") -> list
         if role not in ("user", "assistant", "system"):
             role = "user"
         content = m.get("content")
-        # content 允许是字符串或 [{type:text,text}] 形状
+        # content 允许：字符串 / [{type:text,text}] / [{type:image,image_url}]
+        # 图片格式（2026-09-29 实测确认）：{"type":"image","image_url":"<data-URI 或 http URL>"}
+        #   —— 端到端验证过：塞一张纯红 64×64 PNG 的 data URI，模型正确答出"红色"。
         if isinstance(content, str):
             parts = [{"type": "text", "text": content}]
         elif isinstance(content, list):
@@ -75,13 +78,40 @@ def build_input(messages: list[dict[str, Any]], system_suffix: str = "") -> list
             for c in content:
                 if isinstance(c, str):
                     parts.append({"type": "text", "text": c})
-                elif isinstance(c, dict) and c.get("type") == "text":
-                    parts.append({"type": "text", "text": str(c.get("text") or "")})
-                # 图片等一期不支持，静默跳过（计划「一期不做图片/附件」）
+                elif isinstance(c, dict):
+                    ctype = c.get("type")
+                    if ctype == "text":
+                        parts.append({"type": "text", "text": str(c.get("text") or "")})
+                    elif ctype in ("image", "image_url"):
+                        # 两种写法都认（实测见 test_qwenpaw_engine_image_content_passthrough）：
+                        #   AgentScope 原生 `{"type":"image","image_url":"<uri>"}`
+                        #   OpenAI 风格   `{"type":"image_url","image_url":{"url":"<uri>"}}`
+                        # —— 前端「对话」页发的是后者，所以必须同时支持。
+                        url = _image_url(c)
+                        if url:
+                            parts.append({"type": "image", "image_url": url})
+                        else:
+                            log.debug("图片块缺 image_url，已跳过")
+                    # 其余类型（audio/video/file）暂不支持，忽略
         else:
             parts = [{"type": "text", "text": str(content or "")}]
         out.append({"role": role, "content": parts})
     return out
+
+
+def _image_url(block: dict[str, Any]) -> str:
+    """从图片内容块里取出 URL。兼容两种写法：
+
+    - AgentScope 原生：`{"type":"image", "image_url":"data:image/png;base64,..."}`
+    - OpenAI 风格：    `{"type":"image_url", "image_url":{"url":"..."}}`
+    """
+    v = block.get("image_url")
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, dict):
+        u = v.get("url")
+        return str(u).strip() if u else ""
+    return ""
 
 
 def build_body(messages: list[dict[str, Any]], session_id: str,

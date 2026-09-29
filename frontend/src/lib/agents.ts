@@ -100,7 +100,7 @@ export const stopAgent = (slug: string, chatId: string) =>
  */
 export function streamAgentChat(
   slug: string,
-  messages: { role: string; content: string }[],
+  messages: { role: string; content: string | any[] }[],
   sessionId: string,
   onEvent: (ev: AgentEvent) => void,
 ): () => void {

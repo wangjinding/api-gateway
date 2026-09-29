@@ -5967,6 +5967,78 @@ def test_agents_routes_installed():
         assert need in paths, f"缺少端点 {need}"
 
 
+def test_qwenpaw_engine_image_content_passthrough():
+    """图片附件：内容块必须原样转成 AgentScope 的 image 形状（第三十九轮）。
+
+    QwenPaw 侧的格式已实测确认：`{"type":"image","image_url":"<data-URI 或 URL>"}`
+    —— 塞一张纯红 64×64 PNG 的 data URI，模型正确答出"红色"。
+    """
+    from app.adapters.qwenpaw_engine import build_body, _image_url
+
+    uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+    # AgentScope 原生扁平写法
+    b = build_body([{"role": "user", "content": [
+        {"type": "text", "text": "这是什么颜色？"},
+        {"type": "image", "image_url": uri},
+    ]}], "s1")
+    parts = b["input"][0]["content"]
+    assert parts[0] == {"type": "text", "text": "这是什么颜色？"}
+    assert parts[1] == {"type": "image", "image_url": uri}
+
+    # OpenAI 风格嵌套写法也要认（前端 Chat 页发的是这个形状）
+    b2 = build_body([{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": uri}},
+    ]}], "s2")
+    assert b2["input"][0]["content"][0]["image_url"] == uri
+
+    # 只发图不带字 → content 里只有图片块
+    b3 = build_body([{"role": "user", "content": [{"type": "image", "image_url": uri}]}], "s3")
+    assert len(b3["input"][0]["content"]) == 1
+    assert b3["input"][0]["content"][0]["type"] == "image"
+
+    # 缺 url 的图片块被跳过（不产生空块）
+    b4 = build_body([{"role": "user", "content": [
+        {"type": "text", "text": "x"}, {"type": "image"},
+    ]}], "s4")
+    assert len(b4["input"][0]["content"]) == 1
+
+    # 不支持的媒体类型（audio/视频/文件）忽略，不炸
+    b5 = build_body([{"role": "user", "content": [
+        {"type": "text", "text": "x"}, {"type": "audio", "data": "..."},
+    ]}], "s5")
+    assert len(b5["input"][0]["content"]) == 1
+
+    # _image_url 的两种取值
+    assert _image_url({"image_url": uri}) == uri
+    assert _image_url({"image_url": {"url": uri}}) == uri
+    assert _image_url({"image_url": {}}) == ""
+    assert _image_url({}) == ""
+
+    # 多图 + 文字混合顺序保持
+    b6 = build_body([{"role": "user", "content": [
+        {"type": "image", "image_url": "u1"},
+        {"type": "text", "text": "t"},
+        {"type": "image", "image_url": "u2"},
+    ]}], "s6")
+    got = b6["input"][0]["content"]
+    assert [p["type"] for p in got] == ["image", "text", "image"]
+
+def test_agent_chat_endpoint_source_order():
+    """回归：agents_chat 里不能在 rounds 赋值**之前**引用它。
+
+    第三十九轮实测踩到 —— 打标日志被写在 `rounds = ...` 之前，
+    `log.info(..., rounds)` 直接 UnboundLocalError → 整个 /agents/{slug}/chat 返回 500。
+    这类「声明顺序」错误跑不出来，只能靠读代码或真机调用发现，所以固化成断言。
+    """
+    import inspect
+    import app.agents_routes as ar
+
+    src = inspect.getsource(ar.install)
+    i_assign = src.find("rounds = len(")
+    i_use = src.find('log.info("agent chat:')
+    assert i_assign != -1 and i_use != -1, "端点源码结构变了，请更新本用例"
+    assert i_assign < i_use, "rounds 必须在打标日志之前赋值（否则 UnboundLocalError → 500）"
+
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`
 # 之前的旁注：运行器只会收集执行到这一行时已经存在的 globals。
 if __name__ == "__main__":
