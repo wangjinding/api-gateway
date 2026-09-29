@@ -25,6 +25,8 @@ const props = withDefaults(defineProps<{ name: string; size?: number; stroke?: n
 
 // 图标表：键为语义名，值为 20×20 视框内的路径。与设计稿同一套几何。
 const ICONS: Record<string, string> = {
+  // 第三十八轮：智能体（与设计稿 design/v3/agents.py 的 i-bot 同几何）
+  bot: '<rect x="3.6" y="6.4" width="12.8" height="9.2" rx="2.6"/><path d="M10 3.2v3.2"/><circle cx="10" cy="3" r="1.1"/><circle cx="7.4" cy="10.6" r="1.15" fill="currentColor" stroke="none"/><circle cx="12.6" cy="10.6" r="1.15" fill="currentColor" stroke="none"/><path d="M8.2 13.4h3.6"/>',
   dash: '<rect x="3" y="3" width="6.2" height="6.2" rx="1.8"/><rect x="10.8" y="3" width="6.2" height="6.2" rx="1.8"/><rect x="3" y="10.8" width="6.2" height="6.2" rx="1.8"/><rect x="10.8" y="10.8" width="6.2" height="6.2" rx="1.8"/>',
   chat: '<path d="M3.5 6.2A2.7 2.7 0 0 1 6.2 3.5h7.6a2.7 2.7 0 0 1 2.7 2.7v4.6a2.7 2.7 0 0 1-2.7 2.7H8.6L4.7 16.2v-2.9a2.7 2.7 0 0 1-1.2-2.2z"/>',
   img: '<rect x="3" y="4" width="14" height="12" rx="2.4"/><circle cx="7.4" cy="8.4" r="1.3"/><path d="M3.6 14.4l4-3.6 2.8 2.4 2.9-2.6 3.1 2.8"/>',

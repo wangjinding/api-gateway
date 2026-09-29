@@ -148,24 +148,31 @@
 
 ## 2. 开发步骤
 
-### Step -1 · 技术验证（约 0.5h）★ 动手前先做
+### Step -1 · 技术验证 ✅ **已完成**（2026-09-29）
 
-```
-1. ✔ 已做：核实"请求级指定模型"不可行（见 ⑲）→ 方案已按甲案修正
-2. ✔ 已做：确认 PUT/GET /api/providers/active 支持 scope=agent + agent_id
-3. 待做：录一段**完整真实 SSE 事件流**（含工具调用）当 Step 2 的测试夹具
-4. 待做：确认 X-Agent-Id 选 profile 的行为（新建 profile 后）
-4b. ★ 待做：**QwenPaw 的 `input` 接不接受 `role: "system"` 的消息**（决定 `system_suffix` 的注入方式，见 ㉖）
-   · 接受 → 网关插入一条 system 消息（干净）
-   · 不接受 → 改成拼进首条 user 消息前缀（UI 标注）
-5. 待做：确认 ai-gateway profile 的 active_model 指向哪个 provider/model
-   （建议指向网关自己的 wangjinding provider + 别名 wjd，
-    这样引擎调模型也过网关，计量闭环）
-```
+| # | 验证项 | 结论 |
+|---|---|---|
+| 1 | 请求级指定模型是否可行 | ❌ **不可行** → 方案已按甲案修正（见 ⑲） |
+| 2 | `PUT/GET /api/providers/active` 的 scope | ✅ 支持 `scope=agent` + `agent_id` |
+| 3 | **SSE 事件谱 + 夹具** | ✅ **已录制并落盘** → 见下 |
+| 4 | `X-Agent-Id` 选 profile | ✅ 生效（实测带 `X-Agent-Id: default` 走 default 的会话/记忆） |
+| 4b | **`input` 接不接受 `role:"system"`** | ✅ **接受且真的生效** → `system_suffix` 用方案 ④（注入 system 消息） |
+| 5 | `ai-gateway` 的 active_model 指向 | ✅ 已确认为 `wangjinding` / `wjd`（引擎调用过网关，计量闭环成立） |
 
-**验收**：5 项都有明确结论；SSE 夹具落盘。
+**产出物**：
+- `tests/fixtures/sse-tool-flow.sse` —— 真实含工具调用的 SSE（14,900 字节 / 57 事件）
+- `docs/qwenpaw-agent-api-sse.md` —— **完整事件谱 + 适配器映射表**（Step 2 实现依据）
 
-### Step 0 · 建 QwenPaw profile `ai-gateway`（约 1h）★ 新增
+**事件谱要点（实测）**：`text`(36，正文增量，`delta:true` 累积 / `delta:false` 是快照要忽略) ·
+`plugin_call`(工具调用，名在 `content[0].data.name`、参数是 JSON 字符串) ·
+`plugin_call_output`(结果，在 `data.output`，用 `call_id` 配对) · `data`(分片，**忽略**) ·
+`response`(终态，`status: completed/failed/cancelled`) · `turn_usage`(**记 token/成本 的直接来源**，
+带 `model_name` 与缓存字段)。
+**顺序**：文本 → 工具调用 → 工具结果 → 更多文本 → … → `response` → `turn_usage`（同一响应内穿插）。
+
+**另一条实测**：`GET /healthz` **只回 `{"status":"ok"}` 不含版本** —— 验版本要读 `GET /` 的 `version`。
+
+### Step 0 · 建 QwenPaw profile `ai-gateway` ✅ **已完成**（2026-09-29）
 
 ```
 0. 备份：cp /root/.qwenpaw/config.json → config.json.bak-<日期>（记回滚方式）
@@ -184,6 +191,22 @@
 ```
 
 **验收**：`X-Agent-Id: ai-gateway` 跑通一轮对话；`default` 行为与之前一致。
+
+**实际完成情况（实测）**：
+
+| 项 | 结果 |
+|---|---|
+| 备份 | `config.json.bak-20260929-agents` |
+| 工作区 | `/root/.qwenpaw/workspaces/ai-gateway/`（**全新空白，未复制 default 的任何私人文件**） |
+| 提示词 | 新写 `SOUL.md` + `AGENTS.md`（网关智能体版）；`system_prompt_files: ["AGENTS.md","SOUL.md"]`（**不含 PROFILE.md**） |
+| 注册 | `config.json` 的 `agents.profiles` + `agent_order` 均已加 `ai-gateway` |
+| 工具 | ✅ **全开 27 个**（决策⑪）；`approval_level: OFF` |
+| 模型 | `active_model = {provider_id: "wangjinding", model: "wjd"}` |
+| 引擎 Key | 新建 `agent-engine`（label），明文暂存 `/tmp/agent_engine_key`(600)，待写入 QwenPaw 配置 |
+| **profile 可用性** | ✅ 实测 `X-Agent-Id: ai-gateway` 跑通，"网关就绪"正常返回 |
+| **模型指向** | ✅ `turn_usage` 明证 `provider_id: wangjinding / model_name: wjd` → **引擎过网关，计量闭环** |
+| **隔离验证** | ✅ 问"你是谁/认识老板吗"，答"没有个人身份、没有个人记忆…没有任何关于「老板」的信息"，并实际检查了工作区记忆文件 |
+| `default` 是否受影响 | ✅ 无影响（新建 profile 不动已有 profile） |
 **注意**：改 `config.json` 会触发配置重载。实测口径是"新增 profile 不影响已有 profile"，
 但**仍要先备份**；若发现 `default` 会话中断，立即回滚。
 

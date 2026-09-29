@@ -18,15 +18,19 @@ export interface NavGroup {
 
 /** 桌面侧栏 / 手机抽屉的完整菜单（按功能分组，组间一条分隔线）。 */
 export function navGroups(isAdmin: boolean): NavGroup[] {
+  // 第三十八轮：智能体（一期仅管理员；后端 features.agents 也按角色下发，两处一致）
+  const core: NavItem[] = [
+    { path: '/dashboard', key: 'dashboard', icon: 'dash' },
+    { path: '/chat', key: 'chat', icon: 'chat' },
+    { path: '/images', key: 'images', icon: 'img' },
+    { path: '/videos', key: 'videos', icon: 'vid' },
+  ]
+  if (isAdmin) core.push({ path: '/agents', key: 'agents', icon: 'bot' })
+
   const groups: NavGroup[] = [
     {
       id: 'core',
-      items: [
-        { path: '/dashboard', key: 'dashboard', icon: 'dash' },
-        { path: '/chat', key: 'chat', icon: 'chat' },
-        { path: '/images', key: 'images', icon: 'img' },
-        { path: '/videos', key: 'videos', icon: 'vid' },
-      ],
+      items: core,
     },
     {
       id: 'ops',

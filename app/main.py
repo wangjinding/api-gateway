@@ -57,6 +57,8 @@ from app.history import HistoryStore, HistoryError, MAX_ITEMS as HISTORY_CAP
 from app.feedback import FeedbackStore, FeedbackError, MAX_ENTRIES as FEEDBACK_CAP
 from app.video_owners import VideoOwnerStore
 from app import settings as gw_settings
+from app.agents import AgentStore, AgentsError
+from app import agents_routes
 
 # 功能 8: 读取 .env（若存在），补充 token 等环境变量。
 #   项目根 .env：不覆盖真实 env（override=False）；
@@ -85,6 +87,8 @@ else:
     CONFIG_PATH = _PROJECT_ROOT / "data" / "gateway.yaml"
 
 config: GatewayConfig = load_config(CONFIG_PATH)
+# 智能体（第三十八轮）：定义存 data/agents.yaml（可入库），会话复用 history
+_agents_store = AgentStore(os.environ.get("GATEWAY_AGENTS_PATH"))
 _metrics = Metrics(enabled=config.server.metrics_enabled)
 _access = AccessLog(maxlen=config.observability.access_log_maxlen)
 _limiter = RateLimiter()
@@ -332,9 +336,9 @@ _docs_on = config.server.docs_enabled   # 安全默认关（report: /docs、/ope
 
 # 本轮修复: 版本号收敛到单一常量。此前 "2.4.0" 硬编码在 FastAPI / / 导航 / /auth/login
 #   三处，/health 干脆没返回版本 —— 前端「网关版本」一直显示 v-。
-# 2026-09-29: 2.4.0 → 2.4.1（前端间距规范统一：页面四周等距 + 卡片间距走令牌）。
+# 2026-09-29: 2.4.0 → 2.4.1（前端间距规范统一）；2.4.1 → 2.5.0（新增「智能体」功能模块）。
 #   ★ 版本号纪律：每次改动都要往上加，小改动加小版本号、大改动加大版本号（README 有专章）。
-VERSION = "2.4.1"
+VERSION = "2.5.0"
 
 app = FastAPI(
     title="API Gateway",
@@ -3209,6 +3213,30 @@ def _require_admin(request: Request) -> str:
     if role != "admin":
         raise HTTPException(403, "仅管理员可执行此操作")
     return account
+
+
+# ── 智能体端点装配（第三十八轮）───────────────────────────────────────
+def _model_ids_and_aliases() -> tuple[list[str], list[str]]:
+    """模型 id 与别名清单（供智能体 slug 查重）。"""
+    cfg = _cfg()
+    ids: list[str] = []
+    for p in (cfg.providers or {}).values():
+        for m in (p.models or []):
+            ids.append(m.id)
+    return ids, list((cfg.aliases or {}).keys())
+
+
+# 注意：_require_admin / _json_object 定义在本文件更靠后的位置 —— 用 lambda 延迟解析，
+# 避免"install 时名字还不存在"。安装只发生在 import 期，但调用发生在请求期，安全。
+agents_routes.install(
+    app,
+    store=_agents_store,
+    require_auth=require_auth,
+    require_admin=lambda req: _require_admin(req),
+    json_body=lambda req: _json_object(req),
+    model_index=_model_ids_and_aliases,
+    history_get=lambda account, kind: _history.get(account, kind),
+)
 
 
 @app.get("/auth/users")

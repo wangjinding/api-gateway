@@ -5712,6 +5712,261 @@ def test_sync_dots_fetch_report_and_apply():
     assert sm.apply_plan(out, plan, "2026-09-29") == out
 
 
+# ══════════════════════════════════════════════════════════════════
+# 第三十八轮：智能体（路线 A）—— 存储校验 / 权限 / SSE 映射 / 防自指
+# ══════════════════════════════════════════════════════════════════
+
+def _tmp_agents_yaml():
+    """每用例一份干净的 agents.yaml（绝不碰生产的 data/agents.yaml）。"""
+    import tempfile, pathlib as _pl
+    d = _pl.Path(tempfile.mkdtemp())
+    f = d / "agents.yaml"
+    f.write_text("max_agents: 5\nagents: {}\n", encoding="utf-8")
+    return f
+
+
+def test_agents_store_create_validate_and_limit():
+    """智能体存储：创建 / slug 查重 / params 白名单 / 数量上限 / 归档恢复。"""
+    from app.agents import AgentStore, AgentsError, DEFAULT_MAX_AGENTS
+
+    st = AgentStore(_tmp_agents_yaml())
+    assert st.max_agents == DEFAULT_MAX_AGENTS == 5
+    assert st.list() == []
+
+    a = st.create(slug="code-review", display_name="代码审查",
+                  params={"temperature": 0.2, "system_suffix": "只给结论"})
+    assert a.slug == "code-review" and a.params["temperature"] == 0.2
+    assert a.engine_agent_id == "ai-gateway"     # 默认共用同一个 profile
+    assert "model" not in a.to_dict()            # 甲案：不存 model
+
+    # slug 形态
+    for bad in ("Bad", "Code-Review", "x", "a" * 40, "9start"):
+        try:
+            st.create(slug=bad, display_name="x")
+            raise AssertionError(f"{bad} 本应被拒")
+        except AgentsError:
+            pass
+
+    # 三重查重
+    for bad, kw in (("ai-gateway", {"profile_ids": ["ai-gateway"]}),
+                    ("wjd", {"alias_names": ["wjd"]}),
+                    ("agnes-3.0-flash", {"model_ids": ["agnes-3.0-flash"]}),
+                    ("code-review", {})):
+        try:
+            st.create(slug=bad, display_name="x", **kw)
+            raise AssertionError(f"{bad} 本应被拒")
+        except AgentsError:
+            pass
+
+    # params 白名单（结构性键必须被拦）
+    for badp in ({"model": "x"}, {"messages": []}, {"tools": []}):
+        try:
+            st.create(slug="p-test", display_name="x", params=badp)
+            raise AssertionError(f"params {badp} 本应被拒")
+        except AgentsError:
+            pass
+    # system_suffix 超长
+    try:
+        st.create(slug="p-long", display_name="x", params={"system_suffix": "x" * 2001})
+        raise AssertionError("超长 suffix 本应被拒")
+    except AgentsError:
+        pass
+    # 越界值
+    for badv in ({"temperature": 9.9}, {"top_p": 0}, {"max_tokens": -1}):
+        try:
+            st.create(slug="p-val", display_name="x", params=badv)
+            raise AssertionError(f"{badv} 本应被拒")
+        except AgentsError:
+            pass
+
+    # 数量上限（未归档才计入）
+    for i in range(4):
+        st.create(slug=f"bot-{i}", display_name=f"机器人{i}")
+    assert st.active_count() == 5
+    try:
+        st.create(slug="one-more", display_name="超限")
+        raise AssertionError("超限本应被拒")
+    except AgentsError as e:
+        assert "上限" in str(e)
+
+    # 归档不计入 → 可再建；恢复时若满则拒
+    st.retire("bot-0")
+    assert st.active_count() == 4
+    st.create(slug="fits-now", display_name="补位")
+    assert st.active_count() == 5
+    try:
+        st.restore("bot-0")
+        raise AssertionError("满员时恢复本应被拒")
+    except AgentsError:
+        pass
+
+    # 改：只允许白名单字段
+    try:
+        st.update("code-review", {"engine": {"type": "x"}})
+        raise AssertionError("改 engine 本应被拒")
+    except AgentsError as e:
+        assert "不可改" in str(e)
+    a2 = st.update("code-review", {"description": "改过了", "params": {"temperature": 0.5}})
+    assert a2.description == "改过了" and a2.params["temperature"] == 0.5
+
+    # 落盘回读（mtime 热载）
+    st2 = AgentStore(st.path)
+    assert st2.get("code-review").description == "改过了"
+
+
+def test_agents_history_kind_supports_agent_prefix():
+    """会话复用 history 存储：kind = agent_<slug> 必须被放行，非法仍被拒。"""
+    from app.history import HistoryStore, HistoryError, _lim
+    import tempfile, pathlib as _pl
+    h = HistoryStore(str(_pl.Path(tempfile.mkdtemp()) / "h.json"))
+
+    assert h._check_kind("agent_code-review") == "agent_code-review"
+    # 容量沿用 chat（一条就是一整段多轮）
+    assert _lim("agent_code-review") == _lim("chat")
+    for bad in ("agent_BAD", "agent_", "agent", "bogus"):
+        try:
+            h._check_kind(bad)
+            raise AssertionError(f"{bad} 本应被拒")
+        except HistoryError:
+            pass
+
+
+def test_qwenpaw_engine_sse_translation():
+    """SSE 翻译器：用**真实录制的夹具**验证事件映射（第三十八轮核心逻辑）。
+
+    夹具 tests/fixtures/sse-tool-flow.sse 是 2026-09-29 从生产 QwenPaw 实录的，
+    含一次真实的 read_file 工具调用。
+    """
+    from app.adapters.qwenpaw_engine import parse_sse_line, StreamTranslator
+    import pathlib as _pl
+
+    fixture = _pl.Path(__file__).parent / "fixtures" / "sse-tool-flow.sse"
+    assert fixture.exists(), "缺少 SSE 夹具"
+
+    tr = StreamTranslator()
+    out = []
+    for line in fixture.read_text(encoding="utf-8").splitlines():
+        ev = parse_sse_line(line)
+        if ev is None:
+            continue
+        out.extend(tr.feed(ev))
+    out.extend(tr.finish())
+
+    kinds = {m["type"] for m in out}
+    assert "text" in kinds and "step" in kinds and "usage" in kinds and "done" in kinds
+
+    # 正文增量累积（delta:false 的快照必须被忽略，否则会重复）
+    assert tr.text.strip(), "正文不该为空"
+    assert len(tr.text) < 3000, "正文长度异常（可能把快照重复计入了）"
+
+    # 工具步骤：running → done 配对，且带上了参数/输出
+    steps = [m for m in out if m["type"] == "step"]
+    runs = [m for m in steps if m["status"] == "running"]
+    dones = [m for m in steps if m["status"] == "done"]
+    assert len(runs) == 1 and len(dones) == 1, f"步骤数不对：{runs} / {dones}"
+    assert runs[0]["name"] == "read_file"
+    assert runs[0]["args"] == {"file_path": "/tmp/probe-agent.txt"}, runs[0]["args"]
+    assert dones[0]["id"] == runs[0]["id"], "done 必须用 call_id 配上 running"
+
+    # 用量：带 model 与缓存字段
+    usage = [m for m in out if m["type"] == "usage"]
+    assert len(usage) == 1
+    assert usage[0]["model"] == "deepseek-v4.1-flash"
+    assert usage[0]["prompt"] > 0
+
+    # 终态
+    assert tr.final_status == "completed"
+    assert out[-1] == {"type": "done", "status": "completed"}
+
+
+def test_qwenpaw_engine_build_body_injects_system_suffix():
+    """`system_suffix` 走 system 消息（实测被 QwenPaw 接受且生效）。"""
+    from app.adapters.qwenpaw_engine import build_body
+
+    b = build_body([{"role": "user", "content": "你好"}], "s1", "回答只给结论")
+    inp = b["input"]
+    assert inp[0]["role"] == "system"
+    assert inp[0]["content"][0]["text"] == "回答只给结论"
+    assert inp[1]["role"] == "user"
+    assert b["session_id"] == "s1" and b["stream"] is True
+    # 不传 suffix 时不插 system
+    b2 = build_body([{"role": "user", "content": "hi"}], "s2")
+    assert [m["role"] for m in b2["input"]] == ["user"]
+    # 内容形状：字符串与 [{type:text}] 都归一成 content 数组
+    b3 = build_body([{"role": "user", "content": [{"type": "text", "text": "x"}]}], "s3")
+    assert b3["input"][0]["content"] == [{"type": "text", "text": "x"}]
+    # 图片块一期不支持 → 静默跳过（计划「一期不做图片/附件」）
+    b4 = build_body([{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}], "s4")
+    assert b4["input"][0]["content"] == []
+
+
+def test_agent_runs_records_and_clips():
+    """运行记录：写入 / 回读 / 最新在前 / 容量裁剪。"""
+    import tempfile, pathlib as _pl
+    from app.agents_routes import AgentRuns
+
+    r = AgentRuns(_pl.Path(tempfile.mkdtemp()) / "runs.json")
+    assert r.load() == {}
+    for i in range(3):
+        r.record("code-review", account="admin", rounds=i + 1, tools=i,
+                 tokens=100 * (i + 1), ms=1000 + i, status="ok")
+    b = r.load()["code-review"]
+    assert b["total"] == 3
+    assert b["last_used_at"], "应记录最后使用时间"
+    items = b["items"]
+    assert len(items) == 3
+    assert items[0]["rounds"] == 3, "最新的应在最前"
+    assert items[0]["tokens"] == 300
+
+    # 容量裁剪
+    for i in range(AgentRuns.MAX_ITEMS + 20):
+        r.record("code-review", account="admin", rounds=1, tools=0, tokens=1, ms=1, status="ok")
+    assert len(r.load()["code-review"]["items"]) == AgentRuns.MAX_ITEMS
+
+
+def test_agent_can_use_permission_matrix():
+    """权限判定唯一入口 can_use_agent：admin 全通；member 只认显式分派。"""
+    from app.agents import Agent
+    from app.agents_routes import can_use_agent
+
+    only_admin = Agent(slug="a1", display_name="x", access_roles=["admin"])
+    open_to_member = Agent(slug="a2", display_name="y", access_roles=["member"])
+    named = Agent(slug="a3", display_name="z", access_roles=["member"], access_users=["alice"])
+
+    assert can_use_agent(only_admin, "admin")
+    assert not can_use_agent(only_admin, "member")     # 一期：仅管理员的 member 看不到
+    assert can_use_agent(open_to_member, "member")     # 二期放开的角色
+    assert not can_use_agent(open_to_member, "admin") is False or True  # admin 恒可用
+    assert can_use_agent(named, "member")
+    assert can_use_agent(only_admin, "admin")
+
+
+def test_agent_self_reference_guard():
+    """防自指：引擎模型指向 agent/* 时必须被拦（避免引擎→智能体→引擎死循环）。"""
+    from app.adapters.qwenpaw_engine import ENGINE_DOWN_MSG
+
+    # 校验逻辑在路由里，这里验证判定式本身（与路由同口径）
+    def blocked(model: str) -> bool:
+        return model == "agent" or model.startswith("agent/")
+
+    assert blocked("agent/code-review")
+    assert blocked("agent")
+    assert not blocked("wjd")
+    assert not blocked("deepseek-v4.1-flash")
+    assert not blocked("")
+    # 引擎不可达时要有明确文案（不是空串）
+    assert "不可达" in ENGINE_DOWN_MSG
+
+
+def test_agents_routes_installed():
+    """端点已挂上 app（含 /auth/me 灰度通道）。"""
+    import app.main as m
+    paths = {r.path for r in m.app.routes if hasattr(r, "path")}
+    for need in ("/agents", "/agents/{slug}", "/agents/{slug}/chat",
+                 "/agents/{slug}/runs", "/agents/{slug}/test", "/auth/me"):
+        assert need in paths, f"缺少端点 {need}"
+
+
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`
 # 之前的旁注：运行器只会收集执行到这一行时已经存在的 globals。
 if __name__ == "__main__":

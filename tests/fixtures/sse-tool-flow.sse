@@ -1,0 +1,114 @@
+data: {"id":"response_f5a2f704a9864e86839393e63d6e8cbc","output":[],"status":"created","created_at":"2026-09-29T04:17:20+00:00","completed_at":null,"metadata":null,"object":"response","session_id":"probe-tool-flow","sequence_number":1}
+
+data: {"id":"response_f5a2f704a9864e86839393e63d6e8cbc","output":[],"status":"in_progress","created_at":"2026-09-29T04:17:20+00:00","completed_at":null,"metadata":null,"object":"response","session_id":"probe-tool-flow","sequence_number":2}
+
+data: {"id":"msg_c9b1cc9ebc644ff4a26a1a88eeb4213e","type":"message","role":"assistant","content":[],"status":"in_progress","metadata":null,"name":"assistant","object":"message","sequence_number":3}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_c9b1cc9ebc644ff4a26a1a88eeb4213e", "text": "I", "sequence_number": 4}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_c9b1cc9ebc644ff4a26a1a88eeb4213e", "text": "'ll read that", "sequence_number": 5}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_c9b1cc9ebc644ff4a26a1a88eeb4213e", "text": " file for", "sequence_number": 6}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_c9b1cc9ebc644ff4a26a1a88eeb4213e", "text": " you.\n\n", "sequence_number": 7}
+
+data: {"type":"text","delta":false,"index":0,"status":null,"object":"content","msg_id":"msg_c9b1cc9ebc644ff4a26a1a88eeb4213e","text":"I'll read that file for you.\n\n","sequence_number":8}
+
+data: {"id":"msg_c9b1cc9ebc644ff4a26a1a88eeb4213e","type":"message","role":"assistant","content":[{"type":"text","delta":false,"index":0,"status":null,"object":"content","msg_id":null,"text":"I'll read that file for you.\n\n"}],"status":"completed","metadata":null,"name":"assistant","object":"message","sequence_number":9}
+
+data: {"id":"msg_72e987ec0cb5460581b85c365b86182f","type":"plugin_call","role":"assistant","content":[],"status":"in_progress","metadata":null,"name":"assistant","object":"message","sequence_number":10}
+
+data: {"type": "data", "delta": true, "index": 0, "status": "in_progress", "object": "content", "msg_id": "msg_72e987ec0cb5460581b85c365b86182f", "data": {"call_id": "chatcmpl-tool-b207f3da7699c9fa", "name": "read_file", "arguments": ""}, "sequence_number": 11}
+
+data: {"type": "data", "delta": true, "index": 0, "status": "in_progress", "object": "content", "msg_id": "msg_72e987ec0cb5460581b85c365b86182f", "data": {"arguments": ""}, "sequence_number": 12}
+
+data: {"type": "data", "delta": true, "index": 0, "status": "in_progress", "object": "content", "msg_id": "msg_72e987ec0cb5460581b85c365b86182f", "data": {"arguments": ""}, "sequence_number": 13}
+
+data: {"type": "data", "delta": true, "index": 0, "status": "in_progress", "object": "content", "msg_id": "msg_72e987ec0cb5460581b85c365b86182f", "data": {"arguments": ""}, "sequence_number": 14}
+
+data: {"type": "data", "delta": true, "index": 0, "status": "in_progress", "object": "content", "msg_id": "msg_72e987ec0cb5460581b85c365b86182f", "data": {"arguments": "{\"file_path\": \"/tmp/probe-agent.txt\"}"}, "sequence_number": 15}
+
+data: {"type":"data","delta":false,"index":null,"status":"completed","object":"content","msg_id":null,"data":{"call_id":"chatcmpl-tool-b207f3da7699c9fa","name":"read_file","arguments":"{\"file_path\": \"/tmp/probe-agent.txt\"}"},"sequence_number":16}
+
+data: {"id":"msg_72e987ec0cb5460581b85c365b86182f","type":"plugin_call","role":"assistant","content":[{"type":"data","delta":false,"index":null,"status":"completed","object":"content","msg_id":null,"data":{"call_id":"chatcmpl-tool-b207f3da7699c9fa","name":"read_file","arguments":"{\"file_path\": \"/tmp/probe-agent.txt\"}"},"sequence_number":16}],"status":"completed","metadata":null,"name":"assistant","object":"message","sequence_number":17}
+
+data: {"id":"msg_fcd7df26a1d04ea4adb2b318b82be07e","type":"plugin_call_output","role":"tool","content":[],"status":"in_progress","metadata":null,"name":"assistant","object":"message","sequence_number":18}
+
+data: {"type":"data","delta":false,"index":0,"status":"in_progress","object":"content","msg_id":"msg_fcd7df26a1d04ea4adb2b318b82be07e","data":{"call_id":"chatcmpl-tool-b207f3da7699c9fa","name":"read_file","output":""},"sequence_number":19}
+
+data: {"type":"data","delta":false,"index":0,"status":"in_progress","object":"content","msg_id":"msg_fcd7df26a1d04ea4adb2b318b82be07e","data":{"call_id":"chatcmpl-tool-b207f3da7699c9fa","name":"read_file","output":"Error: The file /tmp/probe-agent.txt does not exist."},"sequence_number":20}
+
+data: {"type":"data","delta":false,"index":0,"status":"completed","object":"content","msg_id":null,"data":{"call_id":"chatcmpl-tool-b207f3da7699c9fa","name":"read_file","output":"Error: The file /tmp/probe-agent.txt does not exist.","state":"error"},"sequence_number":21}
+
+data: {"id":"msg_fcd7df26a1d04ea4adb2b318b82be07e","type":"plugin_call_output","role":"tool","content":[{"type":"data","delta":false,"index":0,"status":"completed","object":"content","msg_id":null,"data":{"call_id":"chatcmpl-tool-b207f3da7699c9fa","name":"read_file","output":"Error: The file /tmp/probe-agent.txt does not exist.","state":"error"},"sequence_number":21}],"status":"completed","metadata":null,"name":"assistant","object":"message","sequence_number":22}
+
+data: {"id":"msg_d4642dbdee5d453493a61c3a167ca2f6","type":"message","role":"assistant","content":[],"status":"in_progress","metadata":null,"name":"assistant","object":"message","sequence_number":23}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "文件", "sequence_number": 24}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "不存在，读不到内容", "sequence_number": 25}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "。", "sequence_number": 26}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "😕\n\n`/tmp/pro", "sequence_number": 27}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "be-agent.txt` 没有", "sequence_number": 28}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "找到", "sequence_number": 29}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": " —— 可能是", "sequence_number": 30}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "路径写", "sequence_number": 31}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "错了，或者文件", "sequence_number": 32}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "还没", "sequence_number": 33}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "创建/已经被", "sequence_number": 34}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "清掉了", "sequence_number": 35}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "。", "sequence_number": 36}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "要我", "sequence_number": 37}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "看看", "sequence_number": 38}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": " `/tmp` 下", "sequence_number": 39}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "有什么别的", "sequence_number": 40}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "文件吗？\n\n", "sequence_number": 41}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "", "sequence_number": 42}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "", "sequence_number": 43}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "", "sequence_number": 44}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "", "sequence_number": 45}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "", "sequence_number": 46}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "", "sequence_number": 47}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "", "sequence_number": 48}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "", "sequence_number": 49}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "", "sequence_number": 50}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "", "sequence_number": 51}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "", "sequence_number": 52}
+
+data: {"type": "text", "delta": true, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "", "sequence_number": 53}
+
+data: {"type": "text", "delta": false, "index": 0, "status": null, "object": "content", "msg_id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "text": "文件不存在，读不到内容。😕\n\n`/tmp/probe-agent.txt` 没有找到 —— 可能是路径写错了，或者文件还没创建/已经被清掉了。要我看看 `/tmp` 下有什么别的文件吗？", "sequence_number": 54}
+
+data: {"id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "type": "message", "role": "assistant", "content": [{"type": "text", "delta": false, "index": 0, "status": null, "object": "content", "msg_id": null, "text": "文件不存在，读不到内容。😕\n\n`/tmp/probe-agent.txt` 没有找到 —— 可能是路径写错了，或者文件还没创建/已经被清掉了。要我看看 `/tmp` 下有什么别的文件吗？"}], "status": "completed", "metadata": null, "name": "assistant", "object": "message", "sequence_number": 55, "usage": {"input_tokens": 13864, "output_tokens": 90}}
+
+data: {"id": "response_f5a2f704a9864e86839393e63d6e8cbc", "output": [{"id": "msg_c9b1cc9ebc644ff4a26a1a88eeb4213e", "type": "message", "role": "assistant", "content": [{"type": "text", "delta": false, "index": 0, "status": null, "object": "content", "msg_id": null, "text": "I'll read that file for you.\n\n"}], "status": "completed", "metadata": null, "name": "assistant", "object": "message", "sequence_number": 9}, {"id": "msg_72e987ec0cb5460581b85c365b86182f", "type": "plugin_call", "role": "assistant", "content": [{"type": "data", "delta": false, "index": null, "status": "completed", "object": "content", "msg_id": null, "data": {"call_id": "chatcmpl-tool-b207f3da7699c9fa", "name": "read_file", "arguments": "{\"file_path\": \"/tmp/probe-agent.txt\"}"}, "sequence_number": 16}], "status": "completed", "metadata": null, "name": "assistant", "object": "message", "sequence_number": 17}, {"id": "msg_fcd7df26a1d04ea4adb2b318b82be07e", "type": "plugin_call_output", "role": "tool", "content": [{"type": "data", "delta": false, "index": 0, "status": "completed", "object": "content", "msg_id": null, "data": {"call_id": "chatcmpl-tool-b207f3da7699c9fa", "name": "read_file", "output": "Error: The file /tmp/probe-agent.txt does not exist.", "state": "error"}, "sequence_number": 21}], "status": "completed", "metadata": null, "name": "assistant", "object": "message", "sequence_number": 22}, {"id": "msg_d4642dbdee5d453493a61c3a167ca2f6", "type": "message", "role": "assistant", "content": [{"type": "text", "delta": false, "index": 0, "status": null, "object": "content", "msg_id": null, "text": "文件不存在，读不到内容。😕\n\n`/tmp/probe-agent.txt` 没有找到 —— 可能是路径写错了，或者文件还没创建/已经被清掉了。要我看看 `/tmp` 下有什么别的文件吗？"}], "status": "completed", "metadata": null, "name": "assistant", "object": "message", "sequence_number": 55, "usage": {"input_tokens": 13864, "output_tokens": 90}}], "status": "completed", "created_at": "2026-09-29T04:17:20+00:00", "completed_at": "2026-09-29T04:17:23+00:00", "metadata": null, "object": "response", "session_id": "probe-tool-flow", "sequence_number": 56, "usage": {"input_tokens": 13864, "output_tokens": 90}}
+
+data: {"type": "turn_usage", "session_id": "probe-tool-flow", "usage": {"provider_id": "opencode", "model_name": "deepseek-v4.1-flash", "prompt_tokens": 27653, "completion_tokens": 141, "total_tokens": 27794, "cache_read_tokens": 17152, "cache_write_tokens": 0, "cache_eligible_input_tokens": 27653, "cache_observed": true, "cache_hit_rate": 62.02581998336528, "context_size": 1000000, "compact_threshold": 0.8, "session_cache_read_tokens": 17152, "session_cache_eligible_input_tokens": 27653, "session_cache_observed": true, "session_cache_hit_rate": 62.02581998336528}, "context_usage": {"estimated_tokens": 149, "max_input_length": 1000000, "context_usage_ratio": 0.014899999999999998}}
+

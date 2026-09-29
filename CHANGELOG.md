@@ -1,5 +1,51 @@
 # CHANGELOG
 
+## 2026-09-29 · 新增「智能体」功能模块（路线 A：界面在网关，引擎 QwenPaw）
+
+老板要求：「在 ai 网关里做智能体 agent，新的一个菜单」。**一期只对管理员开放**，成熟后下发普通用户。
+完整设计（27 条决策、经 4 轮评审）见 `docs/agents-dev-plan.md`。
+
+**架构（路线 A）**：界面与权限在网关，执行在 QwenPaw（独立 profile `ai-gateway`）。
+网关当门面（鉴权/计量/灰度/审计），引擎提供服务端工具能力（文件/命令/浏览器）。
+
+**关键技术验证（Step -1，全部实测）**：
+- **请求级指定模型无效** —— 打 `/api/console/chat` 传 `model:"agnes-3.0-flash"` 被忽略，
+  `turn_usage` 明文回 `provider_id=opencode, model_name=deepseek-v4.1-flash`；源码
+  `AgentRequest` 无 model 字段。模型是 **profile 级**（`PUT /api/providers/active`，`scope=agent`）。
+  → **甲案**：所有智能体共用 `ai-gateway` 一个 profile ⇒ **共用同一个模型**，配置页模型栏只读。
+- **`role:"system"` 被接受且生效** —— 塞入「只用英文回答」后模型真的改用英文
+  → `params.system_suffix` 走**注入 system 消息**（最干净的方案）。
+- **SSE 事件谱已录制**：夹具 `tests/fixtures/sse-tool-flow.sse`（14,900 字节 / 57 事件），
+  文档 `docs/qwenpaw-agent-api-sse.md`（完整事件谱 + 适配器映射表）。
+
+**新增**：
+- `app/agents.py` —— `AgentStore`（`data/agents.yaml`，600/原子写/mtime 热载）+ 严格校验：
+  slug 形态与**三重查重**（模型 id / 别名 / QwenPaw profile）、`params` **4 键白名单**
+  （`temperature`/`max_tokens`/`top_p`/`system_suffix`，结构性键一律拒）、`system_suffix` 限长 2000、
+  `max_agents: 5` 软上限（归档不计入）、归档后 `restore` 可恢复。
+- `app/adapters/qwenpaw_engine.py` —— 引擎适配器：OpenAI 形状 ↔ AgentScope Agent API、
+  **SSE 翻译器**（`text` 累积、`delta:false` 快照忽略、`plugin_call`→轨迹步骤、`plugin_call_output`
+  用 `call_id` 配对、`turn_usage`→计量、`response`→终态）、引擎不可达/超时/中断的明确文案。
+- `app/agents_routes.py` —— 端点：`GET/POST/PUT/DELETE /agents`、`/agents/{slug}/restore`、
+  `/chat`（SSE）、`/stop`、`/runs`、`/sessions`、`/test`（试跑）+ **`GET /auth/me`**（灰度通道，
+  下发 `features.agents` —— 后端是唯一权威）。运行记录 `data/agent_runs.json`。
+  权限判定唯一入口 `can_use_agent()`；**防自指**（引擎模型不得指向 `agent/*`，否则死循环）。
+- 前端 `views/Agents.vue`（列表 + 对话/配置/运行记录三 Tab）+ `lib/agents.ts`（含 SSE 解析）；
+  菜单核心组第 5 位、图标 `bot`；i18n 中英对称（871/871）。
+- `app/history.py` 扩展：会话类别支持 `agent_<slug>`（**复用**现有存储，不新开端点）。
+
+**契约要点**：智能体 = 名称/描述 + **参数** + 独立会话历史。智能体之间**共用**引擎 profile、
+模型、提示词与记忆（决策 ⑨ 已确认接受）；提示词归 QwenPaw 管（配置页只读 + 指路）。
+
+**上线实测**：`/agents` 建/改/查重/上限全部正确；**真实对话跑通** —— 让智能体用 `read_file`
+读 `/etc/hostname`，前端正确显示「执行了 1 步」+ 工具参数、正文、计量
+（`wjd · 47196 tokens · 缓存 13696`）、终态；引擎调用经 `wangjinding` **过网关**（计量闭环）。
+
+**测试**：209 → **217 全过**（新增 8 条：存储校验/数量上限/归档恢复、history kind 扩展、
+**SSE 翻译器用真实夹具验证**、`system_suffix` 注入、运行记录、权限矩阵、防自指、端点装配）。
+`ci_check.sh` 全绿。版本 **2.4.1 → 2.5.0**。
+
+
 ## 2026-09-29 · Dots AI 纳入每日模型清单同步
 
 老板要求：「把 https://dots.ai/platform/docs 加入每日定时任务的同步任务来」。

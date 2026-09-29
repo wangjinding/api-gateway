@@ -25,9 +25,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 
 KINDS = ("chat", "images", "videos")
+
+# 第三十八轮：智能体会话复用本模块，类别形如 `agent_<slug>`（见 docs/agents-dev-plan.md ㉑）。
+#   理由：会话列表要的"新建 / 切换 / 重命名 / 删除 / 按账号隔离 / 容量裁剪"这里全都有，
+#   新开一套端点纯属重复。slug 形态已在 AgentStore 校验过（小写字母数字连字符）。
+AGENT_KIND_PREFIX = "agent_"
+_AGENT_KIND_RE = re.compile(r"^agent_[a-z][a-z0-9-]{1,31}$")
 # 各类别的容量按"内容天然体量"分开定：对话一条就是一整段多轮消息（正文可能很长），
 # 图像一条只有 URL + prompt，视频一条带一段上游 raw 回执 —— 一刀切会把对话正文截坏。
 LIMITS: dict[str, dict[str, int]] = {
@@ -42,6 +49,9 @@ MAX_FILE_BYTES = 4 * 1024 * 1024   # 整份 history.json 的软上限
 
 
 def _lim(kind: str) -> dict[str, int]:
+    # 智能体会话与普通对话体量相同（一整段多轮消息）→ 沿用 chat 的容量
+    if kind.startswith(AGENT_KIND_PREFIX):
+        return LIMITS["chat"]
     return LIMITS.get(kind, {"items": MAX_ITEMS, "item_bytes": MAX_ITEM_BYTES,
                              "field_chars": MAX_FIELD_CHARS})
 
@@ -130,9 +140,14 @@ class HistoryStore:
     # ── 读写 ───────────────────────────────
     @staticmethod
     def _check_kind(kind: str) -> str:
-        if kind not in KINDS:
-            raise HistoryError(f"未知历史类别 {kind!r}，可选：{'/'.join(KINDS)}")
-        return kind
+        if kind in KINDS:
+            return kind
+        # 智能体会话：agent_<slug>（第三十八轮）
+        if _AGENT_KIND_RE.match(kind):
+            return kind
+        raise HistoryError(
+            f"未知历史类别 {kind!r}，可选：{'/'.join(KINDS)}、或 agent_<智能体 slug>"
+        )
 
     def get(self, account: str, kind: str) -> list[dict]:
         self._check_kind(kind)

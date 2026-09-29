@@ -32,6 +32,12 @@ data/feedback_media/
 data/sessions.json
 data/video_owners.json
 
+# 智能体运行记录（第三十八轮）：运行时数据（谁在什么时候用了哪个智能体），
+# 与 sessions.json 同理 —— 可重新生成、不该进版本库。
+# 注意 data/agents.yaml 是**配置**（不含秘密），按计划 ⑯ **要入库**。
+data/agent_runs.json
+data/agents.yaml.bak
+
 # 配置自动备份（每存一次网关配置就多一对）：不该跟着源码走，也不该在仓库里堆历史版本
 data/*.bak
 

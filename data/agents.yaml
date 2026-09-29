@@ -1,0 +1,28 @@
+# 智能体定义（第三十八轮 · 路线 A：界面在网关，引擎是 QwenPaw）
+#
+# 说明：
+#   · 所有智能体共用 QwenPaw 的同一个 profile（engine.agent_id），
+#     也共用同一个模型 —— 模型是 profile 级设置（请求级指定无效，已实测）。
+#   · 提示词主档归 QwenPaw 管（改 SOUL.md / AGENTS.md）；
+#     这里的 params.system_suffix 只是一小条角色补充。
+#   · 本文件不含秘密，可入版本库。
+#   · 归档（status: retired）不计入 max_agents 上限。
+max_agents: 5
+agents:
+  code-review:
+    display_name: 代码审查
+    description: 只看仓库改动，输出问题清单
+    params:
+      temperature: 0.2
+      system_suffix: 回答只给结论，不要解释过程。
+    engine:
+      type: qwenpaw
+      base_url: http://127.0.0.1:8088
+      agent_id: ai-gateway
+    access:
+      roles:
+      - admin
+      users: []
+    status: published
+    created_at: '2026-09-29 12:45:18'
+    updated_at: '2026-09-29 12:45:18'
