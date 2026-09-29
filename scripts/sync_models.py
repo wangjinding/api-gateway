@@ -5,6 +5,7 @@
 （老板 2026-09-24 定：文档新增的加进去、下线的删掉、参数变了就更新，网关要和文档同步。）
 
 数据源（都是官方页面，没有第三方）：
+  · Dots AI      https://dots.ai/platform/docs（第三十七轮纳入；SPA，正文在 JS chunk 里）
   · OpenCode Go  https://opencode.ai/v2/docs/console/go/
       末尾 `## Endpoints` 表 → 模型 id + 官方协议线（chat/completions | messages | responses）
       价格表 → 免费模型识别（全 Free 的那些）
@@ -53,7 +54,7 @@ AGNES_PRICING_URL = "https://www.agnes-ai.cn/zh-Hans/docs/pricing.md"
 AGNES_SECTION_TYPE = {"文本模型": "text", "图片模型": "image", "视频模型": "video"}
 
 # 同步的两个供应商 → 各自「文档里的模型清单」从哪来
-SYNC_PROVIDERS = ("opencode", "agnes")
+SYNC_PROVIDERS = ("opencode", "agnes", "dots")
 
 # 永不自动删的名单：官方文档表**收录滞后**，实测上游还在服务的模型。
 #   删了 = 白丢一个能用的模型，所以列在这里；每次报告都会点名，要删说一声就删。
@@ -309,6 +310,58 @@ def fetch_agnes_context() -> dict[str, dict]:
 
 
 # ── 比对 ───────────────────────────────────────────────────────
+# ── Dots AI（第三十七轮，老板要求纳入每日同步）──────────────────────
+DOTS_DOCS_URL = "https://dots.ai/platform/docs"
+
+
+def _dots_doc_text() -> str:
+    """取 Dots 文档正文（两步发现）。
+
+    坑：`/platform/docs` 是 SPA —— **正文不在 HTML 里**。实测模型定价表、上下文窗口、
+    「免费体验」说明都是**随前端 JS chunk 一起发布**的。所以：
+      ① GET 文档页 → 找主包 `assets/index-*.js`
+      ② GET 主包 → 找文档页自己的 chunk `assets/ApiDocsPage-*.js`
+         （名字带内容 hash，每次发版都变 → **不能写死**）
+    """
+    html = _get(DOTS_DOCS_URL)
+    m = re.search(r"/platform/assets/(index-[A-Za-z0-9_.-]+\.js)", html)
+    if not m:
+        raise RuntimeError("文档页里没找到主包（页面结构可能变了）")
+    main_js = _get(f"https://dots.ai/platform/assets/{m.group(1)}")
+    m2 = re.search(r"assets/(ApiDocsPage-[A-Za-z0-9_.-]+\.js)", main_js)
+    if not m2:
+        raise RuntimeError("主包里没找到文档页 chunk（构建产物结构可能变了）")
+    return _get(f"https://dots.ai/platform/assets/{m2.group(1)}")
+
+
+def fetch_dots() -> dict[str, dict]:
+    """抓 Dots 的模型清单（口径与 Agnes 一致：以文档里的**模型定价表**为准）。
+
+    · 模型行形如 `model:"dots3-note-prev",input:"$0.14",output:"$0.28"`（目前只一个模型）；
+      按出现次数全收，将来加模型也不用改代码。
+    · `free` 取文档的「免费体验」横幅 —— **注意它是"当前免费试用"**（原文：「当前免费体验，
+      暂不收费。恢复收费前将通过官网及 API 页面提前告知」）：横幅在 = 免费；
+      横幅没了 = 按表上报价收费 → 同步会把 free 改成 false（这正是要盯的漂移）。
+    · **不写定价**：文档给的是 **USD**（`$0.14/$0.28`），而网关 `pricing.per_model` 是
+      **人民币 ¥/M**（Agnes 那套口径）—— 换算要汇率，不能猜；报价只放进报告里给人看。
+    · 上下文窗口从正文抓：`<id> 的上下文窗口上限为 524,288 Token（512K）`。
+    """
+    js = _dots_doc_text()
+    free_now = "免费体验" in js
+    out: dict[str, dict] = {}
+    for mid, inp, outp in re.findall(
+            r'model:\s*"([^"]+)"\s*,\s*input:\s*"([^"]*)"\s*,\s*output:\s*"([^"]*)"', js):
+        out[mid] = {"name": mid, "free": free_now, "input_usd": inp, "output_usd": outp}
+    for m in re.finditer(
+            r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*的上下文窗口上限为\s*([\d,]+)\s*Token", js):
+        mid = m.group(1)
+        if mid in out:
+            out[mid]["context"] = int(m.group(2).replace(",", ""))
+    if not out:
+        raise RuntimeError("文档里没解析出任何模型（页面结构可能变了）")
+    return out
+
+
 def _references(cfg: dict) -> dict[str, str]:
     """被别名 / media 指向的模型 id → 引用原因。删这些会直接打断功能，故永不自动删。"""
     refs: dict[str, str] = {}
@@ -353,7 +406,8 @@ def _split_removed(prov: str, cur: dict, doc: dict, refs: dict) -> tuple[list[st
 
 def diff(cfg: dict, oc_doc: dict, agnes_doc: dict,
          md_dev: dict[str, dict] | None = None,
-         ag_ctx: dict[str, dict] | None = None) -> dict:
+         ag_ctx: dict[str, dict] | None = None,
+         dots_doc: dict[str, dict] | None = None) -> dict:
     providers = cfg.get("providers", {})
     pricing = (cfg.get("pricing") or {}).get("per_model") or {}
     refs = _references(cfg)
@@ -439,6 +493,38 @@ def diff(cfg: dict, oc_doc: dict, agnes_doc: dict,
                      if mid in ag_cur and _cfg_free_state(ag_cur[mid]) != meta["free"]]
     vid_cfg = ((providers.get("agnes") or {}).get("media") or {}).get("video_model_name")
     report["agnes"]["free_drift"] = ag_free_drift
+
+    # Dots AI（第三十七轮）：模型清单 / 免费试用状态 / 上下文窗口三项。
+    #   抓取失败（dots_doc 为 None）时留空 —— 不当成漂移，只在报告里说明。
+    dots_doc = dots_doc or {}
+    dots_cur = {m["id"]: m for m in providers.get("dots", {}).get("models", [])}
+    dots_drop, dots_keep = _split_removed("dots", dots_cur, dots_doc, refs)
+    dots_free_drift = [{"id": mid, "doc_free": bool(meta["free"]),
+                        "cfg_free": bool(dots_cur[mid].get("free"))}
+                       for mid, meta in sorted(dots_doc.items())
+                       if mid in dots_cur and bool(meta["free"]) != bool(dots_cur[mid].get("free"))]
+    dots_ctx_drift = []
+    for mid, meta in sorted(dots_doc.items()):
+        m = dots_cur.get(mid)
+        if not m or not meta.get("context"):
+            continue
+        have_ctx = int(m.get("context_window") or 0)
+        if have_ctx != meta["context"]:
+            # 官方没给「最大输出」上限 → 保持网关现值，只比上下文
+            have_out = int(m.get("max_output_tokens") or 0)
+            dots_ctx_drift.append({"id": mid, "cfg_ctx": have_ctx, "doc_ctx": meta["context"],
+                                   "cfg_out": have_out, "doc_out": have_out})
+    report["dots"] = {
+        "doc_count": len(dots_doc), "cfg_count": len(dots_cur),
+        "fetched": bool(dots_doc),
+        "free_trial": any(v.get("free") for v in dots_doc.values()),
+        "usd_price": {k: f"{v.get('input_usd')}/{v.get('output_usd')}"
+                      for k, v in sorted(dots_doc.items())},
+        "added": [{"id": k, "name": v["name"], "free": v["free"]} for k, v in sorted(dots_doc.items())
+                  if k not in dots_cur],
+        "removed": dots_drop, "protected": dots_keep,
+        "free_drift": dots_free_drift, "ctx_drift": dots_ctx_drift,
+    }
     report["agnes"]["video_default"] = {
         "cfg": vid_cfg,
         "in_doc": bool(vid_cfg) and vid_cfg in agnes_doc,
@@ -515,6 +601,38 @@ def render(report: dict) -> str:
                      "   ← 换默认由老板点模型名，改一行配置（不自动挑）")
     if not (any(ag[k] for k in ("added", "removed", "free_drift")) or real_drift):
         lines.append("  无漂移 ✓")
+
+    lines.append("")
+    dt = report["dots"]
+    if not dt.get("fetched"):
+        lines.append("== Dots AI ==  ⚠ 文档抓取失败（SPA 正文在 JS chunk 里，结构可能变了）"
+                     "→ 本次跳过 Dots 的比对")
+    else:
+        lines.append(f"== Dots AI ==  文档 {dt['doc_count']} 个 / 网关 {dt['cfg_count']} 个"
+                     + ("　（文档标「免费体验」= 当前免费试用）" if dt.get("free_trial") else ""))
+        if dt["added"]:
+            lines.append("  新增（文档有、网关没有）→ 落盘补进配置：")
+            lines += [f"    + {m['id']}" for m in dt["added"]]
+        if dt["removed"]:
+            lines.append("  下线（文档已不收录）→ 落盘删除：")
+            lines += [f"    - {m}" for m in dt["removed"]]
+        if dt.get("protected"):
+            lines.append("  文档未收录但**受保护不删**（要删请说一声）：")
+            lines += [f"    · {m} —— {why}" for m, why in dt["protected"].items()]
+        if dt.get("free_drift"):
+            lines.append("  免费状态漂移 → 落盘更新（试用结束会在这里现形）：")
+            lines += [f"    ~ {d['id']}  文档={'免费试用' if d['doc_free'] else '按报价收费'}"
+                      f"  网关={'免费' if d['cfg_free'] else '收费'}" for d in dt["free_drift"]]
+        if dt.get("ctx_drift"):
+            lines.append("  上下文窗口漂移（文档正文 vs 网关）→ 落盘更新：")
+            lines += [f"    ~ {d['id']}  网关={d['cfg_ctx']:,}  文档={d['doc_ctx']:,}"
+                      for d in dt["ctx_drift"]]
+        if dt.get("usd_price"):
+            # 文档报价是 USD，网关 pricing 是 ¥/M → 不自动换算（要汇率、不能猜），只列出来给人看
+            lines.append("  文档报价（USD/M，仅展示、不写入 pricing）："
+                         + "、".join(f"{k} {v}" for k, v in dt["usd_price"].items()))
+        if not any(dt[k] for k in ("added", "removed", "free_drift", "ctx_drift")):
+            lines.append("  无漂移 ✓")
     return "\n".join(lines)
 
 
@@ -680,12 +798,17 @@ def _add_protocol(seg: list[str], proto: str, date: str) -> list[str]:
 
 
 def _set_free(seg: list[str], want: bool, date: str) -> list[str]:
-    """更新免费标记（文档价格表说全 Free 的模型）。原注释保留，只追加同步说明。"""
+    """更新免费标记（文档价格表说全 Free 的模型）。原注释保留，只追加同步说明。
+
+    幂等（第三十七轮补）：**同一条说明不重复追加** —— 否则同一份 plan 重复应用会把
+    注释滚成「原注释；说明；说明」。不同日期的说明仍会各记一条（那是变更历史，要留）。
+    """
     note = f"{date} 自动同步：文档价格表{'标 Free' if want else '已不标 Free'}"
     for i, ln in enumerate(seg):
         if re.match(r"^\s*free:\s*", ln):
             comment = ln.split("#", 1)[1].strip() if "#" in ln else ""
-            comment = f"{comment}；{note}" if comment else note
+            if note not in comment:
+                comment = f"{comment}；{note}" if comment else note
             return seg[:i] + [f"        free: {'true' if want else 'false'}     # {comment}\n"] + seg[i + 1:]
     if want:
         return _insert_after(seg, r"^\s*type:", f"        free: true     # {note}\n")
@@ -753,12 +876,14 @@ def _set_agnes_free(seg: list[str], want: object, date: str) -> list[str]:
     return out
 
 
-def build_plan(report: dict, cfg: dict, oc_doc: dict, agnes_doc: dict) -> dict:
+def build_plan(report: dict, cfg: dict, oc_doc: dict, agnes_doc: dict,
+               dots_doc: dict | None = None) -> dict:
     """把报告翻成可执行动作（纯计算，不碰磁盘）。"""
     docs = {"opencode": oc_doc, "agnes": agnes_doc}
     pricing = (cfg.get("pricing") or {}).get("per_model") or {}
     plan: dict = {"add": {}, "remove": {}, "price_set": {}, "price_add": {},
-                  "proto_add": {}, "free_set": {}, "agnes_free": {}, "ctx_set": {}}
+                  "proto_add": {}, "free_set": {}, "agnes_free": {}, "ctx_set": {},
+                  "dots_free": {}}
     for prov in SYNC_PROVIDERS:
         plan["add"][prov] = {m["id"]: m for m in report[prov]["added"]}
         plan["remove"][prov] = list(report[prov]["removed"])
@@ -767,8 +892,11 @@ def build_plan(report: dict, cfg: dict, oc_doc: dict, agnes_doc: dict) -> dict:
     # Agnes 的免费标注（True / "limited" / None）单独一条 plan，走 _set_agnes_free
     plan["agnes_free"] = {d["id"]: d["doc"] for d in report["agnes"]["free_drift"]}
     # 第三十三轮: 上下文窗口 / 最大输出（models.dev + Agnes 文档）→ 块内改值
+    # Dots 的免费标记（布尔）：试用结束 / 恢复免费都在这里落到配置
+    plan["dots_free"] = {d["id"]: d["doc_free"] for d in (report.get("dots") or {}).get("free_drift", [])}
     plan["ctx_set"] = {d["id"]: {"context": d["doc_ctx"], "output": d["doc_out"]}
-                       for d in report["opencode"]["ctx_drift"] + report["agnes"]["ctx_drift"]}
+                       for d in (report["opencode"]["ctx_drift"] + report["agnes"]["ctx_drift"]
+                                 + (report.get("dots") or {}).get("ctx_drift", []))}
     for mid, meta in sorted(agnes_doc.items()):
         if meta["input"] is None:                     # 图片/视频模型文档没给单价
             continue
@@ -794,7 +922,7 @@ def plan_is_empty(plan: dict) -> bool:
             return False
     return not any(plan.get(k) for k in
                    ("price_set", "price_add", "proto_add", "free_set", "agnes_free",
-                    "ctx_set"))
+                    "ctx_set", "dots_free"))
 
 
 def render_plan(plan: dict, date: str) -> str:
@@ -811,6 +939,8 @@ def render_plan(plan: dict, date: str) -> str:
     _flabel = {True: "免费", "limited": "限时免费", None: "撤掉标注"}
     for mid, want in sorted(plan.get("agnes_free", {}).items()):
         lines.append(f"  免费标注 agnes/{mid} → {_flabel.get(want, want)}")
+    for mid, want in sorted(plan.get("dots_free", {}).items()):
+        lines.append(f"  免费标记 dots/{mid} → {'免费试用' if want else '按报价收费'}")
     for mid, spec in sorted(plan.get("ctx_set", {}).items()):
         lines.append(f"  上下文 {mid} → {spec['context']:,} 输入 / {spec['output']:,} 输出")
     for mid, spec in sorted(plan["price_set"].items()):
@@ -878,6 +1008,16 @@ def apply_plan(text: str, plan: dict, date: str) -> str:
                 continue
             s, e = blocks[mid]
             lines[s:e] = _set_agnes_free(lines[s:e], plan["agnes_free"][mid], date)
+
+    # 3d) Dots 的免费标记（布尔 True/False，第三十七轮）——与 3b 同一套倒序处理。
+    #     `free: true` 是「免费试用」；试用结束文档横幅会消失 → 这里把它落成 false。
+    if plan.get("dots_free"):
+        blocks = _find_model_blocks(lines, "dots")
+        for mid in sorted(plan["dots_free"], key=lambda m: blocks.get(m, (0, 0))[0], reverse=True):
+            if mid not in blocks:
+                continue
+            s0, e0 = blocks[mid]
+            lines[s0:e0] = _set_free(lines[s0:e0], plan["dots_free"][mid], date)
 
     # 3c) 上下文窗口 / 最大输出（第三十三轮）——同一套倒序处理，字段插在块的 type: 之后。
     if plan.get("ctx_set"):
@@ -965,7 +1105,11 @@ def verify(new_text: str, cfg_before: dict, plan: dict) -> list[str]:
     # Agnes 的免费标注：True（免费）/ "limited"（限时免费）/ None（该没有标注）
     ag2 = {m["id"]: m for m in (cfg2.get("providers", {}).get("agnes") or {}).get("models", [])}
     # 第三十三轮: 上下文窗口 / 最大输出真写进去了
-    for prov, table in (("opencode", oc2), ("agnes", ag2)):
+    dots2 = {m["id"]: m for m in (cfg2.get("providers", {}).get("dots") or {}).get("models", [])}
+    for mid, want in plan.get("dots_free", {}).items():
+        if bool(dots2.get(mid, {}).get("free")) != bool(want):
+            problems.append(f"免费标记 dots/{mid} 没改成 {want}")
+    for prov, table in (("opencode", oc2), ("agnes", ag2), ("dots", dots2)):
         for mid, spec in plan.get("ctx_set", {}).items():
             m = table.get(mid)
             if m is None:
@@ -1075,8 +1219,17 @@ def main() -> int:
     md_dev = fetch_models_dev()
     ag_ctx = fetch_agnes_context()
 
-    report = diff(cfg, oc_doc, agnes_doc, md_dev, ag_ctx)
-    plan = build_plan(report, cfg, oc_doc, agnes_doc)
+    # Dots 的文档是 SPA + 带 hash 的 JS chunk，抓取链路比另外两家脆 —— 所以**失败不致命**：
+    #   置空 → diff 里跳过 Dots，报告里明写「抓取失败」，其余两家照常同步。
+    dots_doc: dict = {}
+    try:
+        dots_doc = fetch_dots()
+    except Exception as e:                                   # noqa: BLE001
+        print(f"[warn] Dots 文档抓取失败，本次跳过 Dots 比对：{type(e).__name__}: {e}",
+              file=sys.stderr)
+
+    report = diff(cfg, oc_doc, agnes_doc, md_dev, ag_ctx, dots_doc)
+    plan = build_plan(report, cfg, oc_doc, agnes_doc, dots_doc)
     drift = has_drift(report)
     code = 1 if drift else 0
 

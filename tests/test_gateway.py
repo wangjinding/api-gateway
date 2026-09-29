@@ -5634,6 +5634,84 @@ def test_usage_detail_anthropic_cache_fields():
     assert m._usage_detail(None) == (0, 0, 0, 0)
 
 
+def test_sync_dots_fetch_report_and_apply():
+    """第三十七轮：Dots AI 纳入每日同步（老板要求）。
+
+    覆盖三件事：
+      ① 抓取口径 —— 模型行取自文档定价表 `{model:"…",input:"$…",output:"$…"}`；
+         `free` 取「免费体验」横幅（**它是免费试用**：横幅没了就该按报价收费）；
+         上下文从正文「…上限为 524,288 Token」抓；
+      ② 漂移识别 —— free / 上下文两处都要报出来（试用结束会在这里现形）；
+      ③ 落盘 —— 文本级改值（保住注释）+ 回读校验通过 + 幂等。
+    """
+    sys.path.insert(0, str(_ROOT / "scripts"))
+    import sync_models as sm
+
+    js = (
+        'const C={rpm:60,tpm:15e5},w={model:"dots3-note-prev",input:"$0.14",output:"$0.28"};'
+        't[15]=e("div",{},[e("p",{},"免费体验"),e("p",{}," 当前免费体验，暂不收费。")]);'
+        'const s="dots3-note-prev 的上下文窗口上限为 524,288 Token（512K），'
+        '输入 Token 数与本参数设置的最大输出 Token 数之和不能超过该上限。";'
+    )
+    orig = sm._dots_doc_text
+    try:
+        # ① 抓取
+        sm._dots_doc_text = lambda: js
+        doc = sm.fetch_dots()
+        assert doc == {"dots3-note-prev": {"name": "dots3-note-prev", "free": True,
+                                          "input_usd": "$0.14", "output_usd": "$0.28",
+                                          "context": 524288}}, doc
+        # 横幅消失 = 试用结束 → free 应为 False
+        sm._dots_doc_text = lambda: js.replace("免费体验", "按量计费")
+        assert sm.fetch_dots()["dots3-note-prev"]["free"] is False
+        # 页面结构变了（解析不出模型）→ 抛错，由 main 兜成"跳过 Dots 比对"
+        sm._dots_doc_text = lambda: "nothing here"
+        try:
+            sm.fetch_dots()
+            raise AssertionError("解析不出模型时应抛错")
+        except RuntimeError:
+            pass
+    finally:
+        sm._dots_doc_text = orig
+
+    # ② 漂移识别（合成配置：free/context 都与文档不符）
+    cfg = {"providers": {"dots": {"models": [
+        {"id": "dots3-note-prev", "display_name": "Dots3 Note Prev", "type": "text",
+         "free": False, "protocols": ["chat/completions"], "context_window": 131072}]}},
+        "aliases": {}}
+    report = sm.diff(cfg, {}, {}, None, None, doc)
+    dt = report["dots"]
+    assert dt["fetched"] and dt["free_trial"] is True, dt
+    assert [d["id"] for d in dt["free_drift"]] == ["dots3-note-prev"], dt["free_drift"]
+    assert dt["ctx_drift"] and dt["ctx_drift"][0]["doc_ctx"] == 524288, dt["ctx_drift"]
+
+    # ③ 落盘：文本级插入（保住注释）+ 幂等 + 回读校验过
+    text = (
+        "providers:\n"
+        "  dots:\n"
+        "    name: \"Dots AI（小红书）\"\n"
+        "    models:\n"
+        "      - id: \"dots3-note-prev\"\n"
+        "        display_name: \"Dots3 Note Prev\"\n"
+        "        type: \"text\"\n"
+        "        # 官方定价表标「免费体验」，恢复收费前会提前告知\n"
+        "        free: false\n"
+        "        protocols: [\"chat/completions\"]\n"
+        "        context_window: 131072\n"
+    )
+    plan = sm.build_plan(report, cfg, {}, {}, doc)
+    assert plan["dots_free"] == {"dots3-note-prev": True}, plan["dots_free"]
+    assert plan["ctx_set"]["dots3-note-prev"]["context"] == 524288
+    assert not sm.plan_is_empty(plan)
+    out = sm.apply_plan(text, plan, "2026-09-29")
+    assert "free: true" in out, out
+    assert "context_window: 524288" in out, out
+    assert "官方定价表标「免费体验」" in out, "注释必须保住"
+    assert sm.verify(out, cfg, plan) == [], sm.verify(out, cfg, plan)
+    # 幂等：同一份 plan 再跑一次结果不变
+    assert sm.apply_plan(out, plan, "2026-09-29") == out
+
+
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`
 # 之前的旁注：运行器只会收集执行到这一行时已经存在的 globals。
 if __name__ == "__main__":
