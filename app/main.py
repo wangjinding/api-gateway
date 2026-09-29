@@ -1345,13 +1345,24 @@ def _usage_detail(usage) -> tuple[int, int, int, int]:
     """
     if not isinstance(usage, dict):
         return (0, 0, 0, 0)
-    prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
     completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
     pd = usage.get("prompt_tokens_details")
-    cd = usage.get("completion_tokens_details")
     cached = int((pd or {}).get("cached_tokens") or 0) if isinstance(pd, dict) else 0
+    cd = usage.get("completion_tokens_details")
     reasoning = int((cd or {}).get("reasoning_tokens") or 0) if isinstance(cd, dict) else 0
-    return (prompt, completion, cached, reasoning)
+    if usage.get("prompt_tokens") is not None:
+        # OpenAI 口径：`prompt_tokens` **已包含**缓存命中的部分
+        return (int(usage["prompt_tokens"]), completion, cached, reasoning)
+    # Anthropic 口径（第三十六轮补）：三条输入是**互斥**的 ——
+    #   `input_tokens` 只算没走缓存的输入，另有 `cache_read_input_tokens`（读缓存）
+    #   与 `cache_creation_input_tokens`（写缓存）。所以"输入总量"要三者相加，
+    #   而"缓存命中"取 cache_read —— 否则 messages 线的缓存量永远记成 0
+    #   （实测 Dots AI 的 /v1/messages 就回这三个字段）。
+    base = int(usage.get("input_tokens") or 0)
+    read = int(usage.get("cache_read_input_tokens") or 0)
+    created = int(usage.get("cache_creation_input_tokens") or 0)
+    total_in = base + read + created
+    return (total_in if total_in else base, completion, read, reasoning)
 
 
 def _record_usage_metrics(usage) -> None:

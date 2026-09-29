@@ -56,8 +56,12 @@ PROTOCOLS: tuple[str, ...] = (PROTOCOL_CHAT, PROTOCOL_MESSAGES, PROTOCOL_RESPONS
 #   默认全支持等于把「没实测过的线」当成可用，用户打过去只会收到上游 500。
 DEFAULT_PROTOCOLS: tuple[str, ...] = (PROTOCOL_CHAT,)
 
-# 出站鉴权方式：bearer（Authorization: Bearer xxx）/ x-api-key（Anthropic 系）/ none
-AUTH_STYLES: frozenset[str] = frozenset({"bearer", "x-api-key", "none"})
+# 出站鉴权方式：
+#   bearer    → Authorization: Bearer xxx
+#   x-api-key → x-api-key: xxx（Anthropic 系）
+#   api-key   → api-key: xxx（第三十六轮新增：自定义头就叫 api-key，如 Dots AI）
+#   none      → 不带鉴权头
+AUTH_STYLES: frozenset[str] = frozenset({"bearer", "x-api-key", "api-key", "none"})
 
 # ── 虚拟模型 id（别名，第三十一轮）───────────────────────────────────
 # 老板决策（2026-09-18）：「设置一个 wjd 模型 id，路由到指定的模型上；在管理员的网关配置里
@@ -96,7 +100,7 @@ class EndpointSpec:
     """
 
     path: str = ""                                  # 相对 base_url 的路径，如 /chat/completions
-    auth: str = "bearer"                            # bearer | x-api-key | none
+    auth: str = "bearer"                            # bearer | x-api-key | api-key | none
     headers: dict[str, str] = field(default_factory=dict)  # 该线固定附加头（如 anthropic-version）
 
 

@@ -47,6 +47,7 @@ api-gateway/
 | Agnes AI | `https://api.agnes-ai.cn/v1` | Bearer | 10 个模型：4 text（`agnes-3.0-flash` 旗舰、`agnes-2.5-flash` 支持图像输入）、3 image、3 video；其中 **6 个免费 + 1 个限时免费**（`agnes-video-2.5-flash`，见「模型清单同步」） |
 | 火山方舟 Coding | `https://ark.cn-beijing.volces.com/api/coding/v3` | Bearer | `ark-code-latest`（text） |
 | OpenCode Go | `https://opencode.ai/zen/go/v1` | Bearer + `x-opencode-session` | 35 个模型，含 **1 个免费**（`space-bunny-free`，见下方小节） |
+| **Dots AI（小红书）** | `https://note3-prev-api.askdiandian.com/v1` | **自定义头 `api-key`** | `dots3-note-prev`（text + 视觉，**512K**，**免费体验**） |
 
 > OpenCode Go 是每月订阅的编程模型入口（不在订阅内按 token 额外计费）。官方硬性要求每个
 > `/chat/completions` 带 **`x-opencode-session`**（缺失直接 400），并建议专属 `User-Agent`。
@@ -117,6 +118,34 @@ api-gateway/
 > 文档未收但上游有的（`deepseek-flash` / `omen-alpha`）按实测收录并注明。
 
 > Agnes 的图像/视频走自有端点，通过供应商配置里的 `media` 段指定。
+
+### Dots AI（小红书，第三十六轮 2026-09-28）
+
+官方文档：<https://dots.ai/platform/docs>（通读后按下面接入）。
+
+| 项 | 值 |
+| --- | --- |
+| Base URL | `https://note3-prev-api.askdiandian.com/v1` |
+| 协议线 | `POST /v1/chat/completions`（OpenAI 兼容）、`POST /v1/messages`（Anthropic 兼容，需固定头 `anthropic-version: 2023-06-01`） |
+| **认证** | **自定义头 `api-key: <KEY>`** —— 既不是 `Authorization: Bearer`，也不是 `x-api-key` |
+| 模型 | `dots3-note-prev`：**上下文窗口 524,288（512K）**；官方未给最大输出上限（"省略时由服务端默认策略决定"）→ 配置留空不猜 |
+| 能力 | 文本 / 图片 / 视频 / 音频输入、工具调用；OpenAI 线 `chat_template_kwargs.enable_thinking` 控制深度思考，Anthropic 线用 `thinking.type` |
+| 计费 | **当前免费体验**（恢复收费前会提前告知）→ 配置 `free: true`，页面上打「免费」标 |
+| 限流 | 官方按**单个 API Key** 计：**60 次/分钟**、1,500,000 Tokens/分钟 → 配置 `rate_limit_rps: 1.0`（网关限流桶按 Key 分，语义一致） |
+
+**为它新增的鉴权样式 `api-key`**：`AUTH_STYLES` 原有 `bearer` / `x-api-key` / `none`，现加
+`api-key`。用法：`providers.<key>.endpoints.<protocol>.auth: "api-key"` → 适配器在
+`auth_headers()` 里发 `api-key: <token>`；静态头里残留的同名头同样会被剥掉再按线补上
+（与 Bearer / x-api-key 一致）。**上线实测**：两条线各发一次瘦请求均 200，
+`/v1/chat/completions` 回 `usage{prompt 17, completion 8}`，
+`/v1/messages` 回 `usage{input 17, output 8}`。
+
+**顺带补的一条口径**（接 Dots 时实测发现）：Anthropic 系的 usage 里 `input_tokens`
+**不含**缓存部分 —— 缓存命中在 `cache_read_input_tokens`、写缓存在 `cache_creation_input_tokens`
+（三者互斥）。因此 `_usage_detail()` 现在分口径计算：OpenAI 口径 `prompt_tokens` 已含缓存；
+**Anthropic 口径 = 三者相加为输入总量**、缓存命中取 `cache_read_input_tokens` ——
+否则 messages 线的缓存量永远记成 0。
+
 
 ## 虚拟模型 id（别名 `wjd`，第三十一轮）
 

@@ -107,7 +107,7 @@ class OpenAICompatAdapter(BaseAdapter):
         return ep.path
 
     def auth_headers(self, protocol: str) -> dict[str, str]:
-        """按该线的鉴权方式组装鉴权头（Bearer / x-api-key / 无）。
+        """按该线的鉴权方式组装鉴权头（Bearer / x-api-key / api-key / 无）。
 
         这是三线直传里"唯一必须做的 glue"：同一个供应商的三条线鉴权方式可能不同
         （实测 OpenCode Go：chat/completions 与 responses 认 `Authorization: Bearer`，
@@ -120,6 +120,9 @@ class OpenAICompatAdapter(BaseAdapter):
             out["Authorization"] = f"Bearer {self._token}"
         elif style == "x-api-key" and self._token:
             out["x-api-key"] = self._token
+        elif style == "api-key" and self._token:
+            # 第三十六轮：头名就叫 `api-key`（Dots AI 官方文档如此；不是 x-api-key）
+            out["api-key"] = self._token
         if ep:
             out.update(ep.headers or {})       # 如 anthropic-version
         return out
@@ -204,6 +207,7 @@ class OpenAICompatAdapter(BaseAdapter):
         headers.pop("Authorization", None)
         headers.pop("authorization", None)
         headers.pop("x-api-key", None)
+        headers.pop("api-key", None)
         headers.update(self.auth_headers(protocol))
         # 第三十轮: 这里原来写「无 session → 每请求一个随机 UUID（仍能过上游强校验，只是没有缓存收益）」，
         #   那句话在第二十九轮之后**已经不对了** —— 网关三条协议线入口（chat 非流式/流式、batch、

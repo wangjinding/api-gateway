@@ -92,8 +92,8 @@ def _login_admin_session(client=None):
 # ── 配置加载 ──
 def test_load_config_providers():
     cfg = load_config(CONFIG)
-    # 三家供应商：Agnes / 火山方舟 / OpenCode Go
-    assert set(cfg.providers.keys()) == {"agnes", "volc_engine", "opencode"}
+    # 四家供应商：Agnes / 火山方舟 / OpenCode Go / Dots AI（第三十六轮新增）
+    assert set(cfg.providers.keys()) == {"agnes", "volc_engine", "opencode", "dots"}
     assert cfg.providers["agnes"].models[0].id == "agnes-3.0-flash"
 
 
@@ -5557,6 +5557,81 @@ def test_inbound_opencode_session_header_reaches_upstream():
         assert m._inbound_session(_Req()) is None, "非 ASCII 会话头必须被丢弃（不能带进上游 header）"
     finally:
         m._get_adapter = orig
+
+
+# ── 第三十六轮：Dots AI 供应商 + 新增 `api-key` 鉴权样式 ──────────────
+
+def test_dots_provider_config_and_api_key_auth_style():
+    """Dots AI 的接入配置 + 为它新增的 `api-key` 鉴权样式。
+
+    官方文档（https://dots.ai/platform/docs，2026-09-28 通读）：
+      · base https://note3-prev-api.askdiandian.com，两条线 chat/completions 与 messages；
+      · 鉴权头是**自定义的 `api-key`**（既不是 Bearer 也不是 x-api-key）；
+      · /v1/messages 还需固定头 anthropic-version: 2023-06-01；
+      · 上下文窗口 512K（524,288），限流 60 次/分钟（按单个 Key）。
+    """
+    from app.adapters import create_adapter
+
+    # ① 配置能被正常载入并解析到这个模型
+    cfg = load_config(CONFIG)
+    pkey, pconfig, minfo, token = resolve_with_auth(cfg, "dots3-note-prev")
+    assert pkey == "dots", pkey
+    assert pconfig.base_url == "https://note3-prev-api.askdiandian.com/v1", pconfig.base_url
+    assert set(minfo.protocols) == {"chat/completions", "messages"}, minfo.protocols
+    assert minfo.context_window == 524288, minfo.context_window
+    assert token, "DOTS_API_KEY 应从 .env 解析出来（测试环境也会 load_dotenv）"
+
+    # ② 两条线的路径与鉴权方式
+    ep = pconfig.endpoints
+    assert ep["chat/completions"].path == "/chat/completions"
+    assert ep["chat/completions"].auth == "api-key"
+    assert ep["messages"].path == "/messages"
+    assert ep["messages"].auth == "api-key"
+    assert (ep["messages"].headers or {}).get("anthropic-version") == "2023-06-01"
+
+    # ③ 适配器组出来的头：两条线都用 `api-key`，messages 额外带 anthropic-version
+    adapter = create_adapter(pconfig, "tok-abc", timeout=10)
+    chat_h = adapter.auth_headers("chat/completions")
+    msg_h = adapter.auth_headers("messages")
+    assert chat_h.get("api-key") == "tok-abc", chat_h
+    assert "Authorization" not in chat_h and "x-api-key" not in chat_h, chat_h
+    assert msg_h.get("api-key") == "tok-abc", msg_h
+    assert msg_h.get("anthropic-version") == "2023-06-01", msg_h
+
+    # ④ 样式集合与解析期校验：api-key 合法、乱写的（api_key 下划线）仍被拦。
+    #    鉴权样式的校验发生在**解析期**（_parse_endpoints），不在 validate_config —— 所以直接打解析函数。
+    from app.config import AUTH_STYLES, ConfigError, _parse_endpoints
+    assert "api-key" in AUTH_STYLES
+    ok = _parse_endpoints({"endpoints": {"chat/completions": {"path": "/chat/completions", "auth": "api-key"}}}, "dots")
+    assert ok["chat/completions"].auth == "api-key"
+    try:
+        _parse_endpoints({"endpoints": {"chat/completions": {"path": "/chat/completions", "auth": "api_key"}}}, "dots")
+        raise AssertionError("`api_key`（下划线）不是合法样式，应在解析期被拒")
+    except ConfigError:
+        pass
+
+
+def test_usage_detail_anthropic_cache_fields():
+    """Anthropic 口径的 usage：输入 = input + cache_read + cache_creation（三者互斥），
+    缓存命中取 cache_read。
+
+    第三十六轮补：接 Dots AI 时实测它的 /v1/messages 回这几个字段；此前只认 OpenAI 的
+    `prompt_tokens_details.cached_tokens`，导致 messages 线的缓存量恒为 0。
+    """
+    import app.main as m
+    # OpenAI 口径：prompt_tokens 已含缓存
+    assert m._usage_detail({"prompt_tokens": 100, "completion_tokens": 5,
+                            "prompt_tokens_details": {"cached_tokens": 70}}) == (100, 5, 70, 0)
+    # Anthropic 口径：三者相加才是输入总量
+    got = m._usage_detail({"input_tokens": 17, "output_tokens": 8,
+                           "cache_read_input_tokens": 1920, "cache_creation_input_tokens": 0})
+    assert got == (1937, 8, 1920, 0), got
+    # 纯 Anthropic（无缓存字段）不变
+    assert m._usage_detail({"input_tokens": 7, "output_tokens": 3}) == (7, 3, 0, 0)
+    # 思考量仍从 completion_tokens_details 取
+    assert m._usage_detail({"prompt_tokens": 1, "completion_tokens": 9,
+                            "completion_tokens_details": {"reasoning_tokens": 4}}) == (1, 9, 0, 4)
+    assert m._usage_detail(None) == (0, 0, 0, 0)
 
 
 # 直接运行（非 pytest）—— 必须留在文件末尾，见上方 `test_image_request_goes_to_requested_model`

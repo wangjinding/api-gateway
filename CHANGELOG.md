@@ -1,5 +1,40 @@
 # CHANGELOG
 
+## 2026-09-28 · 接入 Dots AI（小红书）+ 新增 `api-key` 鉴权样式
+
+老板要求：「查看 https://dots.ai/platform/docs 文档，帮我在 ai 网关上配置 dots.ai 的供应商」
+（API Key 由老板提供，落 `data/.env`，不入库）。
+
+**文档要点（通读后按此接入）**：base `https://note3-prev-api.askdiandian.com/v1`；
+两条线 `POST /v1/chat/completions`（OpenAI 兼容）与 `POST /v1/messages`（Anthropic 兼容，
+需固定头 `anthropic-version: 2023-06-01`）；**认证是自定义头 `api-key: <KEY>`**
+（既不是 `Authorization: Bearer` 也不是 `x-api-key`）；模型 `dots3-note-prev` 上下文窗口
+**512K（524,288）**、**当前免费体验**；官方限流按单个 Key 计 **60 次/分钟**、1,500,000 Tokens/分钟。
+
+**改动**：
+- **新增鉴权样式 `api-key`**（`AUTH_STYLES`：`bearer` / `x-api-key` / **`api-key`** / `none`）：
+  适配器 `auth_headers()` 按线发 `api-key: <token>`；静态头里残留的同名头一并剥掉再按线补
+  （与 Bearer / x-api-key 同处理）；解析期校验自动接受该值、乱写的（如 `api_key`）仍被拒。
+- `data/gateway.yaml` 新增 `dots` 供应商：两条线各自声明路径/鉴权/messages 线的
+  `anthropic-version`；`rate_limit_rps: 1.0`（= 60/分钟）；模型 `dots3-note-prev`
+  （`context_window: 524288`、`vision: true`、`free: true`、双协议线；官方未给最大输出上限 → 留空不猜）。
+- **顺带补 Anthropic 口径的缓存统计**：其 `input_tokens` 不含缓存部分，缓存命中在
+  `cache_read_input_tokens`、写缓存在 `cache_creation_input_tokens`（三者互斥）。
+  `_usage_detail()` 改为分口径：OpenAI 的 `prompt_tokens` 已含缓存；**Anthropic 三者相加为输入总量**、
+  缓存命中取 `cache_read_input_tokens` —— 否则 messages 线的缓存量永远记 0（接 Dots 时实测到）。
+
+**上线实测**（重启后，两条线各一次瘦请求，均为免费模型）：
+```
+POST /v1/chat/completions → 200  usage{prompt_tokens 17, completion_tokens 8}
+POST /v1/messages         → 200  usage{input_tokens 17, output_tokens 8}
+网关 /v1/models：42 个模型，dots3-note-prev 带 context_window 524288 / protocols 双线 / free
+```
+
+**测试**：新增「Dots 配置 + api-key 样式（含解析期拒绝非法值）」与
+「Anthropic 缓存口径」两条回归；既有 `test_load_config_providers` 的供应商集合更新为四家。
+测试数 206 → **208 全过**。
+
+
 ## 2026-09-28 · 上游会话 id 支持客户端显式指定（`x-opencode-session` 优先）
 
 老板要求：「x-opencode-session 如果 api 请求有带的话优先用请求上的，没有再用 apikey 的那个方式」。
