@@ -473,6 +473,7 @@ export default {
     imgMax: 'Up to {n} images',
     imgErr: 'Failed to pick image: {msg}',
     imgCount: '{n}/{max}',
+    listFootHint: 'All agents share one engine — new ones share model and memory; only params and sessions differ.',
     runDefaultTitle: 'Chat',
     cacheHit: 'cache {n}',
     meLabel: 'Me',

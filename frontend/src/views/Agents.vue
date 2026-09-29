@@ -43,7 +43,7 @@
     <div class="ag-layout">
       <!-- 左：列表 -->
       <div class="card" style="padding:12px">
-        <div class="card-h" style="margin-bottom:var(--gap-s)">
+        <div class="card-h ag-list-h">
           <b>{{ t('agents.title') }}</b>
           <span class="sub">{{ t('agents.sharedNote') }}</span>
         </div>
@@ -71,6 +71,7 @@
             </div>
           </div>
           <div v-if="!data.agents.length" class="hint">{{ t('agents.empty') }}</div>
+          <div v-else class="ag-list-foot">{{ t('agents.listFootHint') }}</div>
         </div>
       </div>
 
@@ -83,7 +84,8 @@
       </div>
 
       <div v-else class="ag-detail">
-        <!-- 顶部身份条 -->
+        <!-- 顶部身份条 + Tab（合一张卡，避免卡片套卡片） -->
+        <div class="card ag-head">
         <div class="row-h">
           <div class="ag-top">
             <div class="ag-face"><Icon name="bot" :size="16" /></div>
@@ -102,11 +104,12 @@
           <span :class="{ on: tab === 'config' }" @click="tab = 'config'">{{ t('agents.tabConfig') }}</span>
           <span :class="{ on: tab === 'runs' }" @click="tab = 'runs'; loadRuns()">{{ t('agents.tabRuns') }}</span>
         </div>
+        </div>
 
         <!-- ① 对话 -->
         <div v-if="tab === 'chat'" class="chat-layout">
           <aside class="chat-side">
-            <div class="card side-in">
+            <div class="side-in">
               <el-button type="primary" class="new-conv" :disabled="streaming" @click="newChat">
                 <Icon name="plus" :size="14" /><span>{{ t('agents.newChat') }}</span>
               </el-button>
@@ -136,7 +139,7 @@
             <!-- 风险提示（决策 ⑪ 要求常驻） -->
             <div class="risk-bar"><Icon name="bell" :size="12" />{{ t('agents.riskNote') }}</div>
 
-            <div class="card chat-card">
+            <div class="chat-card">
               <div class="card-h">
                 <b>{{ curSessionTitle }}</b>
                 <span class="sub">{{ messages.length }} 条</span>
@@ -686,13 +689,25 @@ onMounted(load)
 <style scoped>
 .sub-hint { margin-left: 8px; color: var(--muted); font-size: 12.5px; }
 .row-h { display: flex; align-items: center; gap: var(--gap-sm); margin-bottom: var(--gap-lg); }
-.ag-layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: var(--gap-lg); align-items: start; }
+.ag-layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: var(--gap-lg); align-items: start; min-height: calc(100vh - 300px); }
+/* 左列表卡：撑到与右侧详情同高（原来只有内容高度 → 底部空一截） */
+.ag-layout > .card:first-child { align-self: stretch; display: flex; flex-direction: column; }
+.ag-layout > .card:first-child .ag-list { flex: 1; min-height: 0; overflow: auto; }
 /* KPI 卡等高（第三十八轮：之前几张高度不一，因为内容行数不同） */
 .ag-kpis { align-items: stretch; }
+.ag-kpis .kpi .v { line-height: 1.15; }
+/* 注脚统一贴底、单行省略 —— 否则第一张卡注脚两行会把四张卡的文字基线拉歪 */
+.ag-kpis .kpi .f {
+  margin-top: auto; padding-top: 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .ag-kpis .kpi { display: flex; flex-direction: column; }
-.ag-kpis .kpi .f { margin-top: auto; }
 .ag-layout > * { min-height: 0; }
+.ag-list-h { flex-wrap: wrap; margin-bottom: var(--gap-s); }
+.ag-list-h b { flex: none; }
+.ag-list-h .sub { flex: 1 1 100%; font-size: 11px; line-height: 1.5; }
 .ag-list { display: flex; flex-direction: column; gap: 2px; }
+.ag-list-foot { margin-top: auto; padding-top: var(--gap); font-size: 11px; color: var(--muted-2); line-height: 1.6; }
 .ag { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border-radius: var(--radius); border: 1px solid transparent; cursor: pointer; }
 .ag:hover { background: var(--surface-2); }
 .ag.on { background: var(--primary-soft); border-color: color-mix(in srgb, var(--primary) 32%, transparent); }
@@ -708,22 +723,33 @@ onMounted(load)
 .ae-t { font-weight: 650; font-size: 14.5px; }
 .ae-s { font-size: 12.5px; color: var(--muted); line-height: 1.7; }
 .ae-btn { margin-top: 8px; display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 10px; font-size: 12.5px; font-weight: 600; background: var(--primary); color: var(--primary-ink); cursor: pointer; }
-.ag-detail { display: flex; flex-direction: column; gap: var(--gap-lg); min-width: 0; }
+.ag-detail { min-width: 0; display: flex; flex-direction: column; gap: var(--gap-lg); }
+.ag-head { padding: 12px 14px; }
+.ag-head .row-h { margin-bottom: 0; }
+.ag-head .ag-tabs { margin-top: var(--gap-s); }
 .ag-top { display: flex; align-items: center; gap: 9px; }
 .ag-face { width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); flex: none; }
 .ag-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
 .ag-tabs span { padding: 7px 14px; font-size: 12.5px; font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; cursor: pointer; }
 .ag-tabs span.on { color: var(--primary); border-bottom-color: var(--primary); }
 .risk-bar { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--warn); background: var(--warn-soft); padding: 6px 10px; border-radius: var(--radius-s); margin-bottom: var(--gap-sm); }
-.chat-layout { display: grid; grid-template-columns: 236px minmax(0, 1fr); gap: var(--gap-lg); align-items: start; }
-.chat-side .card { padding: 12px; display: flex; flex-direction: column; overflow: hidden; max-height: 100%; }
+.side-in { padding: 12px; display: flex; flex-direction: column; overflow: hidden; height: 100%; border-right: 1px solid var(--line-2); }
+/* 对话区整体一张卡：左栏用分隔线区分，不再各自成块 → 不会有高度/圆角错位 */
+.chat-layout {
+  display: grid; grid-template-columns: 224px minmax(0, 1fr);
+  gap: 0; align-items: stretch;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); overflow: hidden;
+  height: calc(100vh - 268px); min-height: 420px;
+}
 .new-conv { width: 100%; margin-bottom: 10px; }
 .conv-list { flex: 0 1 auto; overflow: auto; min-height: 0; max-height: 42%; }
 .conv { padding: 7px 9px; border-radius: var(--radius-s); font-size: 12.5px; cursor: pointer; }
 .conv small { display: block; color: var(--muted-2); font-size: 11px; margin-top: 2px; }
 .conv.on { background: var(--primary-soft); }
-.chat-main { display: flex; flex-direction: column; min-width: 0; height: calc(100vh - 300px); min-height: 400px; }
-.chat-card { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 14px; }
+.chat-main { display: flex; flex-direction: column; min-width: 0; height: calc(100vh - 268px); min-height: 420px; }
+.chat-layout > * { min-height: 0; }
+.chat-card { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 12px 14px; }
 .msgs { flex: 1; overflow: auto; margin-top: var(--gap); min-height: 0; }
 .trace { border: 1px solid var(--line); border-left: 2px solid var(--primary); border-radius: 10px; padding: 8px 10px; margin-bottom: 9px; background: var(--surface-2); }
 .trace-h { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--primary); }

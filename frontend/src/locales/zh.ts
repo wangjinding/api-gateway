@@ -477,6 +477,7 @@ export default {
     imgMax: '最多 {n} 张',
     imgErr: '选图失败：{msg}',
     imgCount: '{n}/{max} 张',
+    listFootHint: '所有智能体共用同一个引擎 —— 新建时它们会共用模型与记忆，只有参数和会话各自独立。',
     runDefaultTitle: '对话',
     cacheHit: '缓存 {n}',
     meLabel: '我',
