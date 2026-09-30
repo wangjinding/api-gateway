@@ -689,12 +689,18 @@ onMounted(load)
 <style scoped>
 .sub-hint { margin-left: 8px; color: var(--muted); font-size: 12.5px; }
 .row-h { display: flex; align-items: center; gap: var(--gap-sm); margin-bottom: var(--gap-lg); }
-.ag-layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: var(--gap-lg); align-items: start; min-height: calc(100vh - 300px); }
-/* 左列表卡：撑到与右侧详情同高（原来只有内容高度 → 底部空一截） */
-.ag-layout > .card:first-child { align-self: stretch; display: flex; flex-direction: column; }
+.ag-layout {
+  display: grid; grid-template-columns: 320px minmax(0, 1fr);
+  gap: var(--gap-lg); align-items: start;
+}
+/* 左列表卡：与右侧详情同高（同排对齐），内部列表区滚动 */
+.ag-layout > .card:first-child {
+  align-self: stretch; display: flex; flex-direction: column;
+  min-height: 320px;
+}
 .ag-layout > .card:first-child .ag-list { flex: 1; min-height: 0; overflow: auto; }
 /* KPI 卡等高（第三十八轮：之前几张高度不一，因为内容行数不同） */
-.ag-kpis { align-items: stretch; }
+.ag-kpis { align-items: stretch; margin-bottom: var(--gap-lg); }
 .ag-kpis .kpi .v { line-height: 1.15; }
 /* 注脚统一贴底、单行省略 —— 否则第一张卡注脚两行会把四张卡的文字基线拉歪 */
 .ag-kpis .kpi .f {
