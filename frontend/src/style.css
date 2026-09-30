@@ -32,6 +32,9 @@
   --pad-page: 16px;
   --gap-lg: 14px;   /* 块与块之间（= --gap，等价别名，新代码统一用它） */
   --gap-sm: 8px;    /* 行内元素之间 */
+  --gap-xs: 6px;    /* 更细的行间（标签与说明、表单行的补充提示）——
+                       第三十九轮补：Agents.vue 早就引用了它，但此前从未定义，
+                       两处 margin 静默算成 0（「本次会话」小标题与 .f-hint 顶部）。 */
 
   --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
           "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;

@@ -35,6 +35,8 @@ export default defineConfig({
       // 第二十二轮: 意见反馈四个接口 —— 同样别让本地开发时落到 vite 自己身上
       //   （表现为页面报「Unexpected token '<'」，看着像后端崩了，实则是拿到了 index.html）。
       '/feedback': 'http://127.0.0.1:8808',
+      // 第三十九轮: 智能体接口 —— 同样别落到 vite 自己身上
+      '/agents': 'http://127.0.0.1:8808',
     },
   },
   build: {

@@ -1,5 +1,48 @@
 # CHANGELOG
 
+## 2026-09-30 · 智能体页「对话」与「配置」内容间距放宽（版本 2.5.3 → 2.5.4）
+
+老板反馈：**智能体界面在「对话」和「配置」两个 Tab 里，内容间距也很挤，都优化下**。
+
+**先量后改**（Playwright 读纵向矩形，逐块取 bounding_box）。
+
+**修复前实测到的挤点**：
+
+| # | 位置 | 实测证据 | 根因 |
+|---|---|---|---|
+| 1 | 侧栏「本次会话」小标题、配置页 `.f-hint` 顶部 | 两处 `margin-top` 实际 = **0** | 引用了 **从未定义的 `--gap-xs`** → 静默算成 0（真 bug） |
+| 2 | 会话列表项紧贴 | `.conv` 行高 48/65，项间**无间隙** | `.conv` 无 `margin`，仅靠 padding |
+| 3 | 配置表单行挤 | `.frow` 行距 = `--gap-s`（**8px**） | 用了行内元素级间距做表单行距 |
+| 4 | 消息区与输入框 | `.card-h` → `.msgs` 仅 24px；textarea → `.bar` 仅 8px | 硬编码/过小间距 |
+| 5 | `.ops-row` 预留 0 高幽灵行 | `height = 0` | 不流式时该行仍渲染（虽空） |
+
+**改法**：
+- **`style.css` 补上缺失的 `--gap-xs: 6px`** —— 此前 Agents.vue 引用了它但全局未定义，
+  两处 margin 静默失效（本轮顺手修掉这个真 bug）。
+- 会话列表项：`.conv` padding `7px 9px → 8px 10px`、行间补 `6px`、`small` 顶距 `2 → 3px`。
+- 配置表单：`.frow` 行距 `--gap-s(8) → --gap(14)`；`.f-val` padding `7 → 8px`；
+  `.f-hint` 行高 `1.6 → 1.65`；`.row-actions` 顶距 `--gap → --gap-lg`；
+  `.cfg-grid .card-h` 底部补 `--gap`（原来只有全局的 10px）。
+- 对话区：`.chat-main` 补 `gap: --gap-sm`（风险条与对话卡分离）；`.composer .bar`
+  顶距 `8px → --gap-sm` 语义化；消息轨迹 `.trace` padding `8/10 → 9/11px`、`.step` 顶距 `4 → 5px`。
+- 头部/Tab：`.ag-tabs span` padding `7 → 8px`；`.ag-head .ag-tabs` 顶距 `--gap-s → --gap`。
+- 智能体列表卡：`.ag` padding `10 → 11px`、`.ag-list` gap `2 → 4px`、
+  `.ag-ds` 顶距 `2 → 3px`、`.ag-tags` 顶距 `7 → 8px`。
+- `.ops-row:empty { display: none }` —— 不流式时不再留幽灵行。
+- 顺手补 `vite.config.ts` 的 `/agents` dev 代理（此前本地开发时智能体接口落到 vite 自己身上 404）。
+
+**验收实测（改后纵向坐标）**：
+```
+配置页 .frow   行距 28 → 30px、行间 8 → 14px
+对话页 .conv   项高 65 → 68px、项间补 6px
+对话页 .risk-bar → .chat-card 由贴合变为 8px 分离
+ops-row        空时 height=0 已消失（display:none）
+```
+页面总高 739 → 755（放宽后不溢出视口，无横向滚动）。
+
+**测试**：2400 modules transformed、`ci_check.sh` **六道门禁全绿**（语法/单测/文案/SVG/类型/构建）。
+
+
 ## 2026-09-29 · 修智能体页「KPI 与下方块 0 间距」+ 左右两栏恢复等高（版本 2.5.2 → 2.5.3）
 
 老板圈出红框指出：**KPI 卡与下面内容之间空得太明显**。
