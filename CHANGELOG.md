@@ -1,5 +1,42 @@
 # CHANGELOG
 
+## 2026-09-30 · 模型切换挪到对话框左下角 + 去掉所有 QwenPaw 外链与内部提示（版本 2.6.0 → 2.6.1）
+
+老板三条要求：
+
+1. **模型切换直接放对话框左下角**，不用去配置页设置
+2. **所有「打开 QwenPaw」外链去掉**
+3. **客户不需要知道的提示全去掉**（如「提示词归 QwenPaw 管」这种）
+
+**改法**：
+
+- **切换器移入对话输入区左下角**：原来占位的静态模型名 `<span class="tok">` →
+  紧凑样式（`.model-inline`，168px、无边框、hover 才出底色）的可搜索下拉；
+  仍按供应商分组 + 视觉标。进页面即 `loadEngineModels()`，展开时也兜底刷新。
+  配置页模型栏改为**只读展示** + 一行「在对话框左下角切换」的指引。
+- **外链清零**：`qwenpawUrl` 计算属性删除，模板里 3 处 `<a :href="qwenpawUrl">` 全删。
+- **内部提示清零**（删键 + 删模板引用，中英同步）：
+  - 删：`cfgOpenQwenpaw`、`cfgModelHintShared`、`cfgCapability`、`cfgCapabilitySub`、
+    `cfgCapabilityHint`、`cfgPromptTitle`、`cfgPromptHint`、`cfgModelRefresh`、
+    `cfgModelReadonly`、`cfgModelHint`、`cfgApproval`、`cfgSandbox`、`cfgSandboxOff`、
+    `cfgSandboxHint`、`cfgAccessSub`、`cfgAccessHint`、`cfgModelSub`、`cfgAccessHint`
+  - 改写「客户视角」：`sub`「路线 A：界面在网关，引擎是 QwenPaw」→「能干活的助手 —— 每个智能体有自己的参数和会话」；
+    `subagents`（页头副标题）去掉「引擎 QwenPaw」；`engineBadge`「QwenPaw 引擎」→「智能体」；
+    `engineDownHint` 去掉「请先在服务器上启动它」；`cfgSlugHint` 去掉 QwenPaw profile 措辞；
+    `cfgSuffixHint` 去掉「与 QwenPaw 主提示词叠加」；`sharedNote` / `listFootHint` 改用客户能懂的话。
+- 顺带修：i18n 体检**不允许空文案**，所以这些键是**整键删除**（不是留空串）。
+
+**验收**：线上实测——对话输入框左下角出现 `wjd` 下拉（7 组 112 项、高亮当前项）；
+切到 `deepseek-v4-pro` → toast 提示 + 磁盘 `agent.json` 同步 + 引擎回读一致 → 已恢复 `wjd`；
+配置页截图确认**无任何 QwenPaw 字样**。
+
+**测试**：i18n **869/869** 对称（原 883，净删 14 键）、`ci_check.sh` 六道门禁全绿、
+前端产物 191 → 190 kB。
+
+**注**：本轮**只动前端文案与布局**，后端端点（`GET /agents/engine/models`、`PUT /agents/engine/model`）
+与测试未变，224 passed 不变。
+
+
 ## 2026-09-30 · 智能体模型改为「页面可选」（方案 A）+ 修引擎模型读不到的静默 bug（版本 2.5.4 → 2.6.0）
 
 老板问「智能体当时为什么说不能自己设置模型」，并选择**方案 A**：能选、但不新增 profile。

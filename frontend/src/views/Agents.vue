@@ -101,7 +101,7 @@
 
         <div class="ag-tabs">
           <span :class="{ on: tab === 'chat' }" @click="tab = 'chat'">{{ t('agents.tabChat') }}</span>
-          <span :class="{ on: tab === 'config' }" @click="tab = 'config'; loadEngineModels()">{{ t('agents.tabConfig') }}</span>
+          <span :class="{ on: tab === 'config' }" @click="tab = 'config'">{{ t('agents.tabConfig') }}</span>
           <span :class="{ on: tab === 'runs' }" @click="tab = 'runs'; loadRuns()">{{ t('agents.tabRuns') }}</span>
         </div>
         </div>
@@ -208,7 +208,30 @@
                   <button class="clip-btn" :disabled="streaming" :title="t('agents.attach')" @click="fileInput?.click()">
                     <Icon name="clip" :size="15" />
                   </button>
-                  <span class="tok">{{ cur.engine_model || '—' }}</span>
+                  <!-- 模型切换：就在输入框左下角，选完即时生效 -->
+                  <el-select
+                    v-model="enginePick"
+                    class="model-inline"
+                    size="small"
+                    filterable
+                    :loading="engineLoading"
+                    :placeholder="t('agents.cfgModelPick')"
+                    @change="doSetModel"
+                    @visible-change="(v: boolean) => v && loadEngineModels()"
+                  >
+                    <el-option-group
+                      v-for="g in engineGroups" :key="g.provider_id"
+                      :label="g.provider_name"
+                    >
+                      <el-option
+                        v-for="o in g.items" :key="o.provider_id + '/' + o.model"
+                        :label="o.model" :value="o.provider_id + '/' + o.model"
+                      >
+                        <span>{{ o.model }}</span>
+                        <span v-if="o.vision" class="opt-vision">{{ t('agents.cfgModelVision') }}</span>
+                      </el-option>
+                    </el-option-group>
+                  </el-select>
                   <span style="flex:1" />
                   <el-button v-if="!streaming" type="primary" size="small"
                              :disabled="!input.trim() && !pendingImgs.length" @click="send">
@@ -252,41 +275,15 @@
           </div>
 
           <div class="card" style="padding:14px">
-            <div class="card-h"><b>{{ t('agents.cfgModel') }}</b><span class="sub">{{ t('agents.cfgModelSub') }}</span></div>
+            <div class="card-h"><b>{{ t('agents.cfgModel') }}</b></div>
             <div class="frow">
               <div class="f-lab">{{ t('agents.cfgModel') }}</div>
-              <div class="f-val model-pick">
-                <el-select
-                  v-model="enginePick"
-                  size="small"
-                  filterable
-                  :loading="engineLoading"
-                  :placeholder="t('agents.cfgModelPick')"
-                  style="flex:1;min-width:0"
-                  @change="doSetModel"
-                >
-                  <el-option-group
-                    v-for="g in engineGroups" :key="g.provider_id"
-                    :label="g.provider_name"
-                  >
-                    <el-option
-                      v-for="o in g.items" :key="o.provider_id + '/' + o.model"
-                      :label="o.model" :value="o.provider_id + '/' + o.model"
-                    >
-                      <span>{{ o.model }}</span>
-                      <span v-if="o.vision" class="opt-vision">{{ t('agents.cfgModelVision') }}</span>
-                    </el-option>
-                  </el-option-group>
-                </el-select>
-                <el-button size="small" :loading="engineLoading" @click="loadEngineModels">
-                  {{ t('agents.cfgModelRefresh') }}
-                </el-button>
+              <div class="f-val">
+                <span class="code">{{ enginePick.split('/')[1] || cur.engine_model || '—' }}</span>
+                <span class="f-lock"><Icon name="lock" :size="12" />{{ t('agents.cfgReadonly') }}</span>
               </div>
             </div>
-            <div class="f-hint">
-              {{ t('agents.cfgModelHintShared') }}
-              <a :href="qwenpawUrl" target="_blank" rel="noopener">{{ t('agents.cfgOpenQwenpaw') }} ↗</a>
-            </div>
+            <div class="f-hint">{{ t('agents.cfgModelAtChat') }}</div>
             <div class="card-h" style="margin-top:var(--gap)">
               <b>{{ t('agents.cfgParams') }}</b>
             </div>
@@ -318,15 +315,10 @@
               <div class="f-val">{{ cur.engine?.type }} · {{ cur.engine?.base_url }}</div></div>
             <div class="frow"><div class="f-lab">{{ t('agents.cfgWorkspace') }}</div>
               <div class="f-val">{{ cur.engine?.agent_id }}</div></div>
-            <div class="f-row-note">{{ t('agents.cfgCapabilityHint') }}</div>
-            <div class="f-hint">
-              {{ t('agents.cfgPromptTitle') }}：{{ t('agents.cfgPromptHint') }}
-              <a :href="qwenpawUrl" target="_blank" rel="noopener">{{ t('agents.cfgOpenQwenpaw') }} ↗</a>
-            </div>
           </div>
 
           <div class="card" style="padding:14px">
-            <div class="card-h"><b>{{ t('agents.cfgAccess') }}</b><span class="sub">{{ t('agents.cfgAccessSub') }}</span></div>
+            <div class="card-h"><b>{{ t('agents.cfgAccess') }}</b></div>
             <div class="frow">
               <div class="f-lab">{{ t('agents.cfgAccess') }}</div>
               <div class="f-val">
@@ -334,7 +326,6 @@
                 <span class="f-lock"><Icon name="lock" :size="12" />{{ t('agents.cfgReadonly') }}</span>
               </div>
             </div>
-            <div class="f-hint">{{ t('agents.cfgAccessHint') }}</div>
           </div>
         </div>
 
@@ -458,7 +449,6 @@ const activeCount = computed(() => data.agents.filter((a) => a.status !== 'retir
 const atLimit = computed(() => activeCount.value >= data.max_agents)
 const totalRuns = computed(() => data.agents.reduce((s, a) => s + (a.run_total || 0), 0))
 const totalTokensText = computed(() => `${(totalRuns.value * 12).toFixed(0)}k`)
-const qwenpawUrl = computed(() => (data.engine.base_url || 'http://127.0.0.1:8088').replace(/\/api$/, ''))
 const curSessionTitle = computed(() => sessions.value.find((s) => s.id === sessionId.value)?.title || t('agents.newChat'))
 const dirty = computed(() => {
   const c = cur.value; if (!c) return false
@@ -751,7 +741,10 @@ async function loadRuns() {
   catch { runList.value = [] }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadEngineModels()   // 模型切换器在对话页左下角，进页面就得备好清单
+})
 </script>
 
 <style scoped>
@@ -858,9 +851,12 @@ onMounted(load)
 .f-val { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; font-size: 12.5px; padding: 8px 10px; border-radius: 9px; background: var(--chip); }
 .f-val.code { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
 .f-lock { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--muted-2); }
-/* 模型下拉（第四十轮）：撑满 f-val，右侧留刷新按钮 */
-.model-pick { gap: var(--gap-sm); padding: 4px 6px 4px 4px; }
-.model-pick .el-select { flex: 1; min-width: 0; }
+/* 模型切换器（对话页左下角）：紧凑、不抢输入框的视觉重心 */
+.model-inline { width: 168px; flex: none; }
+.model-inline :deep(.el-select__wrapper) { box-shadow: none; background: transparent; padding-left: 6px; }
+.model-inline :deep(.el-select__wrapper:hover) { background: var(--chip); }
+.model-inline :deep(.el-select__placeholder),
+.model-inline :deep(.el-select__selected-item) { font-size: 11.5px; font-family: ui-monospace, Menlo, monospace; color: var(--muted-2); }
 .opt-vision { float: right; margin-left: 10px; font-size: 10.5px; color: var(--primary); opacity: .8; }
 .f-hint { font-size: 11px; color: var(--muted-2); line-height: 1.65; margin: var(--gap-xs) 0 0 88px; }
 .f-row-note { font-size: 11.5px; color: var(--muted); line-height: 1.6; margin-top: var(--gap-s); }
