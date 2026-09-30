@@ -312,9 +312,7 @@
               <span class="sub"><Icon name="lock" :size="12" />{{ t('agents.cfgExecSub') }}</span>
             </div>
             <div class="frow"><div class="f-lab">{{ t('agents.cfgEngine') }}</div>
-              <div class="f-val">{{ cur.engine?.type }} · {{ cur.engine?.base_url }}</div></div>
-            <div class="frow"><div class="f-lab">{{ t('agents.cfgWorkspace') }}</div>
-              <div class="f-val">{{ cur.engine?.agent_id }}</div></div>
+              <div class="f-val">{{ t('agents.cfgEngineVal') }}</div></div>
           </div>
 
           <div class="card" style="padding:14px">
