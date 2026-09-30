@@ -52,7 +52,7 @@ PROTOCOL_MESSAGES = "messages"
 PROTOCOL_RESPONSES = "responses"
 PROTOCOLS: tuple[str, ...] = (PROTOCOL_CHAT, PROTOCOL_MESSAGES, PROTOCOL_RESPONSES)
 # 模型没写 protocols 时的默认值：只认 chat/completions。
-#   为什么要默认而不是"全支持"：老配置（Agnes / 火山）从未声明过协议，
+#   为什么要默认而不是"全支持"：老配置（Agnes）从未声明过协议，
 #   默认全支持等于把「没实测过的线」当成可用，用户打过去只会收到上游 500。
 DEFAULT_PROTOCOLS: tuple[str, ...] = (PROTOCOL_CHAT,)
 
@@ -128,7 +128,7 @@ class ModelInfo:
     type: str = "text"  # text | image | video
     # 第十三轮: 是否支持「图像输入」（多模态 / 视觉）。
     #   Agnes 3.0 Flash 文档明确「输入模态：文本、图像 URL」，实测 data:image/png;base64 也能识别；
-    # 其余文本模型（ark-code 等）文档未声明图像输入 → 默认 False。
+    # 其余文本模型文档未声明图像输入 → 默认 False。
     #   用途：① /v1/models 暴露给前端标注/告警；② 前端据此提示「换个支持视觉的模型」力的模型排到前面。
     vision: bool = False
     # 2026-09-21: 是否**免费模型**（官方价格表标 Free、不按 token 计费）。
@@ -223,7 +223,7 @@ class ProviderConfig:
     rate_limit_rps: float | None = None  # 该供应商全局 QPS 上限（可选）
     requires_session_header: bool = False  # OpenCode Go 等要求每请求动态会话头（x-opencode-session）
     # 第二十七轮（三线直传）: 该供应商**每条协议线**的出站地址与鉴权头。
-    #   未配置时用 _default_endpoints()（三条标准线 + 标准鉴权）—— 所以 Agnes / 火山这类
+    #   未配置时用 _default_endpoints()（三条标准线 + 标准鉴权）—— 所以 Agnes 这类
     #   只走 chat/completions 的供应商一个字段都不用加，行为与以前完全一致。
     endpoints: dict[str, EndpointSpec] = field(default_factory=_default_endpoints)
 

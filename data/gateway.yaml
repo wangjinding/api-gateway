@@ -1,5 +1,5 @@
 # AI 网关配置文件（data/ 目录）
-# 供应商：Agnes / 火山方舟 Coding / OpenCode Go（订阅编程模型）
+# 供应商：Agnes / OpenCode Go（订阅编程模型）/ Dots AI
 # 密钥统一走 token_env 指向的环境变量（本机见 data/.env），不再在 yaml 存明文
 # 端口默认 8808
 #
@@ -75,18 +75,6 @@ providers:
         type: "video"
       # 2026-09-24 自动同步：官方文档新增（scripts/sync_models.py）
 
-  volc_engine:
-    name: "火山方舟 Coding Plan"
-    base_url: "https://ark.cn-beijing.volces.com/api/coding/v3"
-    auth:
-      token_env: "VOLC_API_KEY"
-    extra_headers: {}
-    media: {}
-    models:
-      - id: "ark-code-latest"
-        display_name: "火山方舟 ark-code-latest"
-        type: "text"
-
   opencode:
     name: "OpenCode Go"
     base_url: "https://opencode.ai/zen/go/v1"
@@ -109,7 +97,7 @@ providers:
     #   缺少 anthropic-version 时 /messages 也会被拒 → 作为该线固定头带上。
     # 语义：**这里没写的线 = 该供应商没有这条线**（模型就算声明了也调用不了，
     #   validate_config 会直接报错拦住）。老板决策：先只做 OpenCode 一家，
-    #   其余供应商（Agnes / 火山）暂不声明 → 走默认值 = 只认 chat/completions，
+    #   其余供应商（Agnes）暂不声明 → 走默认值 = 只认 chat/completions，
     #   行为与改造前完全一致。
     endpoints:
       chat/completions:
@@ -452,7 +440,6 @@ pricing:
   per_model:
     agnes-3.0-flash:      { input: 0, output: 0 }   # 同步 2026-09-24（原 0.35/1；文档现价 ¥0/M 输入、¥0/M 输出）
     agnes-2.5-flash:      { input: 0, output: 0 }   # 文档现价暂免（输入/输出/缓存命中均 ¥0/百万）
-    ark-code-latest:      { input: 0.50, output: 2.00 }
     agnes-2.5-pro:        { input: 3, output: 6 }   # 2026-09-24 自动同步（文档现价）
 
 # ── 媒体下载代理白名单（第十七轮）────────────────────────
@@ -461,7 +448,7 @@ pricing:
 # Content-Disposition: attachment，前端「下载」按钮才真的能存文件。
 # 安全：这是网关唯一一个服务端主动出网的接口 —— 只有这里列出的域名（含其子域）
 #   允许被代下载，且解析出来的 IP 必须是公网地址；列表为空 = 该功能整体关闭。
-#   换了供应商/换了 CDN 域名时，往这里加一条即可（如 volc 的 tos-*.volces.com）。
+#   换了供应商/换了 CDN 域名时，往这里加一条即可。
 download:
   # 维护提醒（第三十轮）：这张表是**下载代理的出网白名单** —— /v1/media/download 只肯代抓这里列出的域名。
   #   供应商换 CDN、或同一供应商多套存储（普通版 / 水印版）时，**漏加就会让「下载」按钮 400**

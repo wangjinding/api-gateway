@@ -1,6 +1,6 @@
 # API Gateway
 
-统一多供应商 LLM 接入网关，纯后端 FastAPI，配置驱动。支持 **Agnes AI**、**火山方舟 Coding Plan**、**OpenCode Go** 三个供应商，全部走 OpenAI 兼容协议。v2.4 已集成熔断、限流、图像/视频、指标、成本估算、热加载、测试等完整能力。
+统一多供应商 LLM 接入网关，纯后端 FastAPI，配置驱动。支持 **Agnes AI**、**OpenCode Go**、**Dots AI（小红书）** 三个供应商，全部走 OpenAI 兼容协议。v2.4 已集成熔断、限流、图像/视频、指标、成本估算、热加载、测试等完整能力。
 
 ## 特性
 
@@ -45,7 +45,6 @@ api-gateway/
 | 供应商 | Base URL | 认证 | 模型 |
 |---|---|---|---|
 | Agnes AI | `https://api.agnes-ai.cn/v1` | Bearer | 10 个模型：4 text（`agnes-3.0-flash` 旗舰、`agnes-2.5-flash` 支持图像输入）、3 image、3 video；其中 **6 个免费 + 1 个限时免费**（`agnes-video-2.5-flash`，见「模型清单同步」） |
-| 火山方舟 Coding | `https://ark.cn-beijing.volces.com/api/coding/v3` | Bearer | `ark-code-latest`（text） |
 | OpenCode Go | `https://opencode.ai/zen/go/v1` | Bearer + `x-opencode-session` | 35 个模型，含 **1 个免费**（`space-bunny-free`，见下方小节） |
 | **Dots AI（小红书）** | `https://note3-prev-api.askdiandian.com/v1` | **自定义头 `api-key`** | `dots3-note-prev`（text + 视觉，**512K**，**免费体验**） |
 
@@ -239,7 +238,7 @@ providers:
 | `responses` | `POST /v1/responses` | `Authorization: Bearer` |
 
 模型支持哪几条线写在各供应商的 `models[].protocols`；**不声明 = 只认 `chat/completions`**
-（Agnes / 火山方舟即如此，行为与改造前完全一致）。OpenCode Go 的 **35 个模型**按**实测**逐一
+（Agnes 即如此，行为与改造前完全一致）。OpenCode Go 的 **35 个模型**按**实测**逐一
 标线（`deepseek-v4.1-flash` / `deepseek-v4-pro` / `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` /
 `deepseek-flash` 三线全通）。`GET /v1/models` 会回 `protocols`，前端据此标格式。
 
@@ -481,7 +480,6 @@ observability:
 pricing:                     # 人民币/百万 token，用于估算成本
   per_model:
     agnes-3.0-flash:  { input: 0.35, output: 1.00 }
-    ark-code-latest:  { input: 0.50, output: 2.00 }
     # 未配置的模型不返回 estimated_cost_cny
 ```
 
@@ -501,7 +499,7 @@ python run.py            # 默认读 data/gateway.yaml，端口 8808
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入 AGNES_API_KEY / VOLC_API_KEY / OPENCODE_API_KEY
+# 编辑 .env 填入 AGNES_API_KEY / OPENCODE_API_KEY / DOTS_API_KEY
 python run.py           # 启动时自动读取 .env
 ```
 
@@ -1414,7 +1412,7 @@ pytest tests/ -q
 # 冒烟：健康 / 模型列表 / chat / batch / 错误格式（网关未起或无 key 时优雅 SKIP）
 python smoke_test.py --url http://127.0.0.1:8808
 
-# 活体检查：真实上游（Agnes / 火山方舟 / OpenCode Go）端到端行为校验，含三线直传与跨线 400、
+# 活体检查：真实上游（Agnes / OpenCode Go / Dots AI）端到端行为校验，含三线直传与跨线 400、
 # 流式 SSE、413、CORS 预检、图像生成等
 python live_check.py --url http://127.0.0.1:8808
 ```

@@ -226,7 +226,7 @@ const { theme, followSystem, setTheme, setFollowSystem } = useTheme()
 
 // 对话默认模型下拉（覆盖全部文本模型；第二十七轮: wjd 路由别名已删除，不再有"别名"选项）
 const TEXT_MODELS = [
-  'agnes-3.0-flash', 'agnes-2.5-flash', 'ark-code-latest',
+  'agnes-3.0-flash', 'agnes-2.5-flash',
   // OpenCode Go（订阅编程模型，17 个文本模型）
   'glm-5.3-flash', 'glm-5.3', 'glm-5.2', 'glm-5.1',
   'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6', 'longcat-2.0',

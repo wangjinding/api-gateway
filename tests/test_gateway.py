@@ -92,8 +92,8 @@ def _login_admin_session(client=None):
 # ── 配置加载 ──
 def test_load_config_providers():
     cfg = load_config(CONFIG)
-    # 四家供应商：Agnes / 火山方舟 / OpenCode Go / Dots AI（第三十六轮新增）
-    assert set(cfg.providers.keys()) == {"agnes", "volc_engine", "opencode", "dots"}
+    # 三家供应商：Agnes / OpenCode Go / Dots AI（火山方舟已于第四十一轮按老板要求删除）
+    assert set(cfg.providers.keys()) == {"agnes", "opencode", "dots"}
     assert cfg.providers["agnes"].models[0].id == "agnes-3.0-flash"
 
 
@@ -114,16 +114,47 @@ def test_load_config_routes():
 
 
 def test_pricing_estimate():
+    """pricing.estimate() 的算术。
+
+    **为什么不再绑某个真实模型的价目**（第四十一轮改）：本用例原来拿
+    `ark-code-latest` 当样本，理由写的是"它在每日同步脚本范围外、价格稳定"。
+    火山方舟供应商已按老板要求删除 → 该样本没了；而**剩下带价目的模型全是 Agnes**，
+    而 Agnes 的价目恰恰**会**被 `scripts/sync_models.py` 每日按官方文档改写
+    （`build_plan` 里 `price_set` 只对 agnes_doc 生效）—— 再拿它写死数字，
+    就是当初注释里警告过的"文档改价那天变假红灯"。
+    另外 opencode / dots 的文档报价是 **USD**，而网关 `pricing` 是 **¥/M**，
+    项目规矩是「不自动换算（要汇率、不能猜）」→ 也不能凭空造一条 ¥ 价目出来。
+
+    所以改成：**自造一份定价表**验证算术本身，与任何线上配置解耦。
+    真实配置的"有没有这条价目"由 `test_load_config_pricing_section_shape` 承担。
+    """
+    from app.config import Pricing
+    pc = Pricing(per_model={
+        "demo-model": {"input": 0.50, "output": 2.00},
+        "free-model": {"input": 0, "output": 0},
+    })
+    # 1M in + 1M out = ¥0.50 + ¥2.00
+    cost = pc.estimate("demo-model", 1_000_000, 1_000_000)
+    assert cost is not None and abs(cost - 2.50) < 1e-6
+    # 只算输入
+    assert abs(pc.estimate("demo-model", 1_000_000, 0) - 0.50) < 1e-6
+    # 免费模型 → 0 而不是 None
+    assert pc.estimate("free-model", 1_000_000, 1_000_000) == 0
+    # 没配价目的模型 → None（表示"没数据"，不是 0）
+    assert pc.estimate("unknown-model", 10, 10) is None
+
+
+def test_load_config_pricing_section_shape():
+    """真实配置的 pricing 段仍可用：每条都有 input/output 且都是数字。"""
     cfg = load_config(CONFIG)
-    # 用火山方舟的价目：它不在每日同步脚本（scripts/sync_models.py）的范围内，价格稳定。
-    #   （Agnes 的价目会随官方文档改价被自动更新 —— 拿 agnes-3.0-flash 写死 0.35/1.00
-    #     会在文档改价那天变成假红灯。）
-    mid = "ark-code-latest"
-    price = cfg.pricing.per_model[mid]
-    assert abs(price["input"] - 0.50) < 1e-9 and abs(price["output"] - 2.00) < 1e-9
-    cost = cfg.pricing.estimate(mid, 1_000_000, 1_000_000)
-    assert cost is not None and abs(cost - (0.50 + 2.00)) < 1e-6
-    assert cfg.pricing.estimate("unknown-model", 10, 10) is None
+    per_model = cfg.pricing.per_model
+    assert per_model, "pricing.per_model 不该是空的"
+    for mid, price in per_model.items():
+        for k in ("input", "output"):
+            assert k in price, f"{mid} 缺 {k}"
+            assert isinstance(price[k], (int, float)), f"{mid}.{k} 不是数字"
+    # 已删的火山方舟模型不该还在价目表里
+    assert "ark-code-latest" not in per_model, "火山方舟已删，价目不该残留"
 
 
 # ── 路由解析 ──
@@ -2498,7 +2529,9 @@ def test_models_expose_vision_capability():
     byid = {d["id"]: d for d in data}
     assert byid["agnes-3.0-flash"]["vision"] is True, "Agnes 3.0 Flash 文档写了图像输入"
     assert byid["agnes-image-2.5-flash"]["vision"] is False
-    assert byid["ark-code-latest"]["vision"] is False
+    # 第四十一轮: 火山方舟已删 → 其模型不该再出现在 /v1/models
+    assert "ark-code-latest" not in byid, "火山方舟已删，模型不该还在"
+    assert byid["deepseek-v4.1-flash"]["vision"] is True, "OpenCode 的 v4.1-flash 实测能看图"
     # 第二十七轮: 路由别名已撤（/v1/models 里没有 type=route 的条目），
     #   改为断言每个模型的**协议线**标签（调用方据此决定发到哪条线）。
     # 第三十一轮: wjd 这个名字合法回来了，但只作为**别名条目**（alias_of 指向真实目标，
@@ -3486,9 +3519,9 @@ def test_config_save_applies_without_restart():
         view["observability"]["access_log_maxlen"] = 777
         _hy3 = next(x for x in view["providers"]["opencode"]["models"] if x["id"] == "hy3")
         _hy3["protocols"] = ["chat/completions", "messages"]
-        view["providers"]["volc_engine"]["models"].append(
-            {"id": "ark-code-mini", "display_name": "迷你", "type": "text", "vision": False})
-        view["pricing"]["per_model"]["ark-code-mini"] = {"input": 0.1, "output": 0.2}
+        view["providers"]["agnes"]["models"].append(
+            {"id": "agnes-demo-mini", "display_name": "迷你", "type": "text", "vision": False})
+        view["pricing"]["per_model"]["agnes-demo-mini"] = {"input": 0.1, "output": 0.2}
 
         r = client.put("/config", headers=ah, json={"config": view})
         assert r.status_code == 200, r.text
@@ -3502,7 +3535,7 @@ def test_config_save_applies_without_restart():
         assert next(x for x in m.config.providers["opencode"].models
                     if x.id == "hy3").protocols == ["chat/completions", "messages"], \
             "协议线改动应就地生效（无需重启）"
-        assert m.config.find_provider_for_model("ark-code-mini")[0] == "volc_engine"
+        assert m.config.find_provider_for_model("agnes-demo-mini")[0] == "agnes"
         assert m._access._max == 777, "访问日志容量应就地调整"
         # 盘上也变了，且旧文件有备份
         on_disk = _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
@@ -3717,7 +3750,7 @@ def test_opencode_session_header_from_conversation_id():
     h1 = ad._req_headers()["x-opencode-session"]
     h2 = ad._req_headers()["x-opencode-session"]
     assert len(h1) == 32 and h1 != h2
-    # 非会话供应商（agnes / 火山）根本不该带这个头
+    # 非会话供应商（agnes / dots）根本不该带这个头
     ag = create_adapter(cfg.providers["agnes"], "dummy-token")
     assert "x-opencode-session" not in ag._req_headers("conv-abc")
 
@@ -4905,7 +4938,7 @@ def test_alias_panel_round_trip_and_save_validation():
         #   「面板往返不丢 / 保存即生效 / 非法目标 400 不写盘」，不假设起始状态为空。
         assert "aliases" in view, view.keys()
         # 换一个和生产默认不同的目标，才能证明写入真的生效了
-        target = "ark-code-latest"
+        target = "agnes-2.5-pro"
         payload = {"wjd": {"enabled": True, "target": target, "note": "客户入口"}}
         # 面板真实载荷：模型页「保存映射」只提交 aliases 一段（Models.vue saveAlias），
         #   不是整份视图 —— 服务端按段合并，其余段沿用文件原文（连行尾注释都不动）。

@@ -336,13 +336,14 @@ _docs_on = config.server.docs_enabled   # 安全默认关（report: /docs、/ope
 
 # 本轮修复: 版本号收敛到单一常量。此前 "2.4.0" 硬编码在 FastAPI / / 导航 / /auth/login
 #   三处，/health 干脆没返回版本 —— 前端「网关版本」一直显示 v-。
-# 2026-09-29: 2.4.0 → 2.4.1（前端间距规范统一）；2.4.1 → 2.5.0（新增「智能体」功能模块）；2.5.0 → 2.5.1（智能体支持图片附件）；2.5.1 → 2.5.2（智能体页间距与对齐优化）；2.5.2 → 2.5.3（修 KPI 与下方块之间 0 间距）。
+# 2026-09-29: 2.4.0 → 2.4.1（前端间距规范统一）；2.4.1 → 2.5.0（新增「智能体」功能模块）；2.5.0 → 2.5.1（智能体支持图片附件）；2.5.1 → 2.5.2（智能体页间距与对齐优化）；2.5.2 → 2.5.3（修 KPI 与下方块之间 0 间距）；2.6.0 → 2.6.1（模型切换挪到对话框左下角）。
+# 2026-09-30: 2.6.1 → 2.7.0（按老板要求整个删除「火山方舟 Coding Plan」供应商：配置/模型/代码/文档/前端下拉/环境变量全清）。
 #   ★ 版本号纪律：每次改动都要往上加，小改动加小版本号、大改动加大版本号（README 有专章）。
-VERSION = "2.6.1"
+VERSION = "2.7.0"
 
 app = FastAPI(
     title="API Gateway",
-    description="统一多供应商 LLM 接入网关（Agnes / 火山方舟 / OpenCode Go）",
+    description="统一多供应商 LLM 接入网关（Agnes / OpenCode Go / Dots AI）",
     version=VERSION,
     lifespan=lifespan,
     default_response_class=UTF8JSONResponse,
@@ -1144,7 +1145,7 @@ def _resolve_media_model(cfg, model: str, media_type: str):
 def _resp_text(res: dict) -> str:
     """从已完成的上游结果里提取回复正文（用于访问日志展示流式/非流式的输出内容）。
 
-    本轮补充: 推理型模型（火山方舟 / Kimi thinking 等）在小 max_tokens 下正文可能为空、
+    本轮补充: 推理型模型（Kimi thinking 等）在小 max_tokens 下正文可能为空、
     内容全在 reasoning_content，日志里就会显示成空白 —— 这时回落到推理段并标注，
     保证「有输出就能在日志里看到」。
     """

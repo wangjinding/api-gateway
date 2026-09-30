@@ -1,6 +1,6 @@
 """OpenAI 兼容协议适配器。
 
-Agnes / 火山方舟 两家均使用 OpenAI 兼容 API
+Agnes / OpenCode Go / Dots AI 均使用 OpenAI 兼容 API
 （POST {base_url}/chat/completions），本适配器统一处理。
 
 图像/视频端点可通过 media 配置覆盖：

@@ -575,7 +575,7 @@ _SECTION_COMMENTS = {
 # 也不生效 —— 所以由网关代拉一次并加 Content-Disposition: attachment。
 # 安全：这是全网关唯一一个服务端主动出网的接口，只有这里列出的域名（含子域）允许被代下载，
 #   且解析出的 IP 必须是公网地址；allowed_hosts 为空 = 该功能整体关闭。
-#   换了供应商/CDN 域名时，往这里加一条即可（如 volc 的 tos-*.volces.com）。
+#   换了供应商/CDN 域名时，往这里加一条即可。
 """,
 }
 
