@@ -5967,6 +5967,111 @@ def test_agents_routes_installed():
         assert need in paths, f"缺少端点 {need}"
 
 
+def test_agents_engine_model_endpoints_installed():
+    """引擎模型端点已挂上（第四十轮 · 方案 A）。"""
+    import app.main as m
+    paths = {r.path for r in m.app.routes if hasattr(r, "path")}
+    for need in ("/agents/engine/models", "/agents/engine/model"):
+        assert need in paths, f"缺少端点 {need}"
+
+
+def test_engine_active_model_path_is_models_not_providers():
+    """回归：读/写引擎 active_model 必须用 `/api/models/active`（第四十轮）。
+
+    旧代码写的是 `/api/providers/active` —— 那条**实测是 404**，导致
+    `engine_live["model"]` 一直是空串、配置页模型栏永远显示 `—`。
+    这是"静默失效"型 bug：不报错、不抛异常，只是值一直是空。
+    """
+    from app.adapters import qwenpaw_engine as qe
+    assert qe.ACTIVE_MODEL_PATH == "/api/models/active"
+    assert "providers/active" not in qe.ACTIVE_MODEL_PATH
+    # 两个函数都要用这个常量（别再各写一份字面量）
+    import inspect
+    for fn in (qe.get_active_model, qe.set_active_model):
+        src = inspect.getsource(fn)
+        assert "ACTIVE_MODEL_PATH" in src, f"{fn.__name__} 未复用 ACTIVE_MODEL_PATH"
+
+
+def test_engine_set_active_model_sends_agent_scope():
+    """PUT 的 body 必须是 scope=agent + agent_id（profile 级写入）。"""
+    import asyncio, json as _json
+    from app.adapters import qwenpaw_engine as qe
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"active_llm": {"provider_id": "wangjinding", "model": "wjd"}}
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def put(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _Resp()
+
+    orig = qe.httpx.AsyncClient
+    qe.httpx.AsyncClient = _Client
+    try:
+        out = asyncio.run(qe.set_active_model("http://127.0.0.1:8088", "ai-gateway",
+                                              "wangjinding", "wjd"))
+    finally:
+        qe.httpx.AsyncClient = orig
+
+    assert captured["url"].endswith("/api/models/active"), captured["url"]
+    assert captured["json"] == {"scope": "agent", "agent_id": "ai-gateway",
+                                "provider_id": "wangjinding", "model": "wjd"}
+    assert captured["headers"].get("X-Agent-Id") == "ai-gateway"
+    assert out == {"provider_id": "wangjinding", "model": "wjd"}
+
+
+def test_engine_set_active_model_raises_on_4xx():
+    """引擎拒绝（如模型不存在）→ 抛 EngineError，错误原文透传（别吞成 ok）。"""
+    import asyncio
+    from app.adapters import qwenpaw_engine as qe
+
+    class _Resp:
+        status_code = 400
+        text = ""
+        def json(self):
+            return {"detail": "model 'nope' not found"}
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def put(self, url, json=None, headers=None): return _Resp()
+
+    orig = qe.httpx.AsyncClient
+    qe.httpx.AsyncClient = _Client
+    try:
+        try:
+            asyncio.run(qe.set_active_model("http://x", "ai-gateway", "p", "nope"))
+            raise AssertionError("本应抛 EngineError")
+        except qe.EngineError as e:
+            assert "not found" in str(e), str(e)
+    finally:
+        qe.httpx.AsyncClient = orig
+
+
+def test_agents_engine_set_model_rejects_agent_self_reference():
+    """防自指：引擎模型不能指向 agent/*（否则引擎→智能体→引擎 死循环）。
+
+    这条护栏在对话端点也有；新增的切换端点必须同样拦住，否则用户可以从
+    模型下拉里把引擎指向智能体自身，把服务打成死循环。
+    """
+    import inspect
+    import app.agents_routes as ar
+    src = inspect.getsource(ar.install)
+    # 切换端点里必须有这条检查（与对话入口同款）
+    assert "agent/" in src and "死循环" in src, "切换端点缺少防自指护栏"
+
+
+
 def test_qwenpaw_engine_image_content_passthrough():
     """图片附件：内容块必须原样转成 AgentScope 的 image 形状（第三十九轮）。
 

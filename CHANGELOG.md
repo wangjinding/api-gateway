@@ -1,5 +1,57 @@
 # CHANGELOG
 
+## 2026-09-30 · 智能体模型改为「页面可选」（方案 A）+ 修引擎模型读不到的静默 bug（版本 2.5.4 → 2.6.0）
+
+老板问「智能体当时为什么说不能自己设置模型」，并选择**方案 A**：能选、但不新增 profile。
+
+**先推翻了自己的旧结论**（这是本轮最重要的一步）：当初（第三十八轮）实测的是
+「**请求体里带 `model` 会被忽略**」→ 据此推成「模型是 profile 级 ⇒ 所有智能体只能共用一个模型」。
+**这个推论过头了。** 翻源码 + 实测后确认：
+
+| 事实 | 证据 |
+|---|---|
+| 模型**不是全局唯一**，而是**每个 profile 各存一份** `active_model` | `PUT /api/models/active`（`scope=agent` + `agent_id`）写入 `workspaces/<profile>/agent.json` |
+| 前缀是 **`/api/models/active`** | `routers/providers.py` 里 `APIRouter(prefix="/models")`；实测 `/api/providers/active` → **404** |
+| 改完**即时生效**，不用重启 | `runtime/builder.py:324` 每轮都重读 `agent_config.active_model` |
+| 端到端确实换了模型 | 切 `agnes-3.0-flash` 后真对话 `turn_usage` 回 `model_name=agnes-3.0-flash`、`context_size` 1M → 512K |
+
+所以正确口径是：**请求级指定不行，改 profile 的 `active_model` 行**。
+
+**顺手抓到一个静默 bug（真 bug）**：`agents_routes.py` 的 `refresh_engine_live()` 读的是
+`/api/providers/active` —— **那条 404**，异常被 `except` 吞掉 → `engine_live["model"]` 恒为空串
+→ **配置页模型栏一直显示 `—`、列表页模型名一直是空的**。它不报错、不抛异常，纯静默。
+已改用新 helper `get_active_model()`（走正确路径），模型名现在能正常读出。
+
+**新增（方案 A 的落地）**：
+
+- **后端** `app/adapters/qwenpaw_engine.py`：`ACTIVE_MODEL_PATH = "/api/models/active"` +
+  `get_active_model()` / `set_active_model()`（后者 4xx 抛 `EngineError` 并**透传引擎原文**，
+  不自己编文案）。
+- **后端** `app/agents_routes.py` 两个端点：
+  - `GET /agents/engine/models` —— 可选清单（**只列真的能用的**：`require_api_key` 为真但没配
+    Key 的供应商直接跳过，不列出来骗人）+ 实时 current（不用 TTL 缓存，刚改完要立刻看到）
+  - `PUT /agents/engine/model` —— 切换；带**防自指护栏**（不得指向 `agent/*`，与对话入口同款）
+- **前端** `Agents.vue` 配置页「模型」栏：只读文字 → **可搜索下拉**（按供应商分组、视觉模型带
+  「视觉」标）+ 刷新按钮；失败**回滚选中值**并弹错。`lib/agents.ts` 加两个封装。
+- **i18n**：删掉过期的 `cfgModelReadonly` / `cfgModelHint`，换成 5 个新键（中英 **883/883** 对称）。
+
+**语义与取舍（必须讲清）**：方案 A 是**所有智能体共用这一个模型** —— 因为只有一个 profile，
+`active_model` 是这一份 config 上的一个值，**做不到「A 用 flash、B 用 pro」并存**。
+真要做到那样必须走方案 B（一智能体一 profile，有内存成本）。页面提示文案已按此口径重写。
+
+**测试**：新增 5 条（端点挂载 / 路径常量回归（防再写回 `providers/active`）/ PUT 的 body 与头 /
+4xx 抛错 / 防自指护栏），**224 passed / 0 failed**（原 219）。`ci_check.sh` 六道门禁全绿。
+
+**附带发现（环境问题，非本轮引入）**：QwenPaw 里 `agnes` 供应商的 Key **已失效**
+（切到 `agnes/agnes-3.0-flash` 报 401「无效的令牌」）。走网关的 `wangjinding` 正常
+（网关侧 Agnes Key 是好的）。要用 Agnes 直连需先修 Key。
+
+**上线**：`supervisorctl restart api-gateway:api-gateway_00` + `npm run build`；
+线上 `version=2.6.0`、入口 `index-BQYagb1Q.js`、Agents chunk `Agents-CN_agann.js`；
+真机验证：下拉 112 项 / 7 组 → 选 `wjd` → UI 显示 `wjd` → 磁盘 `agent.json`
+`{"provider_id":"wangjinding","model":"wjd"}` → 引擎回读一致 → 列表页同步。
+
+
 ## 2026-09-30 · 智能体页「对话」与「配置」内容间距放宽（版本 2.5.3 → 2.5.4）
 
 老板反馈：**智能体界面在「对话」和「配置」两个 Tab 里，内容间距也很挤，都优化下**。

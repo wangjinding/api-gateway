@@ -89,6 +89,29 @@ export const testAgent = (slug: string) =>
 export const agentSessions = (slug: string) =>
   req<{ slug: string; kind: string; items: any[] }>(`/agents/${slug}/sessions`)
 
+/** 引擎可选模型清单 + 当前生效模型（第四十轮 · 方案 A：所有智能体共用）。 */
+export interface EngineModelOption {
+  provider_id: string
+  provider_name: string
+  model: string
+  vision: boolean
+}
+export interface EngineModelsResp {
+  options: EngineModelOption[]
+  current: { provider_id: string; model: string }
+  engine: { base_url: string; agent_id: string; ready: boolean }
+  scope_note: string
+}
+
+export const engineModels = () => req<EngineModelsResp>('/agents/engine/models')
+
+/** 切换引擎模型（即时生效，不用重启）。 */
+export const setEngineModel = (providerId: string, model: string) =>
+  req<{ status: string; current: { provider_id: string; model: string } }>(
+    '/agents/engine/model',
+    { method: 'PUT', body: JSON.stringify({ provider_id: providerId, model }) },
+  )
+
 export const stopAgent = (slug: string, chatId: string) =>
   req<{ status: string }>(`/agents/${slug}/stop?chat_id=${encodeURIComponent(chatId)}`, { method: 'POST' })
 

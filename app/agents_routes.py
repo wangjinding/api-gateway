@@ -29,7 +29,13 @@ from app.agents import (
     AgentStore,
     AgentsError,
 )
-from app.adapters.qwenpaw_engine import check_engine, stream_chat
+from app.adapters.qwenpaw_engine import (
+    check_engine,
+    EngineError,
+    get_active_model,
+    set_active_model,
+    stream_chat,
+)
 
 log = logging.getLogger("api-gateway.agents")
 
@@ -126,20 +132,16 @@ async def refresh_engine_live(store: AgentStore, *, force: bool = False) -> None
     agent_id = agents[0].engine_agent_id if agents else DEFAULT_ENGINE_AGENT
     ok, _why = await check_engine(base)
     model = ""
+    provider_id = ""
     if ok:
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as c:
-                r = await c.get(
-                    base.rstrip("/") + "/api/providers/active",
-                    params={"scope": "agent", "agent_id": agent_id},
-                    headers={"X-Agent-Id": agent_id},
-                )
-                if r.status_code < 400:
-                    slot = (r.json() or {}).get("active_llm") or {}
-                    model = slot.get("model") or ""
-        except Exception:  # noqa: BLE001
-            log.debug("读引擎 active_model 失败")
-    engine_live.update({"model": model, "ready": ok, "checked_at": now})
+        # ⚠️ 第四十轮修：旧代码读的是 `/api/providers/active` —— 那条**是 404**
+        #   （真前缀是 `/api/models/active`），所以 model 一直是空串、页面显示 `—`。
+        slot = await get_active_model(base, agent_id)
+        if slot:
+            model = slot.get("model") or ""
+            provider_id = slot.get("provider_id") or ""
+    engine_live.update({"model": model, "provider_id": provider_id,
+                        "ready": ok, "checked_at": now})
 
 
 def can_use_agent(a: Agent, role: str) -> bool:
@@ -204,6 +206,79 @@ def install(app: FastAPI, *, store: AgentStore,
                 "agent_id": agents[0].engine_agent_id if agents else DEFAULT_ENGINE_AGENT,
             },
         }
+
+    # ── 引擎模型：可选清单 + 切换（第四十轮 · 方案 A）──────────────────
+    #
+    # 语义（老板 2026-09-30 拍板方案 A）：所有智能体共用一个 profile
+    # ⇒ 这里切的模型是"所有智能体一起用的"，不是各自独立的。
+    # 要"每个智能体各用各的"须走方案 B（一智能体一 profile），本轮不做。
+    @app.get("/agents/engine/models")
+    async def agents_engine_models(request: Request, _auth=Depends(require_auth)):
+        """可选模型清单 = 网关自己的模型列表（都由 wangjinding 供应商送达引擎）。"""
+        require_admin(request)
+        store.reload_if_changed()
+        agents = store.list()
+        base = agents[0].engine_base_url if agents else DEFAULT_ENGINE_URL
+        agent_id = agents[0].engine_agent_id if agents else DEFAULT_ENGINE_AGENT
+
+        # ① 引擎里配好的、且真的能用的模型（有 Key 的供应商）
+        options: list[dict[str, Any]] = []
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as c:
+                r = await c.get(base.rstrip("/") + "/api/models")
+            if r.status_code < 400:
+                for p in (r.json() or []):
+                    pid = p.get("id") or ""
+                    if p.get("require_api_key") and not p.get("api_key"):
+                        continue          # 没配 Key 的选不了，别列出来骗人
+                    for m in (list(p.get("models") or []) + list(p.get("extra_models") or [])):
+                        mid = m.get("id") if isinstance(m, dict) else m
+                        if not mid:
+                            continue
+                        options.append({
+                            "provider_id": pid,
+                            "provider_name": p.get("name") or pid,
+                            "model": mid,
+                            "vision": bool(m.get("supports_image")) if isinstance(m, dict) else False,
+                        })
+        except Exception:  # noqa: BLE001
+            log.warning("读引擎模型清单失败（可选清单降级为空）")
+
+        # ② 当前生效的模型（实时读，别用 TTL 缓存 —— 用户刚改完要立刻看到）
+        current = await get_active_model(base, agent_id) or {}
+        ok, _why = await check_engine(base)
+        return {
+            "options": options,
+            "current": {"provider_id": current.get("provider_id", ""),
+                        "model": current.get("model", "")},
+            "engine": {"base_url": base, "agent_id": agent_id, "ready": ok},
+            "scope_note": "shared",     # 前端据此显示"所有智能体共用"提示
+        }
+
+    @app.put("/agents/engine/model")
+    async def agents_engine_set_model(request: Request, _auth=Depends(require_auth)):
+        """切换引擎模型（即时生效，不用重启）。"""
+        require_admin(request)
+        body = await json_body(request)
+        provider_id = str(body.get("provider_id") or "").strip()
+        model = str(body.get("model") or "").strip()
+        if not provider_id or not model:
+            raise HTTPException(400, "provider_id 与 model 都不能为空")
+        # 防自指（与对话入口同一条护栏）
+        if model == "agent" or model.startswith("agent/"):
+            raise HTTPException(400, "不能把引擎模型指向智能体自身（agent/*）")
+        store.reload_if_changed()
+        agents = store.list()
+        base = agents[0].engine_base_url if agents else DEFAULT_ENGINE_URL
+        agent_id = agents[0].engine_agent_id if agents else DEFAULT_ENGINE_AGENT
+        try:
+            slot = await set_active_model(base, agent_id, provider_id, model)
+        except EngineError as e:
+            raise HTTPException(400, str(e))
+        # 立刻刷新缓存，让列表页同步
+        await refresh_engine_live(store, force=True)
+        log.info("引擎模型已切换：%s → %s/%s", agent_id, provider_id, model)
+        return {"status": "ok", "current": slot}
 
     # ── 新建 / 修改 / 归档 / 恢复 ──
     @app.post("/agents")

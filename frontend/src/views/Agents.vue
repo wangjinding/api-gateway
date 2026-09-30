@@ -101,7 +101,7 @@
 
         <div class="ag-tabs">
           <span :class="{ on: tab === 'chat' }" @click="tab = 'chat'">{{ t('agents.tabChat') }}</span>
-          <span :class="{ on: tab === 'config' }" @click="tab = 'config'">{{ t('agents.tabConfig') }}</span>
+          <span :class="{ on: tab === 'config' }" @click="tab = 'config'; loadEngineModels()">{{ t('agents.tabConfig') }}</span>
           <span :class="{ on: tab === 'runs' }" @click="tab = 'runs'; loadRuns()">{{ t('agents.tabRuns') }}</span>
         </div>
         </div>
@@ -255,13 +255,36 @@
             <div class="card-h"><b>{{ t('agents.cfgModel') }}</b><span class="sub">{{ t('agents.cfgModelSub') }}</span></div>
             <div class="frow">
               <div class="f-lab">{{ t('agents.cfgModel') }}</div>
-              <div class="f-val">
-                <span class="code">{{ cur.engine_model || '—' }}</span>
-                <span class="f-lock"><Icon name="lock" :size="12" />{{ t('agents.cfgReadonly') }}</span>
+              <div class="f-val model-pick">
+                <el-select
+                  v-model="enginePick"
+                  size="small"
+                  filterable
+                  :loading="engineLoading"
+                  :placeholder="t('agents.cfgModelPick')"
+                  style="flex:1;min-width:0"
+                  @change="doSetModel"
+                >
+                  <el-option-group
+                    v-for="g in engineGroups" :key="g.provider_id"
+                    :label="g.provider_name"
+                  >
+                    <el-option
+                      v-for="o in g.items" :key="o.provider_id + '/' + o.model"
+                      :label="o.model" :value="o.provider_id + '/' + o.model"
+                    >
+                      <span>{{ o.model }}</span>
+                      <span v-if="o.vision" class="opt-vision">{{ t('agents.cfgModelVision') }}</span>
+                    </el-option>
+                  </el-option-group>
+                </el-select>
+                <el-button size="small" :loading="engineLoading" @click="loadEngineModels">
+                  {{ t('agents.cfgModelRefresh') }}
+                </el-button>
               </div>
             </div>
             <div class="f-hint">
-              {{ t('agents.cfgModelHint') }}
+              {{ t('agents.cfgModelHintShared') }}
               <a :href="qwenpawUrl" target="_blank" rel="noopener">{{ t('agents.cfgOpenQwenpaw') }} ↗</a>
             </div>
             <div class="card-h" style="margin-top:var(--gap)">
@@ -373,9 +396,9 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import Icon from '../components/Icon.vue'
 import {
-  type AgentEvent, type AgentItem, type AgentRun,
-  agentRuns, agentSessions, createAgent, listAgents,
-  restoreAgent, retireAgent, streamAgentChat, testAgent, updateAgent,
+  type AgentEvent, type AgentItem, type AgentRun, type EngineModelOption,
+  agentRuns, agentSessions, createAgent, engineModels, listAgents,
+  restoreAgent, retireAgent, setEngineModel, streamAgentChat, testAgent, updateAgent,
 } from '../lib/agents'
 import { renderMarkdown } from '../lib/markdown'
 import { PRESETS, pickImage } from '../lib/upload'
@@ -415,6 +438,19 @@ const createOpen = ref(false)
 const create = reactive({ display_name: '', slug: '', description: '', system_suffix: '' })
 const testing = ref(false)
 const testResult = ref<{ ok: boolean; ms: number; detail: string } | null>(null)
+
+// 引擎模型选择（第四十轮 · 方案 A）：清单 + 当前值。`enginePick` 形如 "provider/model"。
+const engineOptions = ref<EngineModelOption[]>([])
+const enginePick = ref('')
+const engineLoading = ref(false)
+const engineGroups = computed(() => {
+  const by: Record<string, { provider_id: string; provider_name: string; items: EngineModelOption[] }> = {}
+  for (const o of engineOptions.value) {
+    if (!by[o.provider_id]) by[o.provider_id] = { provider_id: o.provider_id, provider_name: o.provider_name, items: [] }
+    by[o.provider_id].items.push(o)
+  }
+  return Object.values(by)
+})
 
 const cur = computed(() => data.agents.find((a) => a.slug === current.value) || null)
 const hasRetired = computed(() => data.agents.some((a) => a.status === 'retired'))
@@ -645,6 +681,38 @@ async function doTest() {
   finally { testing.value = false }
 }
 
+/** 拉可选模型清单 + 当前生效模型（第四十轮 · 方案 A）。 */
+async function loadEngineModels() {
+  engineLoading.value = true
+  try {
+    const j = await engineModels()
+    engineOptions.value = j.options || []
+    const c = j.current || {}
+    enginePick.value = c.model ? `${c.provider_id}/${c.model}` : ''
+  } catch (e: any) {
+    ElMessage.error(String(e?.message || e))
+  } finally { engineLoading.value = false }
+}
+
+/** 切换引擎模型 —— 即时生效（不用重启引擎）。 */
+async function doSetModel(v: string) {
+  const i = String(v || '').indexOf('/')
+  if (i < 0) return
+  const provider_id = v.slice(0, i)
+  const model = v.slice(i + 1)
+  const prev = enginePick.value
+  try {
+    const j = await setEngineModel(provider_id, model)
+    const c = j.current || {}
+    enginePick.value = c.model ? `${c.provider_id}/${c.model}` : ''
+    ElMessage.success(t('agents.cfgModelSwitched', { model }))
+    await load()          // 让列表页 / 头部同步新模型名
+  } catch (e: any) {
+    enginePick.value = prev    // 失败回滚选中值
+    ElMessage.error(String(e?.message || e))
+  }
+}
+
 async function doRetire() {
   if (!cur.value || !confirm(t('agents.confirmDelete'))) return
   try { await retireAgent(cur.value.slug); await load(); pick(data.agents[0]?.slug || '') }
@@ -790,6 +858,10 @@ onMounted(load)
 .f-val { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; font-size: 12.5px; padding: 8px 10px; border-radius: 9px; background: var(--chip); }
 .f-val.code { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
 .f-lock { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--muted-2); }
+/* 模型下拉（第四十轮）：撑满 f-val，右侧留刷新按钮 */
+.model-pick { gap: var(--gap-sm); padding: 4px 6px 4px 4px; }
+.model-pick .el-select { flex: 1; min-width: 0; }
+.opt-vision { float: right; margin-left: 10px; font-size: 10.5px; color: var(--primary); opacity: .8; }
 .f-hint { font-size: 11px; color: var(--muted-2); line-height: 1.65; margin: var(--gap-xs) 0 0 88px; }
 .f-row-note { font-size: 11.5px; color: var(--muted); line-height: 1.6; margin-top: var(--gap-s); }
 .row-actions { display: flex; align-items: center; gap: var(--gap-sm); margin-top: var(--gap-lg); }

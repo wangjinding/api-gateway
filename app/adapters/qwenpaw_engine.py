@@ -348,3 +348,71 @@ async def check_engine(base_url: str, *, timeout: float = 5.0) -> tuple[bool, st
         return False, ENGINE_DOWN_MSG
     except Exception as exc:  # noqa: BLE001
         return False, f"引擎不可达：{exc}"
+
+
+# ── 引擎模型读写（第四十轮 · 「模型可选」方案 A）────────────────────────
+#
+# 事实（实测 + 源码）：
+# - 模型不是"全局唯一"，而是**每个 profile 各存一份** `active_model`
+#   （落盘 `workspaces/<profile>/agent.json`）。所以改它 = 只影响这一个 profile。
+# - 端点前缀是 **`/api/models/active`**（`routers/providers.py` 里 `prefix="/models"`）。
+#   ⚠️ 别写成 `/api/providers/active` —— 那条是 **404**（本项目旧代码就踩过这个坑，
+#   导致模型名一直读不出来、页面显示 `—`）。
+# - 改完 **即时生效**，不用重启引擎（每轮对话都会重读 agent_config）。
+# - 我们这边所有智能体**共用 `ai-gateway` 一个 profile** ⇒ 改这个 profile 的模型
+#   等于"换所有智能体用的模型"。这是方案 A 的既定语义（做不到 A/B 各用各的）。
+
+ACTIVE_MODEL_PATH = "/api/models/active"
+
+
+async def get_active_model(base_url: str, agent_id: str,
+                           *, timeout: float = 8.0) -> dict[str, Any] | None:
+    """读某个 profile 当前生效的模型。返回 `{provider_id, model}`，读不到返回 None。"""
+    url = base_url.rstrip("/") + ACTIVE_MODEL_PATH
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.get(
+                url,
+                params={"scope": "agent", "agent_id": agent_id},
+                headers={"X-Agent-Id": agent_id},
+            )
+        if r.status_code >= 400:
+            return None
+        slot = (r.json() or {}).get("active_llm") or {}
+        if not slot.get("model"):
+            return None
+        return {"provider_id": slot.get("provider_id") or "", "model": slot.get("model") or ""}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def set_active_model(base_url: str, agent_id: str,
+                           provider_id: str, model: str,
+                           *, timeout: float = 15.0) -> dict[str, Any]:
+    """改某个 profile 的模型（即时生效）。校验失败抛 EngineError。
+
+    引擎会先 `_validate_model_slot()`（供应商/模型必须存在），所以这里
+    直接把上游的错误原文透出去，比自己编文案准确。
+    """
+    url = base_url.rstrip("/") + ACTIVE_MODEL_PATH
+    payload = {"scope": "agent", "agent_id": agent_id,
+               "provider_id": provider_id, "model": model}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.put(url, json=payload, headers={"X-Agent-Id": agent_id})
+    except httpx.ConnectError:
+        raise EngineError(ENGINE_DOWN_MSG)
+    except Exception as exc:  # noqa: BLE001
+        raise EngineError(f"引擎不可达：{exc}")
+    if r.status_code >= 400:
+        detail = ""
+        try:
+            b = r.json()
+            detail = b.get("detail") or b.get("message") or ""
+        except Exception:  # noqa: BLE001
+            detail = (r.text or "")[:200]
+        raise EngineError(f"引擎拒绝该模型：{detail or f'HTTP {r.status_code}'}")
+    slot = (r.json() or {}).get("active_llm") or {}
+    return {"provider_id": slot.get("provider_id") or provider_id,
+            "model": slot.get("model") or model}
+
