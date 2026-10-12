@@ -340,7 +340,7 @@ _docs_on = config.server.docs_enabled   # 安全默认关（report: /docs、/ope
 # 2026-09-30: 2.6.1 → 2.7.0（按老板要求整个删除「火山方舟 Coding Plan」供应商：配置/模型/代码/文档/前端下拉/环境变量全清）。
 # 2026-09-30: 2.7.0 → 2.7.1（界面提示白话化：熔断器→供应商自动保护、引擎→运行环境、slug→标识；删 120 个未引用死键）。
 #   ★ 版本号纪律：每次改动都要往上加，小改动加小版本号、大改动加大版本号（README 有专章）。
-VERSION = "2.7.1"
+VERSION = "2.7.2"
 
 app = FastAPI(
     title="API Gateway",

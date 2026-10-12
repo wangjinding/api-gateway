@@ -209,18 +209,6 @@ providers:
         context_window: 1048576    # 第三十三轮（2026-09-24）：上下文窗口（token），每日同步维护
         max_output_tokens: 131072    # 最大输出（token）
         protocols: ["chat/completions"]
-      - id: "space-bunny-free"
-        display_name: "Space Bunny Free（免费）"
-        type: "text"
-        context_window: 1048576    # 第三十三轮（2026-09-24）：上下文窗口（token），每日同步维护
-        max_output_tokens: 524288    # 最大输出（token）
-        free: true     # 前端「能力」列据此打「免费」标签；/v1/models 也会带出 free 字段
-        # ★ 免费模型：官方文档价格表 Free / Free / Free，额度 Unlimited（限时）。
-        #   接替已下线的 union-alpha（Union Alpha Free）。
-        #   实测 chat 200、messages 200、responses 503 → 标两条线。
-        #   （models.dev 里另有个 ox-alpha-free 也是 cost 0，但上游 /models 与官方文档
-        #     都没有它，故不收录。）
-        protocols: ["chat/completions", "messages"]
       # ── Chat + Messages 两条线都实测可用 ─────────────────
       - id: "kimi-k3"
         display_name: "Kimi K3"
@@ -341,6 +329,31 @@ providers:
         type: "text"
         context_window: 1000000    # 同步 2026-09-28（scripts/sync_models.py）
         max_output_tokens: 131072    # 同步 2026-09-28（scripts/sync_models.py）
+        # 协议线取自官方 Endpoints 表，未逐线实测（现网其它模型是实测过的）
+        protocols: ["chat/completions"]
+        free: true     # 官方价格表标 Free
+      # 2026-10-07 自动同步：官方文档新增（scripts/sync_models.py）
+      - id: "space-bunny"
+        display_name: "Space Bunny"
+        type: "text"
+        context_window: 1048576    # 同步 2026-10-08（scripts/sync_models.py）
+        max_output_tokens: 524288    # 同步 2026-10-08（scripts/sync_models.py）
+        # 协议线取自官方 Endpoints 表，未逐线实测（现网其它模型是实测过的）
+        protocols: ["chat/completions"]
+      # 2026-10-08 自动同步：官方文档新增（scripts/sync_models.py）
+      - id: "claude-haiku-5-5"
+        display_name: "Claude Haiku 5 5"
+        type: "text"
+        context_window: 1000000    # 同步 2026-10-09（scripts/sync_models.py）
+        max_output_tokens: 128000    # 同步 2026-10-09（scripts/sync_models.py）
+        # 协议线取自官方 Endpoints 表，未逐线实测（现网其它模型是实测过的）
+        protocols: ["messages"]
+      # 2026-10-09 自动同步：官方文档新增（scripts/sync_models.py）
+      - id: "step-5-preview-free"
+        display_name: "Step 5 Preview Free"
+        type: "text"
+        context_window: 1000000    # 同步 2026-10-10（scripts/sync_models.py）
+        max_output_tokens: 65536    # 同步 2026-10-10（scripts/sync_models.py）
         # 协议线取自官方 Endpoints 表，未逐线实测（现网其它模型是实测过的）
         protocols: ["chat/completions"]
         free: true     # 官方价格表标 Free

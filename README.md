@@ -799,6 +799,7 @@ curl "http://localhost:8808/v1/videos/<video_id>?model=agnes-video-2.5-flash&wai
   x 轴标签上。新增 `src/lib/charts.ts` 统一 `legend(top:0)` / 类目轴截断+倾斜+hideOverlap /
   `grid.containLabel` 留白，仪表盘与指标页 4 类图全部接入。
 - **模型与供应商页**（`/web/#/models`）：指标卡（模型/文本/图像/视频/供应商）+ 模型清单（ID/类型/供应商/视觉/延迟，一键测速按模型自己的协议线探测），数据来自 `/v1/models` + `/health`。（第二十七轮：路由别名表已随功能删除）
+  - **测速两种用法**（2026-10-12）：**一键测速**＝整轮**串行**（测一个显示一个，避免把免费档额度瞬间打满 → 上游 429）；每行的 **⚡ 单独测速可并发**（各测各的、不用等上一个回来，上限 3 个；与整轮互斥）。后端同一个探针端点 `POST /v1/models/speedtest`，传 `model` 即只测那一个。
   （降级链逐 tag 展示、供应商数）+ 模型清单（ID/类型/供应商/Key 已配），数据来自 `/v1/models` + `/health`。
 - **多语言（M5+）**：Vue I18n + `src/locales/zh|en.ts`，全站中英可切换；语言按钮在头部与登录页、设置页
   （`settings.language`），存 `localStorage.gw_locale`、默认中文；Element Plus 语言包经

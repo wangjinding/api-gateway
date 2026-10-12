@@ -513,11 +513,13 @@ export default {
     testing: 'Probing latency of every text model…',
     testingShort: 'Testing…',
     testOne: 'Test this model',
+    testOneRunning: 'Testing this model…',
+    testOneBusy: 'Up to {n} at a time — wait for one to finish',
     latency: 'Latency',
     failed: 'Failed',
     speedtestDone: 'Speed test done, {n} models',
     speedtestFail: 'Speed test failed',
-    speedtestHint: 'Latency probed per format',
+    speedtestHint: 'Latency probed per format; per-row ⚡ tests run {n} at a time',
     textModelCount: '{n} text models',
     // Round 27: the supported-formats column (three protocol lines). Line names are the
     // vendors' own endpoint names, so they are not translated.

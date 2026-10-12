@@ -134,7 +134,9 @@ class ModelInfo:
     # 2026-09-21: 是否**免费模型**（官方价格表标 Free、不按 token 计费）。
     #   纯标注用途：/v1/models 带出 `free` 字段，前端「能力」列打「免费」标签；
     #   不参与路由/限流/熔断，也不影响成本估算（额度由上游控制，网关无法感知）。
-    #   配置写法：`models[]` 里加 `free: true`（OpenCode Go 当前只有 space-bunny-free）。
+    #   配置写法：`models[]` 里加 `free: true`（2026-10-12 现网 OpenCode Go 是
+    #   longcat-2.5-preview-free / step-5-preview-free 两个；原 space-bunny-free 已被官方
+    #   改名 space-bunny 并转收费，同步据此撤掉了标记）。
     free: bool = False
     # 2026-09-24（老板要求：Agnes 也要标免费 / 限时免费）: 免费是否**带期限**。
     #   语义：`free: true` + `free_limited: false` → 免费；`free_limited: true` → 限时免费。

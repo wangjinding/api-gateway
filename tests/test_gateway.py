@@ -1711,7 +1711,10 @@ def test_models_payload_marks_free_models():
     client = TestClient(m.app)
     data = client.get("/v1/models").json()["data"]
     free_ids = [x["id"] for x in data if x.get("free")]
-    assert "space-bunny-free" in free_ids, f"免费模型没标出来：{free_ids}"
+    # 2026-10-12：样本从 space-bunny-free 换成 longcat-2.5-preview-free —— 前者已于
+    #   2026-10-07 被官方改名成 space-bunny 并转收费（价格表 $0.15/$0.60），
+    #   每日同步据此去掉了它的 free 标记（现网免费位＝longcat-2.5-preview-free / step-5-preview-free）。
+    assert "longcat-2.5-preview-free" in free_ids, f"免费模型没标出来：{free_ids}"
     # 反向：付费模型必须是 free=false（不能因为字段缺失而误标）
     paid = next(x for x in data if x["id"] == "deepseek-v4.1-flash")
     assert paid["free"] is False, paid

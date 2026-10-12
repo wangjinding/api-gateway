@@ -15,9 +15,12 @@
       <div class="card">
         <div class="card-h">
           <b>{{ t('models.allTextModels') }}</b>
-          <span class="sub">{{ t('models.speedtestHint') }}</span>
+          <span class="sub">{{ t('models.speedtestHint', { n: SPEEDTEST_MAX_CONCURRENCY }) }}</span>
           <span style="flex:1"></span>
-          <el-button size="small" :loading="latTesting" @click="runSpeedtest()">
+          <!-- 一键测速与单独测速互斥：整轮在跑时不让单测插队（同一个模型会被两边同时覆盖结果）；
+               反过来，有单测在飞时也先别开整轮。 -->
+          <el-button size="small" :loading="latTesting" :disabled="latRunningCount > 0"
+                     @click="runSpeedtest()">
             {{ latTesting ? t('models.testingShort') : t('models.speedtest') }}
           </el-button>
         </div>
@@ -43,11 +46,13 @@
             <span class="muted-2 st-prov">{{ m.provider }}</span>
             <span style="flex:1"></span>
             <span class="pill st-lat" :class="latCls(m.id)">
-              <span v-if="m.id === latCurrentId" class="st-spin" aria-hidden="true"></span>
+              <!-- 加载图标两种来源：整轮测速的当前行（latCurrentId），或这一个单独在测（latRunning） -->
+              <span v-if="m.id === latCurrentId || latRunning[m.id]" class="st-spin" aria-hidden="true"></span>
               <span v-else>{{ latText(m.id) }}</span>
             </span>
-            <button class="st-one" :disabled="latTesting || !!latCurrentId"
-                    :title="t('models.testOne')" :aria-label="t('models.testOne')" @click="retestOne(m.id)">
+            <button class="st-one"
+                    :disabled="latTesting || !!latRunning[m.id] || latRunningCount >= SPEEDTEST_MAX_CONCURRENCY"
+                    :title="testOneHint(m)" :aria-label="testOneHint(m)" @click="retestOne(m.id)">
               <Icon name="bolt" :size="13" />
             </button>
           </div>
@@ -228,13 +233,39 @@ function protocolsOf(row: any): string[] {
 // 每个格式标签的悬浮说明：这条线对应哪个端点（点进说明文档也是这个对应关系）
 function protoTitle(p: string): string { return `POST /v1/${p}` }
 
+// ── 测速（2026-10-12：单独测速改为并发）──────────────────────────
+//   两套状态分开记：
+//     · 一键测速（runSpeedtest）：整轮**串行**——latTesting = 整轮在跑、latCurrentId = 整轮当前那一行。
+//       串行是老板定的口味（测一个显示一个），且并发会把免费额度瞬间打满 → 上游 429，
+//       结果会刷成一片「失败」，反而失去参考价值。
+//     · 单独测速（retestOne）：**可并发**——每行独立（latRunning 记着正在测的 id），
+//       不用等上一个回来才能点下一个。上限 SPEEDTEST_MAX_CONCURRENCY 是别让手一抖
+//       把全部免费档一次轰出去（免费档 429 同样会把结果刷成失败）。
+const SPEEDTEST_MAX_CONCURRENCY = 3
 const latTesting = ref(false)
-const latCurrentId = ref('')   // 当前正在测的模型 id：该行延迟位显示加载图标
+const latCurrentId = ref('')   // 整轮测速当前测到的模型 id：该行延迟位显示加载图标
+const latRunning = ref<Record<string, boolean>>({})   // 正在单独测的模型 id（可同时多个）
+const latRunningCount = computed(() => Object.keys(latRunning.value).length)
 // protocol 由后端返回：探针**按模型自己的协议线**挑一条（优先级 chat → messages → responses），
 //   记下来才能在悬浮提示里说清「这次多少毫秒是走哪条线测的」——多线模型不写清楚会让人误解。
 const latByModel = ref<Record<string, { ok: boolean; latency_ms: number | null; error: string; protocol: string }>>({})
+
+// 探一次 = 一个模型一次请求；出错不抛，统一回一行结果（整轮 / 单测共用）
+async function probeOne(id: string) {
+  try {
+    const j = await api('/v1/models/speedtest', { method: 'POST', body: JSON.stringify({ model: id }) })
+    const r: any[] = (j && j.results) || []
+    const hit = r[0]
+    return hit
+      ? { ok: !!hit.ok, latency_ms: hit.latency_ms ?? null, error: hit.error || '', protocol: hit.protocol || '' }
+      : { ok: false, latency_ms: null, error: t('models.speedtestFail'), protocol: '' }
+  } catch (e: any) {
+    return { ok: false, latency_ms: null, error: (e && e.message) || String(e), protocol: '' }
+  }
+}
+
 async function runSpeedtest() {
-  if (latTesting.value) return
+  if (latTesting.value || latRunningCount.value) return   // 整轮在跑 / 有单测在飞 → 不开整轮
   // 逐个测速：按列表顺序，测一个立刻显示那一行、再测下一个；当前测的行显示加载图标。
   //   串行天然不会把免费额度瞬间打满（并发时免费档供应商容易 429）。
   const ids = textModelRows.value.map((m) => m.id)
@@ -242,41 +273,39 @@ async function runSpeedtest() {
   latTesting.value = true
   for (const id of ids) {
     latCurrentId.value = id
-    let row: { ok: boolean; latency_ms: number | null; error: string; protocol: string }
-    try {
-      const j = await api('/v1/models/speedtest', { method: 'POST', body: JSON.stringify({ model: id }) })
-      const r: any[] = (j && j.results) || []
-      const hit = r[0]
-      row = hit
-        ? { ok: !!hit.ok, latency_ms: hit.latency_ms ?? null, error: hit.error || '', protocol: hit.protocol || '' }
-        : { ok: false, latency_ms: null, error: t('models.speedtestFail'), protocol: '' }
-    } catch (e: any) {
-      // 单个模型出错不中断整轮，标记失败后继续下一个
-      row = { ok: false, latency_ms: null, error: (e && e.message) || String(e), protocol: '' }
-    }
+    const row = await probeOne(id)   // 单个模型出错不中断整轮，标记失败后继续下一个
     latByModel.value = { ...latByModel.value, [id]: row }   // 响应式替换 → 该行即时更新
   }
   latCurrentId.value = ''
   latTesting.value = false
   ElMessage.success(t('models.speedtestDone', { n: ids.length }))
 }
-// 单个模型重新测速（失败行旁的「重新测速」按钮）：只重测这一个，复用当前行加载图标
+
+// 单个模型测速（每行常驻的 ⚡ 按钮）：只测这一个；**并发** —— 各测各的，不等别人回来
 async function retestOne(id: string) {
-  if (latTesting.value || latCurrentId.value) return   // 整轮测速中 / 已有单测在跑 → 忽略，避免打架
-  latCurrentId.value = id
-  try {
-    const j = await api('/v1/models/speedtest', { method: 'POST', body: JSON.stringify({ model: id }) })
-    const r: any[] = (j && j.results) || []
-    const hit = r[0]
-    const row = hit
-      ? { ok: !!hit.ok, latency_ms: hit.latency_ms ?? null, error: hit.error || '', protocol: hit.protocol || '' }
-      : { ok: false, latency_ms: null, error: t('models.speedtestFail'), protocol: '' }
-    latByModel.value = { ...latByModel.value, [id]: row }
-  } catch (e: any) {
-    latByModel.value = { ...latByModel.value, [id]: { ok: false, latency_ms: null, error: (e && e.message) || String(e), protocol: '' } }
-  } finally {
-    latCurrentId.value = ''
+  if (latTesting.value || latRunning.value[id]) return   // 整轮测速中 / 这一个已经在测 → 忽略
+  if (latRunningCount.value >= SPEEDTEST_MAX_CONCURRENCY) {
+    ElMessage.warning(t('models.testOneBusy', { n: SPEEDTEST_MAX_CONCURRENCY }))
+    return
   }
+  latRunning.value = { ...latRunning.value, [id]: true }
+  try {
+    const row = await probeOne(id)
+    latByModel.value = { ...latByModel.value, [id]: row }
+  } finally {
+    const next = { ...latRunning.value }
+    delete next[id]
+    latRunning.value = next
+  }
+}
+
+// 单测按钮的悬浮说明：说清现在为什么点不了（正在测这一个 / 并发已满）
+function testOneHint(m: { id: string }): string {
+  if (latRunning.value[m.id]) return t('models.testOneRunning')
+  if (latRunningCount.value >= SPEEDTEST_MAX_CONCURRENCY) {
+    return t('models.testOneBusy', { n: SPEEDTEST_MAX_CONCURRENCY })
+  }
+  return t('models.testOne')
 }
 function latText(id: string): string {
   const row = latByModel.value[id]
