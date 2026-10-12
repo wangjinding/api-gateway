@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## 2026-10-12 · 代码托管改推自建 Gitea（CNB 退役，规则变更）
+
+老板原话：「**以后改动的代码不提交 cnb 了，改成提交到 gitea 上**」→ 推翻 2026-09-24 立的
+「上生产必推 CNB」，改成**上生产必推自建 Gitea**。
+
+- **新增 `scripts/push_gitea.sh`**：与 `push_cnb.sh` 同一套安全口径（一次性带密码内嵌 URL；
+  不带密码退出 2 / 工作区不干净退出 3 / 推完核对「远端 = 本地」/ 复查 `.git/config` 无明文；
+  **密码不内置进任何文件**），只是目标换成 `https://git.wangjinding.com/Jidekin/api-gateway.git`。
+- **`scripts/push_cnb.sh` 保留但已停用**（文件头加了醒目的「已停用」说明，不再使用）。
+- **`README.md`**「版本号与发布纪律 → 发布流程」一节：`推 CNB` → `推 Gitea`，并写明原 CNB 口径作废。
+- **背景**：CNB 那把 token 已实测失效（`push`/`ls-remote` 回 `Repository Not Found.`，API 回
+  `errcode:16 not logged in`；SSH `git@cnb.cool` 22 端口超时）；同期老板起了自建 Gitea
+  （容器 `1Panel-gitea-CjQz`，`commitgo/gitea-ee:27.3.8`，公网 `https://git.wangjinding.com`），
+  三个项目（`api-gateway` / `QwenPawChat` / `QwenPawChatWeChat`）都已建 **private** 仓库并推了**全量历史**。
+- **remote 布局**：三个项目都新增 `gitea`；原 `origin` 仍指 CNB（**不删、不动，只是不再推它**）。
+- **待办**：若要免密自动推送，可在 Gitea 建 API token（需老板同意；本次没擅自建）。
+
 ## 2026-10-12 · 单独测速改并发（版本 2.7.1 → 2.7.2）
 
 老板：「单独测速能异步测速不，不用等到上一个回来后才能测速其他的」→ 按助手建议落地。

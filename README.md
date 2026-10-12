@@ -1388,15 +1388,17 @@ VERSION = "2.4.0"     # ← 只改这一处
          后端/代码：supervisorctl restart api-gateway:api-gateway_00
        → 真机验证（线上 healthz / 页面 / 接口）
        → git commit
-       → 推 CNB（scripts/push_cnb.sh，仓库 Jidekin/api-gateway 分支 master）
+       → 推 Gitea（scripts/push_gitea.sh，仓库 Jidekin/api-gateway 分支 master）
 ```
 
-**「只要上生产就必须推 CNB」** 是既有硬性规矩（老板 2026-09-24 原话：「只要项目重启上线生产的
-代码都要推送到 cnb 上」）：保持"线上跑着的代码 = 仓库里的代码"。**凡是重启上线（后端 restart）
-或 `npm run build` 覆盖 `frontend/dist` 的代码改动，验证通过后都必须推 CNB**；纯注释/配置靠
-`hot_reload` 生效的也照推。落地脚本 `scripts/push_cnb.sh`（一次性带 token 内嵌 URL；不带 token
-退出 2 / 工作区不干净退出 3 / 推完核对远端=本地并复查 `.git/config` 无 token；**token 不内置进
-任何文件**）。仓库 `https://cnb.cool/Jidekin/api-gateway.git`、分支 `master`。
+**「只要上生产就必须推」** 是既有硬性规矩，**托管方 2026-10-12 起从 CNB 换成自建 Gitea**
+（老板原话：「以后改动的代码不提交 cnb 了，改成提交到 gitea 上」；原来的 CNB 口径作废，
+`scripts/push_cnb.sh` 保留但已停用）：保持"线上跑着的代码 = 仓库里的代码"。**凡是重启上线（后端
+restart）或 `npm run build` 覆盖 `frontend/dist` 的代码改动，验证通过后都必须推 Gitea**；
+纯注释/配置靠 `hot_reload` 生效的也照推。落地脚本 `scripts/push_gitea.sh`（一次性带密码内嵌 URL；
+不带密码退出 2 / 工作区不干净退出 3 / 推完核对远端=本地并复查 `.git/config` 无明文；**密码不内置进
+任何文件**）。仓库 `https://git.wangjinding.com/Jidekin/api-gateway.git`、分支 `master`
+（`remote` 名就叫 `gitea`；原 `origin` 仍指 CNB，只是不再推它）。
 
 ## 测试
 
