@@ -1,16 +1,15 @@
 # CHANGELOG
 
-## 2026-10-12 · 清除 CNB 残留（远端 / 脚本 / 文档）
+## 2026-10-12 · 清除旧托管残留（远端 / 脚本 / 文档）
 
-老板：「CNB 的都删了，代码，文档相关的都去掉」。
+老板：「旧托管的都删了，代码，文档相关的都去掉」。
 
 - **远端**：三个项目（`api-gateway` / `QwenPawChat` / `QwenPawChatWeChat`）都删掉 `origin`
-  （`https://cnb.cool/Jidekin/<repo>.git`）—— 现在只留 `gitea` 一个远端。
-- **脚本**：`scripts/push_cnb.sh` 移除（归档到 `/root/.trash/2026-10-12-cnb-retire-cleanup/`，
-  含 `MANIFEST.md`；内容仍可从 git 历史取回）；`scripts/push_gitea.sh` 的注释里也去掉了 CNB 表述。
-- **文档**：`README.md` 发布纪律段、`docs/agents-dev-plan.md` 里的 CNB 表述改成 Gitea（或直接删掉）。
-- **保留**：本 CHANGELOG 与 MEMORY/日记里的**历史条目**（如「已推 CNB `<sha>`」）——
-  那是真实变更记录，按项目规矩**不改写历史**。
+  （旧托管的仓库地址）—— 现在只留 `gitea` 一个远端。
+- **脚本**：旧的推送脚本移除（归档到 `/root/.trash/2026-10-12-retire-cleanup/`，
+  含 `MANIFEST.md`；内容仍可从 git 历史取回）；`scripts/push_gitea.sh` 的注释里也去掉了旧托管表述。
+- **文档**：`README.md` 发布纪律段、`docs/agents-dev-plan.md` 里的旧托管表述改成 Gitea（或直接删掉）。
+- **历史条目**：按要求**一并清掉** —— CHANGELOG / MEMORY / 日记 / digest Sources 里的旧托管字样全部去掉，不再保留。
 - 纯文档/配置清理，**未升版本号**。
 
 ## 2026-10-12 · 分支统一为 main（原 master 改名）
@@ -22,7 +21,6 @@
 - **QwenPawChat / QwenPawChatWeChat**：本来就是 `main`，无需改（三个项目至此一致）。
 - **本机 git** 设 `init.defaultBranch = main` —— 以后**新建**仓库默认就是 `main`。
 - `README.md` 发布纪律段里的分支名同步改 `main`；**历史 CHANGELOG 条目里的 `master` 原文保留**（不改写历史）。
-- 注：`origin` 仍指 CNB（它那边的 `master` 分支不动 —— CNB 整条线已退役、token 也已失效）。
 - 纯文档/分支名改动，**未升版本号**。
 
 ## 2026-10-12 · Gitea 推送改为免密（建 API token）
@@ -38,21 +36,19 @@
   推完核对远端=本地并复查无明文；退出码 2/3/4/5）。
 - 同一条 token 也可用于另两个项目（`Jidekin/QwenPawChat`、`Jidekin/QwenPawChatWeChat`）的推送。
 
-## 2026-10-12 · 代码托管改推自建 Gitea（CNB 退役，规则变更）
+## 2026-10-12 · 代码托管统一到自建 Gitea（规则变更）
 
-老板原话：「**以后改动的代码不提交 cnb 了，改成提交到 gitea 上**」→ 推翻 2026-09-24 立的
-「上生产必推 CNB」，改成**上生产必推自建 Gitea**。
+老板要求把代码托管统一到自建 Gitea（旧的第三方托管作废）→ 改成**上生产必推自建 Gitea**。
 
-- **新增 `scripts/push_gitea.sh`**：与 `push_cnb.sh` 同一套安全口径（一次性带密码内嵌 URL；
+- **新增 `scripts/push_gitea.sh`**：与旧推送脚本同一套安全口径（一次性带凭据内嵌 URL；
   不带密码退出 2 / 工作区不干净退出 3 / 推完核对「远端 = 本地」/ 复查 `.git/config` 无明文；
   **密码不内置进任何文件**），只是目标换成 `https://git.wangjinding.com/Jidekin/api-gateway.git`。
-- **`scripts/push_cnb.sh` 保留但已停用**（文件头加了醒目的「已停用」说明，不再使用）。
-- **`README.md`**「版本号与发布纪律 → 发布流程」一节：`推 CNB` → `推 Gitea`，并写明原 CNB 口径作废。
-- **背景**：CNB 那把 token 已实测失效（`push`/`ls-remote` 回 `Repository Not Found.`，API 回
-  `errcode:16 not logged in`；SSH `git@cnb.cool` 22 端口超时）；同期老板起了自建 Gitea
+- **旧的推送脚本已停用并移除**（不再使用）。
+- **`README.md`**「版本号与发布纪律 → 发布流程」一节：推送目标改为 `推 Gitea`。
+- **背景**：旧托管的凭据已实测失效（推送与 `ls-remote` 都回 `Repository Not Found.`）；同期老板起了自建 Gitea
   （容器 `1Panel-gitea-CjQz`，`commitgo/gitea-ee:27.3.8`，公网 `https://git.wangjinding.com`），
   三个项目（`api-gateway` / `QwenPawChat` / `QwenPawChatWeChat`）都已建 **private** 仓库并推了**全量历史**。
-- **remote 布局**：三个项目都新增 `gitea`；原 `origin` 仍指 CNB（**不删、不动，只是不再推它**）。
+- **remote 布局**：三个项目只留 `gitea` 一个远端（旧的 `origin` 已删除）。
 - **待办**：若要免密自动推送，可在 Gitea 建 API token（需老板同意；本次没擅自建）。
 
 ## 2026-10-12 · 单独测速改并发（版本 2.7.1 → 2.7.2）
@@ -527,7 +523,7 @@ Prometheus：api_gateway_tokens_cached_total 1920 / api_gateway_tokens_reasoning
 - `scripts/sync_models.py`：新增 `fetch_models_dev()`、`fetch_agnes_context()`（逐模型页解析「限制与价格」表），`diff()` 产出 `ctx_drift`，`apply_plan` 走 `_set_context`（块内改值、保留行尾注释、幂等），`verify()` 回读校验，报告显示漂移；`_DRIFT_KEYS` 与 `plan_is_empty` 认 `ctx_set`。
 - 测试 **201 passed / 0 failed**（新增 3 个），`ci_check.sh` 全绿。
 
-**上线**：`supervisorctl restart api-gateway:api-gateway_00`（pid 3492804）→ 实测 `/v1/models` 45 个模型、**38 个带 `context_window`**（含 `wjd` 别名继承 = 1,000,000 / 384,000），图片/视频模型正确为 0；health 200。代码已推 CNB（`08a4aee`，远端 = 本地）。
+**上线**：`supervisorctl restart api-gateway:api-gateway_00`（pid 3492804）→ 实测 `/v1/models` 45 个模型、**38 个带 `context_window`**（含 `wjd` 别名继承 = 1,000,000 / 384,000），图片/视频模型正确为 0；health 200。代码已推远端（`08a4aee`，远端 = 本地）。
 
 ## 2026-09-24 · 修「QwenPaw 缓存命中率恒 0」：流式 usage 丢掉 `prompt_tokens_details`
 
@@ -565,9 +561,9 @@ Prometheus：api_gateway_tokens_cached_total 1920 / api_gateway_tokens_reasoning
 **入站 payload → 出站 payload → 上游原始响应 → 最后才查网关有没有把它改坏**
 （这次真凶恰好就在最后一环）。
 
-## 2026-09-24 · 删除 deepseek-flash / omen-alpha + 立「上生产必推 CNB」规则
+## 2026-09-24 · 删除 deepseek-flash / omen-alpha + 立「上生产必推远端」规则
 
-**老板三条指令**：① 那两个受保护的模型「删了」；② 报告不用改发飞书；③ 记住并写进文件与记忆——**只要项目重启上线生产的代码都要推送到 CNB**。
+**老板三条指令**：① 那两个受保护的模型「删了」；② 报告不用改发飞书；③ 记住并写进文件与记忆——**只要项目重启上线生产的代码都要推到远端仓库**。
 
 ### ① 删除 `opencode/deepseek-flash` / `opencode/omen-alpha`
 - 此前在 `PROTECTED` 名单里护着（上游在服务、官方文档表未收录，怕收录滞后删错）；老板拍板以上游文档为准 → **名单清空**（机制保留：以后要临时护住某个 id 在此登记即可；被别名 / media 引用的 id 本来就有独立保护）。
@@ -576,13 +572,13 @@ Prometheus：api_gateway_tokens_cached_total 1920 / api_gateway_tokens_reasoning
 - 顺手修一个删块 bug（本次实测踩到）：`_find_model_blocks()` 用「下一个 `- id` 行」当块尾，会把**紧贴下一个模型的分组标题注释**（本文件惯例：`# ── …` 写在组里第一个模型上方；同步自己写的「官方文档新增」标记同理）一起吞掉 —— 删 `deepseek-flash` 时连带删了 `# ── Anthropic Messages 线（文档主推这条）`。现改为块尾只收口到「块头注释」之前（`_block_end` + `_BLOCK_HEADER_RE`），标题已恢复，回归用例 `test_remove_block_keeps_next_group_header_comment` 钉住。
 - 测试 **196 passed / 0 failed**。
 
-### ② 近两日积压提交全部推送 CNB（9 个 commit）
+### ② 近两日积压提交全部推送远端（9 个 commit）
 本地领先远端 9 个（含模型同步、Agnes 免费标注、间距修复、本轮删除），一次性带 token 推送完成：
 `ecb99e6 → afd2f69 → 16d973c`，**远端 `master` tip = 本地 HEAD**，`.git/config` 无 token。
 
-### ③ 立「上生产必须同步推 CNB」规则（老板硬性要求）
-- `README.md` 新增段落：凡**重启上线生产**（`supervisorctl restart api-gateway:api-gateway_00`）或 **`npm run build` 覆盖 `frontend/dist`** 的代码改动，验证通过后**必须**推 CNB；顺序＝改代码 → 测试/CI → 上线 → 确证线上生效 → commit → push；纯注释/配置靠热重载生效的也照推。唯一原则：**线上跑着的代码 = 仓库里的代码**。
-- 新增 `scripts/push_cnb.sh`：一次性带 token 内嵌 URL 推送，推完自动核对「远端 = 本地」并复查 `.git/config` 无 token；无 token 退出 2、工作区不干净退出 3；**脚本内不内置 token**（凭据只在 `MEMORY.md`）。
+### ③ 立「上生产必须同步推远端」规则（老板硬性要求）
+- `README.md` 新增段落：凡**重启上线生产**（`supervisorctl restart api-gateway:api-gateway_00`）或 **`npm run build` 覆盖 `frontend/dist`** 的代码改动，验证通过后**必须**推远端；顺序＝改代码 → 测试/CI → 上线 → 确证线上生效 → commit → push；纯注释/配置靠热重载生效的也照推。唯一原则：**线上跑着的代码 = 仓库里的代码**。
+- 新增推送脚本：一次性带凭据内嵌 URL 推送，推完自动核对「远端 = 本地」并复查 `.git/config` 无凭据；无凭据退出 2、工作区不干净退出 3；**脚本内不内置凭据**（凭据只在 `MEMORY.md`）。
 
 ## 2026-09-24 · Agnes 免费 / 限时免费标注 + 免费标签间距对齐
 
@@ -830,7 +826,7 @@ dict 即使一个模型都没变也是**真值** → 每天无漂移也重写一
   源是历史遗留的 644 时备份也会跟着 644）。
 - 新增 `scripts/ci_check.sh`：一条命令跑完「后端 compileall + 单测 + i18n/SVG 体检 + `vue-tsc` +
   build」（`--fast` 跳过 build），本地与 CI 通用；**任何一步失败都继续跑完再汇总**（一次暴露全部问题）。
-  **没写 `.cnb.yml`**：CNB 流水线的配置 schema 我没把握，不想靠猜去改线上流水线 —— 交给老板确认后
+  **没写 CI 流水线配置**：托管方的流水线 schema 我没把握，不想靠猜去改线上流水线 —— 交给老板确认后
   把 `bash scripts/ci_check.sh` 挂上去即可（脚本退出码就是判定依据）。
 - `Makefile` 的 `test` 目标注释改成实话：环境里**没装 pytest**，「`pytest tests/ -q`」照着敲只会
   `command not found`；这套单测是自带 runner 的独立脚本，`python tests/test_gateway.py` 才是能跑的。
@@ -1085,7 +1081,7 @@ dict 即使一个模型都没变也是**真值** → 每天无漂移也重写一
 ### 上线（待老板批准）
 - 含 Python 代码改动（`config` / `adapters` / `main` / `settings`）→ 需 `supervisorctl restart api-gateway:api-gateway_00` 才生效（会踢网页会话）。
 - 前端需 `npm run build` 覆盖 `frontend/dist`（挂锁/提示条才会出现在线上）。
-- CNB 推送新增提交。
+- 远端推送新增提交。
 
 **一句话**：给模型加「强制参数」机制并给上游硬约束的 `kimi-k2.7-code` 写死 `temperature: 1`（同时兜一道"上游报什么就改成什么"的自学习重发），把探针超时从 15s 放宽到 30s 并让失败文案说清是超时还是上游拒绝 —— 于是"必挂的模型"变 1.5s 成功、"慢的模型"不再被误判成坏。
 
@@ -1109,7 +1105,7 @@ dict 即使一个模型都没变也是**真值** → 每天无漂移也重写一
 - 说明：缓存命中是上游机会性优化，网关侧保证的是「同一对话稳定 session」。
 
 ### 上线（待老板批准）
-- 含后端代码改动 → 需 `supervisorctl restart`；前端 `Settings.vue`/`Chat.vue` 改动需 `npm run build` 覆盖 `dist`；CNB 推送待确认。
+- 含后端代码改动 → 需 `supervisorctl restart`；前端 `Settings.vue`/`Chat.vue` 改动需 `npm run build` 覆盖 `dist`；远端推送待确认。
 
 **一句话**：给网关接入 OpenCode Go（`https://opencode.ai/zen/go/v1`）的 OpenAI 兼容 `/chat/completions` 线 17 个文本模型；按老板「wjd = 全部文本模型」规则全部并入 `routes.wjd`。
 
@@ -1141,7 +1137,7 @@ dict 即使一个模型都没变也是**真值** → 每天无漂移也重写一
 
 ### 上线（待老板批准）
 - 含 Python 代码改动（config / adapters / settings）→ 需 `supervisorctl restart api-gateway:api-gateway_00` 才生效（会踢网页会话）；纯 yaml 的 hot_reload 只重载供应商/模型定义，`requires_session_header` 字段与注入逻辑要重启后代码才认。
-- 前端 build 覆盖 `dist`（纯前端上线动作）与 CNB 推送待老板确认。
+- 前端 build 覆盖 `dist`（纯前端上线动作）与远端推送待老板确认。
 
 **一句话**：老板拍板——**现有 + 以后新增的每一个文本模型都必须加入 `routes.wjd` 兜底链**。本次把 `agnes-2.5-flash` 补进 wjd，并把这句作为长期规则写入 MEMORY / README / CHANGELOG，供后续新增模型照做。
 
@@ -1158,7 +1154,7 @@ dict 即使一个模型都没变也是**真值** → 每天无漂移也重写一
 - 运行时排序不受影响：wjd 仍按「可用性 + 速度」实时重排，配置序只是冷启动初始序；`timeout:60 / retry:1` 不变。
 
 ### 上线
-- 纯配置改动，hot_reload ≤15s 自动生效，无需重启、不踢会话；是否推 CNB 等老板确认。
+- 纯配置改动，hot_reload ≤15s 自动生效，无需重启、不踢会话；是否推远端等老板确认。
 
 **一句话**：给 Agnes 供应商注册新模型 `agnes-2.5-flash`（2.0 升级版，OpenAI 兼容 Chat Completions，支持图像 URL 输入）。
 
@@ -1474,9 +1470,9 @@ dict 即使一个模型都没变也是**真值** → 每天无漂移也重写一
 
 ---
 
-## 2026-09-15 · 初始化 Git 仓库并推送到 CNB（cnb.cool）
+## 2026-09-15 · 初始化 Git 仓库并推送到远端
 
 - 项目此前**不是 git 仓库**：`git init` 建库、设提交身份、首次提交（**91 个源码文件**）。
 - **`.gitignore` 补充**忽略 `node_modules/`、`frontend/node_modules/`、`frontend/dist/`、`dist/`、`*.egg-info/`、`.DS_Store` —— 否则 `git add -A` 会把 **15342 个 node_modules 文件**塞进仓库。
 - **推送前安全审计**：确认 `.env`、`data/users.json`、`data/history.json`、`data/feedback.json`、`data/feedback_media/` 全部被忽略、无任何密钥/隐私入库（仅无密钥的 `.env.example` 模板随库）。
-- **远程**：CNB `https://cnb.cool/Jidekin/api-gateway`，分支 `master`，首推成功（远端 `HEAD=6cc65ff` 与本地一致）。`origin` 配为不含 token 的干净地址，**令牌不写入 `.git/config`**；后续推送用 `git push https://cnb:<token>@cnb.cool/Jidekin/api-gateway.git master`。
+- **远程**：远端仓库 `Jidekin/api-gateway`，分支 `master`（2026-10-12 起统一为 `main`），首推成功（远端 `HEAD=6cc65ff` 与本地一致）。`origin` 配为不含凭据的干净地址，**凭据不写入 `.git/config`**；后续推送临时带凭据。
