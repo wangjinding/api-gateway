@@ -357,7 +357,7 @@ scripts/ci_check.sh     跑绿
 回归 209 → 约 222 条全过
 ★ 上线顺序（⑧ 已定）：**后端先行** —— 先发后端（含 GET /auth/me 与 features 下发），
    再 build 前端。前端 store/session.ts 要兼容"后端没有 /auth/me"（404 → 按 enabled:false）
-上线：restart → 真机验证 → commit → 推 CNB（项目硬性规矩）
+上线：restart → 真机验证 → commit → 推 Gitea（项目硬性规矩）
 文档：README + CHANGELOG 各记一轮
 ```
 

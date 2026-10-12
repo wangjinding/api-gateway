@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-10-12 · 清除 CNB 残留（远端 / 脚本 / 文档）
+
+老板：「CNB 的都删了，代码，文档相关的都去掉」。
+
+- **远端**：三个项目（`api-gateway` / `QwenPawChat` / `QwenPawChatWeChat`）都删掉 `origin`
+  （`https://cnb.cool/Jidekin/<repo>.git`）—— 现在只留 `gitea` 一个远端。
+- **脚本**：`scripts/push_cnb.sh` 移除（归档到 `/root/.trash/2026-10-12-cnb-retire-cleanup/`，
+  含 `MANIFEST.md`；内容仍可从 git 历史取回）；`scripts/push_gitea.sh` 的注释里也去掉了 CNB 表述。
+- **文档**：`README.md` 发布纪律段、`docs/agents-dev-plan.md` 里的 CNB 表述改成 Gitea（或直接删掉）。
+- **保留**：本 CHANGELOG 与 MEMORY/日记里的**历史条目**（如「已推 CNB `<sha>`」）——
+  那是真实变更记录，按项目规矩**不改写历史**。
+- 纯文档/配置清理，**未升版本号**。
+
 ## 2026-10-12 · 分支统一为 main（原 master 改名）
 
 老板：「统一成 main，都默认 main 分支」。

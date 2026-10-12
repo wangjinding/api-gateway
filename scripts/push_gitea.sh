@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 推送到自建 Gitea（2026-10-12 老板改口径：以后改动只推 Gitea，不再推 CNB）
+# 推送到自建 Gitea（2026-10-12 起的唯一代码托管出口）
 #
 # 用法（**默认免密**，什么都不用带）：
 #   bash scripts/push_gitea.sh
@@ -13,14 +13,12 @@
 #   3) 环境变量 GITEA_PASS（账号密码）
 #   4) 本机文件 ~/.gitea_token（600，只有本机、不在任何仓库里）← **日常走这条，即免密**
 #
-# 安全口径（与已停用的 push_cnb.sh 同一套）：
+# 安全口径：
 #   · 凭据只**一次性内嵌进本次推送 URL**，用完即走 —— 本脚本**不写 `.git/config`**，
 #     也不把凭据打进任何输出（输出里自动打码）。
 #   · 推完自动核对「远端 HEAD = 本地 HEAD」，并复查 `.git/config` 没有明文凭据。
 #   · 退出码：2=没凭据 / 3=工作区不干净 / 4=推送后远端≠本地 / 5=.git/config 出现明文。
 #
-# 为什么改推 Gitea：CNB 那把 token 2026-10-12 实测已失效（Repository Not Found /
-#   not logged in），老板同期起了自建 Gitea（https://git.wangjinding.com）。
 # 凭据存放（**别丢**）：token 记在 `MEMORY.md`「自建 Gitea」段 + 本机 `~/.gitea_token`；
 #   **绝不写进本仓库任何文件**（仓库是要推到远端的）。
 set -euo pipefail
