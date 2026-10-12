@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-10-12 · 分支统一为 main（原 master 改名）
+
+老板：「统一成 main，都默认 main 分支」。
+
+- **api-gateway**：本地分支 `master` → `main`（`git branch -m master main`）；Gitea 侧推上 `main`
+  后把仓库默认分支改成 `main`、删掉旧的 `master` 分支。
+- **QwenPawChat / QwenPawChatWeChat**：本来就是 `main`，无需改（三个项目至此一致）。
+- **本机 git** 设 `init.defaultBranch = main` —— 以后**新建**仓库默认就是 `main`。
+- `README.md` 发布纪律段里的分支名同步改 `main`；**历史 CHANGELOG 条目里的 `master` 原文保留**（不改写历史）。
+- 注：`origin` 仍指 CNB（它那边的 `master` 分支不动 —— CNB 整条线已退役、token 也已失效）。
+- 纯文档/分支名改动，**未升版本号**。
+
 ## 2026-10-12 · Gitea 推送改为免密（建 API token）
 
 老板：「新建凭据吧，把凭据记到记忆和 md 文件里，不要丢失了，后面直接免密推送」。

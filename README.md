@@ -1388,7 +1388,7 @@ VERSION = "2.4.0"     # ← 只改这一处
          后端/代码：supervisorctl restart api-gateway:api-gateway_00
        → 真机验证（线上 healthz / 页面 / 接口）
        → git commit
-       → 推 Gitea（scripts/push_gitea.sh，仓库 Jidekin/api-gateway 分支 master）
+       → 推 Gitea（scripts/push_gitea.sh，仓库 Jidekin/api-gateway 分支 main）
 ```
 
 **「只要上生产就必须推」** 是既有硬性规矩，**托管方 2026-10-12 起从 CNB 换成自建 Gitea**
@@ -1400,8 +1400,9 @@ restart）或 `npm run build` 覆盖 `frontend/dist` 的代码改动，验证通
 的顺序取凭据（token 是 2026-10-12 建的 Gitea API token，scope `write:repository`）；
 凭据只一次性内嵌进本次推送 URL，**不写 `.git/config`、也不内置进仓库任何文件**；
 退出码 2=没凭据 / 3=工作区不干净 / 4=推送后远端≠本地 / 5=`.git/config` 出现明文。
-仓库 `https://git.wangjinding.com/Jidekin/api-gateway.git`、分支 `master`
-（`remote` 名就叫 `gitea`；原 `origin` 仍指 CNB，只是不再推它）。
+仓库 `https://git.wangjinding.com/Jidekin/api-gateway.git`、分支 `main`
+（`remote` 名就叫 `gitea`；原 `origin` 仍指 CNB，只是不再推它）。**三个项目分支已统一为 `main`**
+（2026-10-12：api-gateway 原 `master` 改名 `main`，Gitea 默认分支同步改、旧 `master` 分支删除）。
 
 ## 测试
 
