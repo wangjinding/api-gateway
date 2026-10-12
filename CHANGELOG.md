@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-10-12 · Gitea 推送改为免密（建 API token）
+
+老板：「新建凭据吧，把凭据记到记忆和 md 文件里，不要丢失了，后面直接免密推送」。
+
+- **建了 Gitea API token**：名字 `push-automation`，scope `write:repository`（够 git push 私有仓库）。
+  token 值**只落在两处**：本机 `~/.gitea_token`（权限 600、不在任何仓库里）与 `MEMORY.md`
+  「自建 Gitea」段；**绝不写进本仓库任何文件**（仓库是要推到远端的，写进去等于把凭据推上去）。
+- **`scripts/push_gitea.sh` 改为默认免密**：凭据查找顺序
+  `GITEA_TOKEN` 环境变量 → 命令行参数 → `GITEA_PASS` → `~/.gitea_token`；日常直接
+  `bash scripts/push_gitea.sh` 即可。其余安全口径不变（一次性内嵌、输出打码、不写 `.git/config`、
+  推完核对远端=本地并复查无明文；退出码 2/3/4/5）。
+- 同一条 token 也可用于另两个项目（`Jidekin/QwenPawChat`、`Jidekin/QwenPawChatWeChat`）的推送。
+
 ## 2026-10-12 · 代码托管改推自建 Gitea（CNB 退役，规则变更）
 
 老板原话：「**以后改动的代码不提交 cnb 了，改成提交到 gitea 上**」→ 推翻 2026-09-24 立的
